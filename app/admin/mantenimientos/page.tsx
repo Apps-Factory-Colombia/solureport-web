@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { MaintenanceDialog } from "@/components/mantenimientos/maintenance-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -30,6 +31,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
   Plus,
   Search,
   MoreHorizontal,
@@ -41,12 +50,21 @@ import {
   CheckCircle2,
   Play,
   AlertTriangle,
+  Bell,
+  UserCheck,
+  ArrowRight,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
 } from "lucide-react";
-import { Maintenance, MaintenanceStatus } from "@/lib/types";
-import { mockMaintenances, mockClients, mockUsers } from "@/lib/data/mock-data";
+import { Maintenance, MaintenanceStatus, Client, User } from "@/lib/types";
+import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/supabase/services/mantenimientos";
+import { getClientes } from "@/lib/supabase/services/clientes";
+import { getUsuarios } from "@/lib/supabase/services/usuarios";
+import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { cn } from "@/lib/utils";
 
-const statusConfig: Record<MaintenanceStatus, { label: string; color: string; icon: React.ElementType }> = {
+const statusConfig: Record<string, { label: string; color: string; icon: React.ElementType }> = {
   programado: {
     label: "Programado",
     color: "bg-blue-500/10 text-blue-400 border-blue-500/20",
@@ -67,18 +85,42 @@ const statusConfig: Record<MaintenanceStatus, { label: string; color: string; ic
     color: "bg-amber-500/10 text-amber-400 border-amber-500/20",
     icon: AlertTriangle,
   },
+  en_progreso: {
+    label: "En Progreso",
+    color: "bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20",
+    icon: Play,
+  },
+  completado: {
+    label: "Completado",
+    color: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+    icon: CheckCircle2,
+  },
+};
+
+const defaultStatusConfig = {
+  label: "Pendiente",
+  color: "bg-amber-500/10 text-amber-400 border-amber-500/20",
+  icon: AlertTriangle,
 };
 
 const daysOfWeek = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
 
-function MiniCalendar({ maintenances }: { maintenances: Maintenance[] }) {
+interface MiniCalendarProps {
+  maintenances: Maintenance[];
+  currentMonth: Date;
+  onMonthChange: (date: Date) => void;
+  selectedDate: Date | null;
+  onSelectDate: (date: Date | null) => void;
+}
+
+function MiniCalendar({ maintenances, currentMonth, onMonthChange, selectedDate, onSelectDate }: MiniCalendarProps) {
   const today = new Date();
-  const year = today.getFullYear();
-  const month = today.getMonth();
+  const year = currentMonth.getFullYear();
+  const month = currentMonth.getMonth();
   const firstDay = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
 
-  const monthName = today.toLocaleDateString("es-ES", { month: "long", year: "numeric" });
+  const monthName = currentMonth.toLocaleDateString("es-ES", { month: "long" });
 
   const days: (number | null)[] = [];
   for (let i = 0; i < firstDay; i++) days.push(null);
@@ -89,12 +131,25 @@ function MiniCalendar({ maintenances }: { maintenances: Maintenance[] }) {
     return maintenances.filter((m) => m.fechaProgramada === dateStr);
   };
 
+  const nextMonth = () => onMonthChange(new Date(year, month + 1, 1));
+  const prevMonth = () => onMonthChange(new Date(year, month - 1, 1));
+
   return (
     <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
       <CardContent className="p-4">
-        <h3 className="text-sm font-semibold text-foreground mb-3 capitalize">
-          {monthName}
-        </h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-foreground capitalize">
+            {monthName} {year}
+          </h3>
+          <div className="flex gap-1">
+            <Button variant="ghost" size="icon" className="h-6 w-6 hover:bg-secondary/80" onClick={prevMonth}>
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <Button variant="ghost" size="icon" className="h-6 w-6 hover:bg-secondary/80" onClick={nextMonth}>
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
         <div className="grid grid-cols-7 gap-1">
           {daysOfWeek.map((d) => (
             <div key={d} className="text-center text-[10px] font-medium text-muted-foreground py-1">
@@ -104,16 +159,24 @@ function MiniCalendar({ maintenances }: { maintenances: Maintenance[] }) {
           {days.map((day, i) => {
             if (day === null) return <div key={`e-${i}`} />;
             const dayMaintenances = getMaintenancesForDay(day);
-            const isToday = day === today.getDate();
+            const isToday = day === today.getDate() && month === today.getMonth() && year === today.getFullYear();
+            const isSelected = selectedDate?.getDate() === day && selectedDate?.getMonth() === month && selectedDate?.getFullYear() === year;
 
             return (
               <div
                 key={day}
+                onClick={() => {
+                  const newDate = new Date(year, month, day);
+                  if (isSelected) {
+                    onSelectDate(null);
+                  } else {
+                    onSelectDate(newDate);
+                  }
+                }}
                 className={cn(
-                  "relative flex flex-col items-center justify-center rounded-md p-1 text-xs transition-colors",
-                  isToday && "bg-gold/10 text-gold font-bold",
-                  dayMaintenances.length > 0 && !isToday && "bg-secondary/50",
-                  "hover:bg-secondary/80 cursor-pointer"
+                  "relative flex flex-col items-center justify-center rounded-md p-1 text-xs transition-colors cursor-pointer",
+                  isSelected ? "bg-gold text-background font-bold" : isToday ? "bg-gold/10 text-gold font-bold" : dayMaintenances.length > 0 ? "bg-secondary/50" : "",
+                  !isSelected && "hover:bg-secondary/80"
                 )}
               >
                 {day}
@@ -127,7 +190,8 @@ function MiniCalendar({ maintenances }: { maintenances: Maintenance[] }) {
                           m.estado === "programado" && "bg-blue-400",
                           m.estado === "en_ejecucion" && "bg-cyan-neon",
                           m.estado === "realizado" && "bg-emerald-400",
-                          m.estado === "pendiente" && "bg-amber-400"
+                          m.estado === "pendiente" && "bg-amber-400",
+                          isSelected && "bg-background"
                         )}
                       />
                     ))}
@@ -157,15 +221,104 @@ function MiniCalendar({ maintenances }: { maintenances: Maintenance[] }) {
 }
 
 export default function MantenimientosPage() {
-  const [maintenances, setMaintenances] = useState<Maintenance[]>(mockMaintenances);
+  const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("todos");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingMaintenance, setEditingMaintenance] = useState<Maintenance | null>(null);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [schedulingMaint, setSchedulingMaint] = useState<Maintenance | null>(null);
+  const [scheduleTecnico, setScheduleTecnico] = useState("");
+  const [scheduleDate, setScheduleDate] = useState("");
+  const [scheduleTime, setScheduleTime] = useState("");
+  const [maintenanceToDelete, setMaintenanceToDelete] = useState<Maintenance | null>(null);
+  const [deletingMaintenanceId, setDeletingMaintenanceId] = useState<string | null>(null);
+
+  const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
+  const [calendarSelectedDate, setCalendarSelectedDate] = useState<Date | null>(null);
+
+  const parseLocalDate = (dateStr: string) => {
+    const [year, month, day] = dateStr.split("-").map(Number);
+    return new Date(year, month - 1, day);
+  };
+
+  const loadData = useCallback(async () => {
+    try {
+      const [m, c, u] = await Promise.all([getMantenimientos(), getClientes(), getUsuarios()]);
+      setMaintenances(m);
+      setClients(c);
+      setUsers(u);
+    } catch (err) {
+      console.error("Error cargando mantenimientos:", err);
+    }
+  }, []);
+
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const today = new Date();
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const threeDaysFromNow = new Date(today);
+  threeDaysFromNow.setDate(today.getDate() + 3);
+
+  const proximosMantenimientos = useMemo(() => {
+    return maintenances.filter((m) => {
+      if (m.estado !== "pendiente") return false;
+      const fecha = parseLocalDate(m.fechaProgramada);
+      const diffTime = fecha.getTime() - todayStart.getTime();
+      const diffDays = diffTime / (1000 * 60 * 60 * 24);
+      return diffDays >= 0 && diffDays <= 3;
+    });
+  }, [maintenances, todayStart]);
+
+  const programados = useMemo(() => {
+    return maintenances.filter((m) => m.estado === "programado");
+  }, [maintenances]);
+
+  const technicians = users.filter(
+    (u) => u.rol === "tecnico" && u.estado === "activo"
+  );
+
+  const handleSchedule = async () => {
+    if (!schedulingMaint) return;
+    try {
+      const tecnicoId = scheduleTecnico || schedulingMaint.tecnicoId;
+      const fecha = scheduleDate || schedulingMaint.fechaProgramada;
+      await updateMantenimiento(schedulingMaint.id, {
+        estado: "programado" as MaintenanceStatus,
+        tecnicoId,
+        fechaProgramada: fecha,
+        observaciones: scheduleTime
+          ? `Hora: ${scheduleTime}. ${schedulingMaint.observaciones || ""}`
+          : schedulingMaint.observaciones,
+      });
+
+      const client = clients.find((c) => c.id === schedulingMaint.clienteId);
+      await createNotificacion({
+        usuarioId: tecnicoId,
+        titulo: "Mantenimiento Programado",
+        mensaje: `Se te ha asignado un mantenimiento en ${client?.edificio || "un edificio"} para el ${fecha}${scheduleTime ? ` a las ${scheduleTime}` : ""}. Revisa los detalles en la app.`,
+        tipo: "mantenimiento",
+        datos: {
+          mantenimientoId: schedulingMaint.id,
+          clienteId: schedulingMaint.clienteId,
+          fecha,
+          hora: scheduleTime || null,
+        },
+      });
+
+      setScheduleOpen(false);
+      setSchedulingMaint(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error programando mantenimiento:", err);
+    }
+  };
 
   const filtered = maintenances.filter((m) => {
-    const client = mockClients.find((c) => c.id === m.clienteId);
-    const tech = mockUsers.find((u) => u.id === m.tecnicoId);
+    const client = clients.find((c) => c.id === m.clienteId);
+    const tech = users.find((u) => u.id === m.tecnicoId);
     const matchesSearch =
       client?.edificio.toLowerCase().includes(search.toLowerCase()) ||
       client?.nombre.toLowerCase().includes(search.toLowerCase()) ||
@@ -175,19 +328,50 @@ export default function MantenimientosPage() {
     return matchesSearch && matchesStatus;
   });
 
-  const handleSave = (data: Partial<Maintenance>) => {
-    if (editingMaintenance) {
-      setMaintenances((prev) =>
-        prev.map((m) => (m.id === editingMaintenance.id ? { ...m, ...data } : m))
-      );
-    } else {
-      setMaintenances((prev) => [...prev, data as Maintenance]);
+  const calendarFilteredMaintenances = useMemo(() => {
+    return filtered.filter((m) => {
+      if (!m.fechaProgramada) return false;
+      if (calendarSelectedDate) {
+        const dateStr = `${calendarSelectedDate.getFullYear()}-${String(calendarSelectedDate.getMonth() + 1).padStart(2, "0")}-${String(calendarSelectedDate.getDate()).padStart(2, "0")}`;
+        return m.fechaProgramada === dateStr;
+      } else {
+        const year = calendarMonth.getFullYear();
+        const month = calendarMonth.getMonth() + 1;
+        const prefix = `${year}-${String(month).padStart(2, "0")}`;
+        return m.fechaProgramada.startsWith(prefix);
+      }
+    });
+  }, [filtered, calendarMonth, calendarSelectedDate]);
+
+  const handleSave = async (data: Partial<Maintenance>) => {
+    try {
+      if (editingMaintenance) {
+        await updateMantenimiento(editingMaintenance.id, data);
+      } else {
+        await createMantenimiento(data);
+      }
+      setEditingMaintenance(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error guardando mantenimiento:", err);
     }
-    setEditingMaintenance(null);
   };
 
-  const handleDelete = (id: string) => {
-    setMaintenances((prev) => prev.filter((m) => m.id !== id));
+  const handleDelete = async (id: string) => {
+    setDeletingMaintenanceId(id);
+    try {
+      await deleteMantenimiento(id);
+      setMaintenanceToDelete(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error eliminando mantenimiento:", err);
+      const message = err instanceof Error
+        ? err.message
+        : "No se pudo eliminar el mantenimiento. Verifica relaciones activas.";
+      alert(message);
+    } finally {
+      setDeletingMaintenanceId(null);
+    }
   };
 
   return (
@@ -237,7 +421,29 @@ export default function MantenimientosPage() {
               className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
             >
               <List className="h-4 w-4 mr-2" />
-              Lista
+              Todos
+            </TabsTrigger>
+            <TabsTrigger
+              value="programados"
+              className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
+            >
+              <UserCheck className="h-4 w-4 mr-2" />
+              Programados
+              <Badge className="ml-1.5 bg-blue-500/20 text-blue-400 text-[10px] border-0 px-1.5">
+                {programados.length}
+              </Badge>
+            </TabsTrigger>
+            <TabsTrigger
+              value="proximos"
+              className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
+            >
+              <Bell className="h-4 w-4 mr-2" />
+              Próximos
+              {proximosMantenimientos.length > 0 && (
+                <Badge className="ml-1.5 h-5 w-5 rounded-full bg-red-500 text-[10px] text-white p-0 flex items-center justify-center border-0">
+                  {proximosMantenimientos.length}
+                </Badge>
+              )}
             </TabsTrigger>
             <TabsTrigger
               value="calendario"
@@ -247,6 +453,162 @@ export default function MantenimientosPage() {
               Calendario
             </TabsTrigger>
           </TabsList>
+
+          <TabsContent value="proximos">
+            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                  <Bell className="h-5 w-5 text-amber-400" />
+                  Mantenimientos por Realizar (Próximos 3 días)
+                </CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Estos mantenimientos se cargan automáticamente 3 días antes de su fecha. Asigne técnico, fecha y hora para programarlos.
+                </p>
+              </CardHeader>
+              <CardContent>
+                {proximosMantenimientos.length === 0 ? (
+                  <div className="text-center py-8">
+                    <CheckCircle2 className="h-12 w-12 text-emerald-400/30 mx-auto mb-3" />
+                    <p className="text-sm text-muted-foreground">No hay mantenimientos próximos a realizar</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {proximosMantenimientos.map((m) => {
+                      const client = clients.find((c) => c.id === m.clienteId);
+                      const tech = users.find((u) => u.id === m.tecnicoId);
+                      const fecha = parseLocalDate(m.fechaProgramada);
+                      const diffDays = Math.floor(
+                        (fecha.getTime() - todayStart.getTime()) / (1000 * 60 * 60 * 24)
+                      );
+
+                      return (
+                        <div
+                          key={m.id}
+                          className="flex items-center justify-between rounded-lg border border-amber-500/20 bg-amber-500/5 p-4"
+                        >
+                          <div className="flex items-center gap-4">
+                            <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-amber-500/10">
+                              <Clock className="h-6 w-6 text-amber-400" />
+                            </div>
+                            <div>
+                              <p className="font-medium text-foreground">{client?.edificio}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {client?.nombre} · Fecha: {m.fechaProgramada}
+                              </p>
+                              {tech && (
+                                <p className="text-xs text-foreground/60">
+                                  Técnico actual: {tech.nombre} {tech.apellido}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "text-xs",
+                                diffDays <= 0
+                                  ? "bg-red-500/10 text-red-400 border-red-500/20"
+                                  : diffDays === 1
+                                    ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                    : "bg-blue-500/10 text-blue-400 border-blue-500/20"
+                              )}
+                            >
+                              {diffDays <= 0 ? "HOY" : `En ${diffDays} día(s)`}
+                            </Badge>
+                            <Button
+                              onClick={() => {
+                                setSchedulingMaint(m);
+                                setScheduleTecnico(m.tecnicoId);
+                                setScheduleDate(m.fechaProgramada);
+                                setScheduleTime("");
+                                setScheduleOpen(true);
+                              }}
+                              size="sm"
+                              className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+                            >
+                              <UserCheck className="h-4 w-4" />
+                              Programar
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="programados">
+            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                  <UserCheck className="h-5 w-5 text-blue-400" />
+                  Mantenimientos Programados
+                </CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Mantenimientos con técnico asignado, fecha y hora confirmados. Se notifica automáticamente al aplicativo.
+                </p>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-border/50 hover:bg-transparent">
+                      <TableHead className="text-muted-foreground">Cliente</TableHead>
+                      <TableHead className="text-muted-foreground">Técnico</TableHead>
+                      <TableHead className="text-muted-foreground">Fecha</TableHead>
+                      <TableHead className="text-muted-foreground">Observaciones</TableHead>
+                      <TableHead className="text-muted-foreground">Estado</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {programados.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
+                          No hay mantenimientos programados
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      programados.map((m) => {
+                        const client = clients.find((c) => c.id === m.clienteId);
+                        const tech = users.find((u) => u.id === m.tecnicoId);
+                        return (
+                          <TableRow key={m.id} className="border-border/50 hover:bg-secondary/30">
+                            <TableCell>
+                              <p className="font-medium text-foreground">{client?.edificio}</p>
+                              <p className="text-xs text-muted-foreground">{client?.nombre}</p>
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">
+                              {tech?.nombre} {tech?.apellido}
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">
+                              <p>{m.fechaProgramada}</p>
+                              {m.horaProgramada && (
+                                <p className="text-xs text-muted-foreground">{m.horaProgramada}</p>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80 max-w-48 truncate">
+                              {m.observaciones || "—"}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant="outline"
+                                className="text-xs bg-blue-500/10 text-blue-400 border-blue-500/20"
+                              >
+                                <Bell className="h-3 w-3 mr-1" />
+                                Notificado
+                              </Badge>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </TabsContent>
 
           <TabsContent value="lista">
             <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
@@ -264,9 +626,9 @@ export default function MantenimientosPage() {
                   </TableHeader>
                   <TableBody>
                     {filtered.map((m) => {
-                      const client = mockClients.find((c) => c.id === m.clienteId);
-                      const tech = mockUsers.find((u) => u.id === m.tecnicoId);
-                      const status = statusConfig[m.estado];
+                      const client = clients.find((c) => c.id === m.clienteId);
+                      const tech = users.find((u) => u.id === m.tecnicoId);
+                      const status = statusConfig[m.estado] || defaultStatusConfig;
                       const StatusIcon = status.icon;
 
                       return (
@@ -278,7 +640,12 @@ export default function MantenimientosPage() {
                           <TableCell className="text-sm text-foreground/80">
                             {tech?.nombre} {tech?.apellido}
                           </TableCell>
-                          <TableCell className="text-sm text-foreground/80">{m.fechaProgramada}</TableCell>
+                          <TableCell className="text-sm text-foreground/80">
+                            <p>{m.fechaProgramada}</p>
+                            {m.horaProgramada && (
+                              <p className="text-xs text-muted-foreground">{m.horaProgramada}</p>
+                            )}
+                          </TableCell>
                           <TableCell className="text-sm text-foreground/80">{m.proximaFecha || "—"}</TableCell>
                           <TableCell>
                             <Badge variant="outline" className={cn("text-xs gap-1", status.color)}>
@@ -301,7 +668,7 @@ export default function MantenimientosPage() {
                                   <Pencil className="h-4 w-4" /> Editar
                                 </DropdownMenuItem>
                                 <DropdownMenuItem
-                                  onClick={() => handleDelete(m.id)}
+                                  onClick={() => setMaintenanceToDelete(m)}
                                   className="gap-2 text-destructive focus:text-destructive cursor-pointer"
                                 >
                                   <Trash2 className="h-4 w-4" /> Eliminar
@@ -321,40 +688,62 @@ export default function MantenimientosPage() {
           <TabsContent value="calendario">
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
               <div className="lg:col-span-1">
-                <MiniCalendar maintenances={maintenances} />
+                <MiniCalendar
+                  maintenances={maintenances}
+                  currentMonth={calendarMonth}
+                  onMonthChange={setCalendarMonth}
+                  selectedDate={calendarSelectedDate}
+                  onSelectDate={setCalendarSelectedDate}
+                />
               </div>
               <div className="lg:col-span-2 space-y-3">
-                <h3 className="text-sm font-semibold text-foreground">
-                  Mantenimientos del período
-                </h3>
-                {filtered.map((m) => {
-                  const client = mockClients.find((c) => c.id === m.clienteId);
-                  const tech = mockUsers.find((u) => u.id === m.tecnicoId);
-                  const status = statusConfig[m.estado];
-                  const StatusIcon = status.icon;
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold text-foreground">
+                    Mantenimientos del {calendarSelectedDate ? "día seleccionado" : "mes seleccionado"}
+                  </h3>
+                  {calendarSelectedDate && (
+                    <Button variant="ghost" size="sm" onClick={() => setCalendarSelectedDate(null)} className="h-8 text-xs">
+                      Ver todo el mes
+                    </Button>
+                  )}
+                </div>
+                {calendarFilteredMaintenances.length === 0 ? (
+                  <div className="text-center py-10 rounded-lg border border-border/50 bg-card/50">
+                    <CalendarDays className="h-10 w-10 text-muted-foreground/30 mx-auto mb-3" />
+                    <p className="text-sm text-muted-foreground">
+                      No hay mantenimientos programados para {calendarSelectedDate ? "este día" : "este mes"}
+                    </p>
+                  </div>
+                ) : (
+                  calendarFilteredMaintenances.map((m) => {
+                    const client = clients.find((c) => c.id === m.clienteId);
+                    const tech = users.find((u) => u.id === m.tecnicoId);
+                    const status = statusConfig[m.estado] || defaultStatusConfig;
+                    const StatusIcon = status.icon;
 
-                  return (
-                    <div
-                      key={m.id}
-                      className="flex items-center justify-between rounded-lg border border-border/50 bg-card/80 p-4 hover:bg-secondary/30 transition-colors"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={cn("flex h-10 w-10 items-center justify-center rounded-lg", status.color.split(" ")[0])}>
-                          <StatusIcon className={cn("h-5 w-5", status.color.split(" ")[1])} />
+                    return (
+                      <div
+                        key={m.id}
+                        className="flex items-center justify-between rounded-lg border border-border/50 bg-card/80 p-4 hover:bg-secondary/30 transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={cn("flex h-10 w-10 items-center justify-center rounded-lg", status.color.split(" ")[0])}>
+                            <StatusIcon className={cn("h-5 w-5", status.color.split(" ")[1])} />
+                          </div>
+                          <div>
+                            <p className="font-medium text-foreground">{client?.edificio}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {tech?.nombre} {tech?.apellido} · {m.fechaProgramada} {m.horaProgramada ? `· ${m.horaProgramada}` : ""}
+                            </p>
+                          </div>
                         </div>
-                        <div>
-                          <p className="font-medium text-foreground">{client?.edificio}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {tech?.nombre} {tech?.apellido} · {m.fechaProgramada}
-                          </p>
-                        </div>
+                        <Badge variant="outline" className={cn("text-xs", status.color)}>
+                          {status.label}
+                        </Badge>
                       </div>
-                      <Badge variant="outline" className={cn("text-xs", status.color)}>
-                        {status.label}
-                      </Badge>
-                    </div>
-                  );
-                })}
+                    );
+                  })
+                )}
               </div>
             </div>
           </TabsContent>
@@ -367,6 +756,129 @@ export default function MantenimientosPage() {
         maintenance={editingMaintenance}
         onSave={handleSave}
       />
+
+      <Dialog open={scheduleOpen} onOpenChange={setScheduleOpen}>
+        <DialogContent className="bg-card border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Programar Mantenimiento</DialogTitle>
+            <div id="schedule-dialog-desc" className="sr-only">
+              Formulario para asignar técnico, fecha y hora a un mantenimiento pendiente.
+            </div>
+          </DialogHeader>
+          {schedulingMaint && (() => {
+            const client = clients.find((c) => c.id === schedulingMaint.clienteId);
+            return (
+              <div className="space-y-4">
+                <div className="rounded-lg border border-border/50 bg-secondary/30 p-3">
+                  <p className="text-sm font-medium text-foreground">{client?.edificio}</p>
+                  <p className="text-xs text-muted-foreground">{client?.nombre}</p>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-foreground/80">Técnico Asignado</Label>
+                  <Select value={scheduleTecnico} onValueChange={setScheduleTecnico}>
+                    <SelectTrigger className="bg-secondary/50 border-border/50">
+                      <SelectValue placeholder="Seleccionar técnico" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-card border-border">
+                      {technicians.map((t) => (
+                        <SelectItem key={t.id} value={t.id}>
+                          {t.nombre} {t.apellido}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Fecha</Label>
+                    <Input
+                      type="date"
+                      value={scheduleDate}
+                      onChange={(e) => setScheduleDate(e.target.value)}
+                      className="bg-secondary/50 border-border/50"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Hora</Label>
+                    <Input
+                      type="time"
+                      value={scheduleTime}
+                      onChange={(e) => setScheduleTime(e.target.value)}
+                      className="bg-secondary/50 border-border/50"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Al programar, se notificará automáticamente al aplicativo del técnico asignado.
+                </p>
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setScheduleOpen(false)}
+              className="text-muted-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleSchedule}
+              className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+            >
+              <ArrowRight className="h-4 w-4" />
+              Programar y Notificar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!maintenanceToDelete}
+        onOpenChange={(open) => {
+          if (!open && !deletingMaintenanceId) setMaintenanceToDelete(null);
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Confirmar eliminación</DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              ¿Seguro que quieres eliminar este mantenimiento? Esta acción no se puede deshacer.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setMaintenanceToDelete(null)}
+              disabled={!!deletingMaintenanceId}
+              className="text-muted-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={() => maintenanceToDelete && handleDelete(maintenanceToDelete.id)}
+              disabled={!!deletingMaintenanceId}
+              className="gap-2 bg-red-600 hover:bg-red-700 text-white"
+            >
+              {deletingMaintenanceId ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+              {deletingMaintenanceId ? "Eliminando..." : "Sí, eliminar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {deletingMaintenanceId && (
+        <div className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm flex items-center justify-center">
+          <div className="rounded-lg border border-border bg-card px-6 py-4 flex items-center gap-3 shadow-xl">
+            <Loader2 className="h-5 w-5 animate-spin text-gold" />
+            <p className="text-sm text-foreground">Eliminando mantenimiento...</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

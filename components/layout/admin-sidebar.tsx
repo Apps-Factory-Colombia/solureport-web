@@ -13,6 +13,12 @@ import {
   Settings,
   LogOut,
   ChevronLeft,
+  ScrollText,
+  Wrench,
+  Clock,
+  ClipboardCheck,
+  Route,
+  Star,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/context/auth-context";
@@ -39,9 +45,29 @@ const menuItems = [
     icon: Building2,
   },
   {
+    title: "Contratos",
+    href: "/admin/contratos",
+    icon: ScrollText,
+  },
+  {
     title: "Mantenimientos",
     href: "/admin/mantenimientos",
     icon: CalendarClock,
+  },
+  {
+    title: "Visitas Técnicas",
+    href: "/admin/visitas",
+    icon: Wrench,
+  },
+  {
+    title: "Aprobaciones",
+    href: "/admin/aprobaciones",
+    icon: ClipboardCheck,
+  },
+  {
+    title: "Informes Técnicos",
+    href: "/admin/informes",
+    icon: FileText,
   },
   {
     title: "Reportes",
@@ -57,6 +83,16 @@ const menuItems = [
     title: "Liquidación",
     href: "/admin/liquidacion",
     icon: DollarSign,
+  },
+  {
+    title: "Acumulados Líder",
+    href: "/admin/acumulados",
+    icon: Star,
+  },
+  {
+    title: "Asistencia",
+    href: "/admin/llegadas",
+    icon: Clock,
   },
   {
     title: "Configuración",

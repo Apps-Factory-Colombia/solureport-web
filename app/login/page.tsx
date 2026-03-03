@@ -24,9 +24,7 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
-
-    const success = login(email, password);
+    const success = await login(email, password);
     if (success) {
       router.push("/admin");
     } else {
@@ -38,7 +36,7 @@ export default function LoginPage() {
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background circuit-pattern">
       <div className="absolute inset-0 bg-gradient-to-br from-gold/5 via-transparent to-cyan-neon/5" />
-      
+
       <div className="absolute top-1/4 left-1/4 h-64 w-64 rounded-full bg-cyan-neon/5 blur-[100px]" />
       <div className="absolute bottom-1/4 right-1/4 h-64 w-64 rounded-full bg-gold/5 blur-[100px]" />
 
@@ -47,12 +45,8 @@ export default function LoginPage() {
           <div className="mb-8 flex flex-col items-center gap-4">
             <SoluReportLogo size="lg" />
             <div className="text-center">
-              <h1 className="text-2xl font-bold text-gold glow-text-gold">
-                SoluReport
-              </h1>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Portal Administrativo
-              </p>
+
+
             </div>
           </div>
 

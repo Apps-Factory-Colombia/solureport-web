@@ -1,19 +1,18 @@
 "use client";
 
-import { Bell, Search, Menu } from "lucide-react";
+import { Search, Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/context/auth-context";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { getAvatarUrl } from "@/lib/utils/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { LogOut, Settings, User } from "lucide-react";
+import { LogOut } from "lucide-react";
 
 interface AdminHeaderProps {
   title: string;
@@ -48,21 +47,11 @@ export function AdminHeader({ title, onMenuToggle }: AdminHeaderProps) {
           />
         </div>
 
-        <Button
-          variant="ghost"
-          size="icon"
-          className="relative text-muted-foreground hover:text-foreground"
-        >
-          <Bell className="h-5 w-5" />
-          <Badge className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-cyan-neon text-[10px] text-background font-bold p-0 flex items-center justify-center border-0">
-            3
-          </Badge>
-        </Button>
-
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" className="flex items-center gap-2 px-2">
               <Avatar className="h-8 w-8 border border-gold/30">
+                <AvatarImage src={getAvatarUrl(user?.nombre || '', user?.apellido || '', 32)} alt={`${user?.nombre} ${user?.apellido}`} />
                 <AvatarFallback className="bg-gold/10 text-gold text-xs font-semibold">
                   {user?.nombre?.[0]}
                   {user?.apellido?.[0]}
@@ -77,15 +66,6 @@ export function AdminHeader({ title, onMenuToggle }: AdminHeaderProps) {
             align="end"
             className="w-48 bg-card border-border"
           >
-            <DropdownMenuItem className="gap-2 cursor-pointer">
-              <User className="h-4 w-4" />
-              Mi Perfil
-            </DropdownMenuItem>
-            <DropdownMenuItem className="gap-2 cursor-pointer">
-              <Settings className="h-4 w-4" />
-              Configuración
-            </DropdownMenuItem>
-            <DropdownMenuSeparator className="bg-border" />
             <DropdownMenuItem
               onClick={logout}
               className="gap-2 text-destructive focus:text-destructive cursor-pointer"

@@ -1,40 +1,89 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AlertTriangle, Clock, XCircle } from "lucide-react";
+import { getMantenimientos } from "@/lib/supabase/services/mantenimientos";
+import { getClientes } from "@/lib/supabase/services/clientes";
+import { Client, Maintenance } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-const alerts = [
-  {
-    id: 1,
-    type: "vencido",
-    message: "Mantenimiento vencido en Urbanización Los Rosales",
-    date: "2025-02-18",
-    icon: XCircle,
-    color: "text-red-400",
-    bg: "bg-red-500/10",
-  },
-  {
-    id: 2,
-    type: "pendiente",
-    message: "Mantenimiento pendiente sin cerrar en El Prado",
-    date: "2025-02-19",
-    icon: AlertTriangle,
-    color: "text-amber-400",
-    bg: "bg-amber-500/10",
-  },
-  {
-    id: 3,
-    type: "proximo",
-    message: "Mantenimiento próximo a vencer en Torres del Parque",
-    date: "2025-02-23",
-    icon: Clock,
-    color: "text-blue-400",
-    bg: "bg-blue-500/10",
-  },
-];
+interface DashboardAlert {
+  id: string;
+  message: string;
+  date: string;
+  icon: typeof XCircle;
+  color: string;
+  bg: string;
+}
 
 export function AlertsPanel() {
+  const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
+
+  useEffect(() => {
+    Promise.all([getMantenimientos(), getClientes()])
+      .then(([m, c]) => {
+        setMaintenances(m);
+        setClients(c);
+      })
+      .catch((err) => console.error("Error cargando alertas del dashboard:", err));
+  }, []);
+
+  const alerts = useMemo<DashboardAlert[]>(() => {
+    const today = new Date();
+    const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const in3Days = new Date(todayStart);
+    in3Days.setDate(in3Days.getDate() + 3);
+
+    const parseDate = (value: string) => {
+      const [year, month, day] = value.split("-").map(Number);
+      return new Date(year, month - 1, day);
+    };
+
+    const items: DashboardAlert[] = [];
+
+    for (const maintenance of maintenances) {
+      if (!maintenance.fechaProgramada) continue;
+      const client = clients.find((c) => c.id === maintenance.clienteId);
+      const building = client?.edificio || "cliente";
+      const date = parseDate(maintenance.fechaProgramada);
+
+      if (maintenance.estado === "pendiente" && date < todayStart) {
+        items.push({
+          id: `${maintenance.id}-vencido`,
+          message: `Mantenimiento vencido en ${building}`,
+          date: maintenance.fechaProgramada,
+          icon: XCircle,
+          color: "text-red-400",
+          bg: "bg-red-500/10",
+        });
+      } else if (maintenance.estado === "pendiente") {
+        items.push({
+          id: `${maintenance.id}-pendiente`,
+          message: `Mantenimiento pendiente sin cerrar en ${building}`,
+          date: maintenance.fechaProgramada,
+          icon: AlertTriangle,
+          color: "text-amber-400",
+          bg: "bg-amber-500/10",
+        });
+      } else if ((maintenance.estado === "programado" || maintenance.estado === "en_ejecucion") && date >= todayStart && date <= in3Days) {
+        items.push({
+          id: `${maintenance.id}-proximo`,
+          message: `Mantenimiento próximo en ${building}`,
+          date: maintenance.fechaProgramada,
+          icon: Clock,
+          color: "text-blue-400",
+          bg: "bg-blue-500/10",
+        });
+      }
+    }
+
+    return items
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(0, 6);
+  }, [maintenances, clients]);
+
   return (
     <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
       <CardHeader className="pb-3">
@@ -44,6 +93,9 @@ export function AlertsPanel() {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
+        {alerts.length === 0 && (
+          <p className="text-sm text-muted-foreground">No hay alertas activas.</p>
+        )}
         {alerts.map((alert) => {
           const Icon = alert.icon;
           return (

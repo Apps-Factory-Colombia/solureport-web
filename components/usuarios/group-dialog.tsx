@@ -59,8 +59,8 @@ export function GroupDialog({
       prev.includes(userId)
         ? prev.filter((id) => id !== userId)
         : prev.length < 5
-        ? [...prev, userId]
-        : prev
+          ? [...prev, userId]
+          : prev
     );
   };
 
@@ -84,8 +84,14 @@ export function GroupDialog({
     onOpenChange(false);
   };
 
-  const allTechs = availableTechnicians.filter(
-    (u) => u.rol === "tecnico" && u.estado === "activo"
+  const activeUsers = availableTechnicians.filter((u) => u.estado === "activo");
+
+  const leaderOptions = activeUsers.filter(
+    (u) => u.rol === "lider" || u.esLider
+  );
+
+  const memberOptions = activeUsers.filter(
+    (u) => u.rol === "tecnico" || u.rol === "lider" || u.esLider
   );
 
   return (
@@ -115,7 +121,7 @@ export function GroupDialog({
                 <SelectValue placeholder="Seleccionar líder" />
               </SelectTrigger>
               <SelectContent className="bg-card border-border">
-                {allTechs.map((tech) => (
+                {leaderOptions.map((tech) => (
                   <SelectItem key={tech.id} value={tech.id}>
                     {tech.nombre} {tech.apellido}
                   </SelectItem>
@@ -133,7 +139,7 @@ export function GroupDialog({
             </p>
             <div className="flex flex-wrap gap-2 mb-2">
               {selectedMembers.map((memberId) => {
-                const member = allTechs.find((t) => t.id === memberId);
+                const member = memberOptions.find((t) => t.id === memberId);
                 return (
                   <Badge
                     key={memberId}
@@ -152,7 +158,7 @@ export function GroupDialog({
               })}
             </div>
             <div className="max-h-40 overflow-y-auto space-y-2 rounded-lg border border-border/50 bg-secondary/30 p-3">
-              {allTechs.map((tech) => (
+              {memberOptions.map((tech) => (
                 <div
                   key={tech.id}
                   className="flex items-center gap-2"

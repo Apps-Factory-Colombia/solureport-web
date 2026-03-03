@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { ClientDialog } from "@/components/clientes/client-dialog";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Plus,
   Search,
   MoreHorizontal,
@@ -31,16 +39,38 @@ import {
   Mail,
   Phone,
   CalendarClock,
+  Loader2,
 } from "lucide-react";
 import { Client } from "@/lib/types";
-import { mockClients, mockMaintenances } from "@/lib/data/mock-data";
+import { getClientes, createCliente, updateCliente, deleteCliente } from "@/lib/supabase/services/clientes";
+import { getMantenimientos } from "@/lib/supabase/services/mantenimientos";
+import { Maintenance } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export default function ClientesPage() {
-  const [clients, setClients] = useState<Client[]>(mockClients);
+  const [clients, setClients] = useState<Client[]>([]);
+  const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingClient, setEditingClient] = useState<Client | null>(null);
+  const [clientToDelete, setClientToDelete] = useState<Client | null>(null);
+  const [deletingClientId, setDeletingClientId] = useState<string | null>(null);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [c, m] = await Promise.all([getClientes(), getMantenimientos()]);
+      setClients(c);
+      setMaintenances(m);
+    } catch (err) {
+      console.error("Error cargando clientes:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadData(); }, [loadData]);
 
   const filteredClients = clients.filter(
     (c) =>
@@ -49,25 +79,39 @@ export default function ClientesPage() {
       c.contacto.toLowerCase().includes(search.toLowerCase())
   );
 
-  const handleSave = (clientData: Partial<Client>) => {
-    if (editingClient) {
-      setClients((prev) =>
-        prev.map((c) =>
-          c.id === editingClient.id ? { ...c, ...clientData } : c
-        )
-      );
-    } else {
-      setClients((prev) => [...prev, clientData as Client]);
+  const handleSave = async (clientData: Partial<Client>) => {
+    try {
+      if (editingClient) {
+        await updateCliente(editingClient.id, clientData);
+      } else {
+        await createCliente(clientData);
+      }
+      setEditingClient(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error guardando cliente:", err);
     }
-    setEditingClient(null);
   };
 
-  const handleDelete = (id: string) => {
-    setClients((prev) => prev.filter((c) => c.id !== id));
+  const handleDelete = async (id: string) => {
+    setDeletingClientId(id);
+    try {
+      await deleteCliente(id);
+      setClientToDelete(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error eliminando cliente:", err);
+      const message = err instanceof Error
+        ? err.message
+        : "No se pudo eliminar el cliente. Verifica relaciones activas.";
+      alert(message);
+    } finally {
+      setDeletingClientId(null);
+    }
   };
 
   const getMaintenanceCount = (clientId: string) =>
-    mockMaintenances.filter((m) => m.clienteId === clientId).length;
+    maintenances.filter((m) => m.clienteId === clientId).length;
 
   return (
     <div>
@@ -203,7 +247,7 @@ export default function ClientesPage() {
                             Editar
                           </DropdownMenuItem>
                           <DropdownMenuItem
-                            onClick={() => handleDelete(client.id)}
+                            onClick={() => setClientToDelete(client)}
                             className="gap-2 text-destructive focus:text-destructive cursor-pointer"
                           >
                             <Trash2 className="h-4 w-4" />
@@ -226,6 +270,53 @@ export default function ClientesPage() {
         client={editingClient}
         onSave={handleSave}
       />
+
+      <Dialog
+        open={!!clientToDelete}
+        onOpenChange={(open) => {
+          if (!open && !deletingClientId) setClientToDelete(null);
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Confirmar eliminación</DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              ¿Seguro que quieres eliminar el cliente <strong>{clientToDelete?.edificio}</strong>? Esta acción no se puede deshacer.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setClientToDelete(null)}
+              disabled={!!deletingClientId}
+              className="text-muted-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={() => clientToDelete && handleDelete(clientToDelete.id)}
+              disabled={!!deletingClientId}
+              className="gap-2 bg-red-600 hover:bg-red-700 text-white"
+            >
+              {deletingClientId ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+              {deletingClientId ? "Eliminando..." : "Sí, eliminar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {deletingClientId && (
+        <div className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm flex items-center justify-center">
+          <div className="rounded-lg border border-border bg-card px-6 py-4 flex items-center gap-3 shadow-xl">
+            <Loader2 className="h-5 w-5 animate-spin text-gold" />
+            <p className="text-sm text-foreground">Eliminando cliente...</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

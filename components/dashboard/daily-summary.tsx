@@ -1,12 +1,16 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { mockMaintenances, mockClients, mockUsers } from "@/lib/data/mock-data";
+import { getMantenimientos } from "@/lib/supabase/services/mantenimientos";
+import { getClientes } from "@/lib/supabase/services/clientes";
+import { getUsuarios } from "@/lib/supabase/services/usuarios";
+import { Maintenance, Client, User } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Clock, CheckCircle2, AlertTriangle, Play } from "lucide-react";
 
-const statusConfig = {
+const statusConfig: Record<string, { label: string; color: string; icon: React.ElementType }> = {
   programado: {
     label: "Programado",
     color: "bg-blue-500/10 text-blue-400 border-blue-500/20",
@@ -30,7 +34,17 @@ const statusConfig = {
 };
 
 export function DailySummary() {
-  const recentMaintenances = mockMaintenances.slice(0, 6);
+  const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
+
+  useEffect(() => {
+    Promise.all([getMantenimientos(), getClientes(), getUsuarios()])
+      .then(([m, c, u]) => { setMaintenances(m); setClients(c); setUsers(u); })
+      .catch((err) => console.error("Error cargando resumen:", err));
+  }, []);
+
+  const recentMaintenances = maintenances.slice(0, 6);
 
   return (
     <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
@@ -41,9 +55,9 @@ export function DailySummary() {
       </CardHeader>
       <CardContent className="space-y-3">
         {recentMaintenances.map((m) => {
-          const client = mockClients.find((c) => c.id === m.clienteId);
-          const tech = mockUsers.find((u) => u.id === m.tecnicoId);
-          const status = statusConfig[m.estado];
+          const client = clients.find((c) => c.id === m.clienteId);
+          const tech = users.find((u) => u.id === m.tecnicoId);
+          const status = statusConfig[m.estado] || statusConfig.pendiente;
           const StatusIcon = status.icon;
 
           return (

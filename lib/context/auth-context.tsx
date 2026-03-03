@@ -1,34 +1,62 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from "react";
 import { User } from "@/lib/types";
-import { mockUsers, adminCredentials } from "@/lib/data/mock-data";
+import { loginUsuario, getUsuarioById } from "@/lib/supabase/services/usuarios";
 
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
-  login: (email: string, password: string) => boolean;
+  loading: boolean;
+  login: (email: string, password: string) => Promise<boolean>;
   logout: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const USER_STORAGE_KEY = "solureport_user_id";
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const login = useCallback((email: string, password: string): boolean => {
-    if (email === adminCredentials.email && password === adminCredentials.password) {
-      const adminUser = mockUsers.find((u) => u.email === email && u.rol === "admin");
-      if (adminUser) {
-        setUser(adminUser);
+  useEffect(() => {
+    const savedUserId = typeof window !== "undefined" ? localStorage.getItem(USER_STORAGE_KEY) : null;
+    if (savedUserId) {
+      getUsuarioById(savedUserId)
+        .then((u) => {
+          if (u && u.estado === "activo") {
+            setUser(u);
+          } else {
+            localStorage.removeItem(USER_STORAGE_KEY);
+          }
+        })
+        .catch(() => {
+          localStorage.removeItem(USER_STORAGE_KEY);
+        })
+        .finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
+  }, []);
+
+  const login = useCallback(async (email: string, password: string): Promise<boolean> => {
+    try {
+      const loggedUser = await loginUsuario(email, password);
+      if (loggedUser) {
+        setUser(loggedUser);
+        localStorage.setItem(USER_STORAGE_KEY, loggedUser.id);
         return true;
       }
+      return false;
+    } catch {
+      return false;
     }
-    return false;
   }, []);
 
   const logout = useCallback(() => {
     setUser(null);
+    localStorage.removeItem(USER_STORAGE_KEY);
   }, []);
 
   return (
@@ -36,6 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         isAuthenticated: !!user,
+        loading,
         login,
         logout,
       }}

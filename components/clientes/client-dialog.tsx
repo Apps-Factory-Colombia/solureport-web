@@ -41,6 +41,8 @@ export function ClientDialog({
     correo: "",
     telefono: "",
     frecuenciaMantenimiento: 4,
+    puertasPeatonales: 0,
+    puertasVehiculares: 0,
     estado: "activo" as "activo" | "inactivo",
   });
 
@@ -54,6 +56,8 @@ export function ClientDialog({
         correo: client.correo,
         telefono: client.telefono,
         frecuenciaMantenimiento: client.frecuenciaMantenimiento,
+        puertasPeatonales: client.puertasPeatonales,
+        puertasVehiculares: client.puertasVehiculares,
         estado: client.estado,
       });
     } else {
@@ -65,6 +69,8 @@ export function ClientDialog({
         correo: "",
         telefono: "",
         frecuenciaMantenimiento: 4,
+        puertasPeatonales: 0,
+        puertasVehiculares: 0,
         estado: "activo",
       });
     }
@@ -115,15 +121,17 @@ export function ClientDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label className="text-foreground/80">Contacto</Label>
+              <Label className="text-foreground/80">Nombre del contacto responsable</Label>
               <Input
                 value={formData.contacto}
                 onChange={(e) =>
                   setFormData({ ...formData, contacto: e.target.value })
                 }
+                placeholder="Ej: Martha López (Administración)"
                 className="bg-secondary/50 border-border/50"
                 required
               />
+
             </div>
           </div>
 
@@ -153,11 +161,48 @@ export function ClientDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label className="text-foreground/80">Teléfono</Label>
+              <Label className="text-foreground/80">Teléfono directo del contacto</Label>
               <Input
                 value={formData.telefono}
                 onChange={(e) =>
                   setFormData({ ...formData, telefono: e.target.value })
+                }
+                placeholder="Ej: 3001234567"
+                className="bg-secondary/50 border-border/50"
+                required
+              />
+
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label className="text-foreground/80">Puertas Peatonales</Label>
+              <Input
+                type="number"
+                min="0"
+                value={formData.puertasPeatonales}
+                onChange={(e) =>
+                  setFormData({
+                    ...formData,
+                    puertasPeatonales: Number(e.target.value),
+                  })
+                }
+                className="bg-secondary/50 border-border/50"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label className="text-foreground/80">Puertas Vehiculares</Label>
+              <Input
+                type="number"
+                min="0"
+                value={formData.puertasVehiculares}
+                onChange={(e) =>
+                  setFormData({
+                    ...formData,
+                    puertasVehiculares: Number(e.target.value),
+                  })
                 }
                 className="bg-secondary/50 border-border/50"
                 required

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { ActivityDialog } from "@/components/catalogo/activity-dialog";
 import { Button } from "@/components/ui/button";
@@ -34,10 +34,9 @@ import {
   Pencil,
   Trash2,
   History,
-  DollarSign,
 } from "lucide-react";
 import { Activity } from "@/lib/types";
-import { mockActivities } from "@/lib/data/mock-data";
+import { getActividades, createActividad, updateActividad, deleteActividad } from "@/lib/supabase/services/actividades";
 import { cn } from "@/lib/utils";
 
 function formatCurrency(value: number) {
@@ -49,12 +48,27 @@ function formatCurrency(value: number) {
 }
 
 export default function CatalogoPage() {
-  const [activities, setActivities] = useState<Activity[]>(mockActivities);
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingActivity, setEditingActivity] = useState<Activity | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyActivity, setHistoryActivity] = useState<Activity | null>(null);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await getActividades();
+      setActivities(data);
+    } catch (err) {
+      console.error("Error cargando actividades:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadData(); }, [loadData]);
 
   const filtered = activities.filter(
     (a) =>
@@ -62,19 +76,27 @@ export default function CatalogoPage() {
       a.descripcion.toLowerCase().includes(search.toLowerCase())
   );
 
-  const handleSave = (data: Partial<Activity>) => {
-    if (editingActivity) {
-      setActivities((prev) =>
-        prev.map((a) => (a.id === editingActivity.id ? { ...a, ...data } : a))
-      );
-    } else {
-      setActivities((prev) => [...prev, data as Activity]);
+  const handleSave = async (data: Partial<Activity>) => {
+    try {
+      if (editingActivity) {
+        await updateActividad(editingActivity.id, data);
+      } else {
+        await createActividad(data);
+      }
+      setEditingActivity(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error guardando actividad:", err);
     }
-    setEditingActivity(null);
   };
 
-  const handleDelete = (id: string) => {
-    setActivities((prev) => prev.filter((a) => a.id !== id));
+  const handleDelete = async (id: string) => {
+    try {
+      await deleteActividad(id);
+      await loadData();
+    } catch (err) {
+      console.error("Error eliminando actividad:", err);
+    }
   };
 
   return (
@@ -134,8 +156,7 @@ export default function CatalogoPage() {
                       {activity.descripcion}
                     </TableCell>
                     <TableCell>
-                      <span className="flex items-center gap-1 text-sm font-semibold text-gold">
-                        <DollarSign className="h-3.5 w-3.5" />
+                      <span className="text-sm font-semibold text-gold">
                         {formatCurrency(activity.valorEconomico)}
                       </span>
                     </TableCell>

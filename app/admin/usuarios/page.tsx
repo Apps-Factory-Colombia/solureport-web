@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { UserDialog } from "@/components/usuarios/user-dialog";
 import { GroupDialog } from "@/components/usuarios/group-dialog";
@@ -23,7 +23,16 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { getAvatarUrl } from "@/lib/utils/avatar";
 import {
   Plus,
   Search,
@@ -35,9 +44,14 @@ import {
   Users,
   Shield,
   Crown,
+  ShieldCheck,
+  Bike,
+  Route,
+  Loader2,
 } from "lucide-react";
 import { User, WorkGroup } from "@/lib/types";
-import { mockUsers, mockGroups } from "@/lib/data/mock-data";
+import { getUsuarios, createUsuario, updateUsuario, deleteUsuario } from "@/lib/supabase/services/usuarios";
+import { getGrupos, createGrupo, updateGrupo, deleteGrupo } from "@/lib/supabase/services/grupos";
 import { cn } from "@/lib/utils";
 
 const rolLabels = {
@@ -47,13 +61,33 @@ const rolLabels = {
 };
 
 export default function UsuariosPage() {
-  const [users, setUsers] = useState<User[]>(mockUsers);
-  const [groups, setGroups] = useState<WorkGroup[]>(mockGroups);
+  const [users, setUsers] = useState<User[]>([]);
+  const [groups, setGroups] = useState<WorkGroup[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [userDialogOpen, setUserDialogOpen] = useState(false);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [editingGroup, setEditingGroup] = useState<WorkGroup | null>(null);
+  const [userToDelete, setUserToDelete] = useState<User | null>(null);
+  const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
+  const [groupToDelete, setGroupToDelete] = useState<WorkGroup | null>(null);
+  const [deletingGroupId, setDeletingGroupId] = useState<string | null>(null);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [u, g] = await Promise.all([getUsuarios(), getGrupos()]);
+      setUsers(u);
+      setGroups(g);
+    } catch (err) {
+      console.error("Error cargando datos:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadData(); }, [loadData]);
 
   const filteredUsers = users.filter(
     (u) =>
@@ -62,42 +96,77 @@ export default function UsuariosPage() {
       u.email.toLowerCase().includes(search.toLowerCase())
   );
 
-  const handleSaveUser = (userData: Partial<User>) => {
-    if (editingUser) {
-      setUsers((prev) =>
-        prev.map((u) => (u.id === editingUser.id ? { ...u, ...userData } : u))
-      );
-    } else {
-      setUsers((prev) => [...prev, userData as User]);
+  const handleSaveUser = async (userData: Partial<User> & { password?: string }) => {
+    try {
+      if (editingUser) {
+        await updateUsuario(editingUser.id, userData);
+      } else {
+        await createUsuario(userData);
+      }
+      setEditingUser(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error guardando usuario:", err);
     }
-    setEditingUser(null);
   };
 
-  const handleDeleteUser = (id: string) => {
-    setUsers((prev) => prev.filter((u) => u.id !== id));
-  };
-
-  const handleToggleStatus = (id: string) => {
-    setUsers((prev) =>
-      prev.map((u) =>
-        u.id === id
-          ? { ...u, estado: u.estado === "activo" ? "inactivo" : "activo" }
-          : u
-      )
-    );
-  };
-
-  const handleSaveGroup = (groupData: Partial<WorkGroup>) => {
-    if (editingGroup) {
-      setGroups((prev) =>
-        prev.map((g) =>
-          g.id === editingGroup.id ? { ...g, ...groupData } : g
-        )
-      );
-    } else {
-      setGroups((prev) => [...prev, groupData as WorkGroup]);
+  const handleDeleteGroup = async (id: string) => {
+    setDeletingGroupId(id);
+    try {
+      await deleteGrupo(id);
+      setGroupToDelete(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error eliminando grupo:", err);
+      const message = err instanceof Error
+        ? err.message
+        : "No se pudo eliminar el grupo. Verifica relaciones activas.";
+      alert(message);
+    } finally {
+      setDeletingGroupId(null);
     }
-    setEditingGroup(null);
+  };
+
+  const handleDeleteUser = async (id: string) => {
+    setDeletingUserId(id);
+    try {
+      await deleteUsuario(id);
+      setUserToDelete(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error eliminando usuario:", err);
+      const message = err instanceof Error
+        ? err.message
+        : "No se pudo eliminar el usuario. Verifica relaciones activas.";
+      alert(message);
+    } finally {
+      setDeletingUserId(null);
+    }
+  };
+
+  const handleToggleStatus = async (id: string) => {
+    const user = users.find((u) => u.id === id);
+    if (!user) return;
+    try {
+      await updateUsuario(id, { estado: user.estado === "activo" ? "inactivo" : "activo" });
+      await loadData();
+    } catch (err) {
+      console.error("Error cambiando estado:", err);
+    }
+  };
+
+  const handleSaveGroup = async (groupData: Partial<WorkGroup>) => {
+    try {
+      if (editingGroup) {
+        await updateGrupo(editingGroup.id, groupData);
+      } else {
+        await createGrupo(groupData);
+      }
+      setEditingGroup(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error guardando grupo:", err);
+    }
   };
 
   return (
@@ -177,6 +246,7 @@ export default function UsuariosPage() {
                           <TableCell>
                             <div className="flex items-center gap-3">
                               <Avatar className="h-9 w-9 border border-border/50">
+                                <AvatarImage src={getAvatarUrl(user.nombre, user.apellido, 36)} alt={`${user.nombre} ${user.apellido}`} />
                                 <AvatarFallback className="bg-gold/10 text-gold text-xs">
                                   {user.nombre[0]}
                                   {user.apellido[0]}
@@ -189,9 +259,26 @@ export default function UsuariosPage() {
                                     <Crown className="h-3.5 w-3.5 text-gold" />
                                   )}
                                 </p>
-                                <p className="text-xs text-muted-foreground">
-                                  Desde {user.fechaCreacion}
-                                </p>
+                                <div className="flex items-center gap-1 mt-0.5">
+                                  {user.esSupervisor && (
+                                    <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 bg-purple-500/10 text-purple-400 border-purple-500/20">
+                                      <ShieldCheck className="h-2.5 w-2.5 mr-0.5" />Sup.
+                                    </Badge>
+                                  )}
+                                  {user.tieneMoto && (
+                                    <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20">
+                                      <Bike className="h-2.5 w-2.5 mr-0.5" />Moto
+                                    </Badge>
+                                  )}
+                                  {user.tieneRecorrido && (
+                                    <Badge variant="outline" className="text-[9px] px-1 py-0 h-4 bg-emerald-500/10 text-emerald-400 border-emerald-500/20">
+                                      <Route className="h-2.5 w-2.5 mr-0.5" />Rec.
+                                    </Badge>
+                                  )}
+                                  {!user.esSupervisor && !user.tieneMoto && !user.tieneRecorrido && (
+                                    <p className="text-xs text-muted-foreground">Desde {user.fechaCreacion}</p>
+                                  )}
+                                </div>
                               </div>
                             </div>
                           </TableCell>
@@ -267,7 +354,7 @@ export default function UsuariosPage() {
                                   )}
                                 </DropdownMenuItem>
                                 <DropdownMenuItem
-                                  onClick={() => handleDeleteUser(user.id)}
+                                  onClick={() => setUserToDelete(user)}
                                   className="gap-2 text-destructive focus:text-destructive cursor-pointer"
                                 >
                                   <Trash2 className="h-4 w-4" />
@@ -340,6 +427,13 @@ export default function UsuariosPage() {
                               <Pencil className="h-4 w-4" />
                               Editar
                             </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => setGroupToDelete(group)}
+                              className="gap-2 text-destructive focus:text-destructive cursor-pointer"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Eliminar
+                            </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </div>
@@ -369,6 +463,7 @@ export default function UsuariosPage() {
                                 className="flex items-center gap-2 px-2 py-1.5"
                               >
                                 <Avatar className="h-6 w-6 border border-border/50">
+                                  <AvatarImage src={getAvatarUrl(member.nombre, member.apellido, 24)} alt={`${member.nombre} ${member.apellido}`} />
                                   <AvatarFallback className="bg-secondary text-xs text-muted-foreground">
                                     {member.nombre[0]}
                                     {member.apellido[0]}
@@ -420,6 +515,100 @@ export default function UsuariosPage() {
         availableTechnicians={users}
         onSave={handleSaveGroup}
       />
+
+      <Dialog
+        open={!!userToDelete}
+        onOpenChange={(open) => {
+          if (!open && !deletingUserId) setUserToDelete(null);
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Confirmar eliminación</DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              ¿Seguro que quieres eliminar a <strong>{userToDelete?.nombre} {userToDelete?.apellido}</strong>? Esta acción también eliminará sus registros relacionados.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setUserToDelete(null)}
+              disabled={!!deletingUserId}
+              className="text-muted-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={() => userToDelete && handleDeleteUser(userToDelete.id)}
+              disabled={!!deletingUserId}
+              className="gap-2 bg-red-600 hover:bg-red-700 text-white"
+            >
+              {deletingUserId ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+              {deletingUserId ? "Eliminando..." : "Sí, eliminar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!groupToDelete}
+        onOpenChange={(open) => {
+          if (!open && !deletingGroupId) setGroupToDelete(null);
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Confirmar eliminación de grupo</DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              ¿Seguro que quieres eliminar el grupo <strong>{groupToDelete?.nombre}</strong>? Esta acción quitará también sus membresías.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setGroupToDelete(null)}
+              disabled={!!deletingGroupId}
+              className="text-muted-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={() => groupToDelete && handleDeleteGroup(groupToDelete.id)}
+              disabled={!!deletingGroupId}
+              className="gap-2 bg-red-600 hover:bg-red-700 text-white"
+            >
+              {deletingGroupId ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+              {deletingGroupId ? "Eliminando..." : "Sí, eliminar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {deletingUserId && (
+        <div className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm flex items-center justify-center">
+          <div className="rounded-lg border border-border bg-card px-6 py-4 flex items-center gap-3 shadow-xl">
+            <Loader2 className="h-5 w-5 animate-spin text-gold" />
+            <p className="text-sm text-foreground">Eliminando usuario y sus datos relacionados...</p>
+          </div>
+        </div>
+      )}
+
+      {deletingGroupId && (
+        <div className="fixed inset-0 z-50 bg-background/70 backdrop-blur-sm flex items-center justify-center">
+          <div className="rounded-lg border border-border bg-card px-6 py-4 flex items-center gap-3 shadow-xl">
+            <Loader2 className="h-5 w-5 animate-spin text-gold" />
+            <p className="text-sm text-foreground">Eliminando grupo de trabajo...</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

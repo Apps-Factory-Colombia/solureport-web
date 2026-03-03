@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Maintenance, MaintenanceStatus } from "@/lib/types";
-import { mockClients, mockUsers } from "@/lib/data/mock-data";
+import { Maintenance, MaintenanceStatus, Client, User } from "@/lib/types";
+import { getClientes } from "@/lib/supabase/services/clientes";
+import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import {
   Dialog,
   DialogContent,
@@ -39,14 +40,23 @@ export function MaintenanceDialog({
     clienteId: "",
     tecnicoId: "",
     fechaProgramada: "",
+    horaProgramada: "",
     estado: "programado" as MaintenanceStatus,
     observaciones: "",
   });
+  const [technicians, setTechnicians] = useState<User[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
 
-  const technicians = mockUsers.filter(
-    (u) => u.rol === "tecnico" && u.estado === "activo"
-  );
-  const clients = mockClients.filter((c) => c.estado === "activo");
+  useEffect(() => {
+    if (open) {
+      Promise.all([getUsuarios(), getClientes()])
+        .then(([users, cls]) => {
+          setTechnicians(users.filter((u) => u.rol === "tecnico" && u.estado === "activo"));
+          setClients(cls.filter((c) => c.estado === "activo"));
+        })
+        .catch((err) => console.error("Error cargando datos:", err));
+    }
+  }, [open]);
 
   useEffect(() => {
     if (maintenance) {
@@ -54,6 +64,7 @@ export function MaintenanceDialog({
         clienteId: maintenance.clienteId,
         tecnicoId: maintenance.tecnicoId,
         fechaProgramada: maintenance.fechaProgramada,
+        horaProgramada: maintenance.horaProgramada || "",
         estado: maintenance.estado,
         observaciones: maintenance.observaciones || "",
       });
@@ -62,6 +73,7 @@ export function MaintenanceDialog({
         clienteId: "",
         tecnicoId: "",
         fechaProgramada: "",
+        horaProgramada: "",
         estado: "programado",
         observaciones: "",
       });
@@ -70,7 +82,7 @@ export function MaintenanceDialog({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const client = mockClients.find((c) => c.id === formData.clienteId);
+    const client = clients.find((c) => c.id === formData.clienteId);
     let proximaFecha: string | undefined;
 
     if (client) {
@@ -154,24 +166,36 @@ export function MaintenanceDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label className="text-foreground/80">Estado</Label>
-              <Select
-                value={formData.estado}
-                onValueChange={(v: MaintenanceStatus) =>
-                  setFormData({ ...formData, estado: v })
+              <Label className="text-foreground/80">Hora Programada</Label>
+              <Input
+                type="time"
+                value={formData.horaProgramada}
+                onChange={(e) =>
+                  setFormData({ ...formData, horaProgramada: e.target.value })
                 }
-              >
-                <SelectTrigger className="bg-secondary/50 border-border/50">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="bg-card border-border">
-                  <SelectItem value="programado">Programado</SelectItem>
-                  <SelectItem value="en_ejecucion">En Ejecución</SelectItem>
-                  <SelectItem value="realizado">Realizado</SelectItem>
-                  <SelectItem value="pendiente">Pendiente</SelectItem>
-                </SelectContent>
-              </Select>
+                className="bg-secondary/50 border-border/50"
+              />
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label className="text-foreground/80">Estado</Label>
+            <Select
+              value={formData.estado}
+              onValueChange={(v: MaintenanceStatus) =>
+                setFormData({ ...formData, estado: v })
+              }
+            >
+              <SelectTrigger className="bg-secondary/50 border-border/50">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-border">
+                <SelectItem value="programado">Programado</SelectItem>
+                <SelectItem value="en_ejecucion">En Ejecución</SelectItem>
+                <SelectItem value="realizado">Realizado</SelectItem>
+                <SelectItem value="pendiente">Pendiente</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="space-y-2">

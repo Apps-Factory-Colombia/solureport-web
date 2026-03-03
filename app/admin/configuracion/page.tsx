@@ -1,11 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -20,52 +19,153 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Building2,
-  Mail,
-  FileText,
   CalendarDays,
-  Bell,
   Save,
-  Upload,
-  Lock,
+  Plus,
+  Pencil,
+  Trash2,
+  DollarSign,
+  Percent,
+  Star,
+  Route,
 } from "lucide-react";
-import { mockCompanySettings, mockLiquidationPeriods } from "@/lib/data/mock-data";
+import { CompanySettings, LiquidationPeriod } from "@/lib/types";
+import { getConfiguracion, updateConfiguracion } from "@/lib/supabase/services/configuracion";
+import { createPeriodo, deletePeriodo, getPeriodos, updatePeriodo } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 
 export default function ConfiguracionPage() {
-  const [companyName, setCompanyName] = useState(mockCompanySettings.nombre);
-  const [companyEmail, setCompanyEmail] = useState(mockCompanySettings.correoRemitente);
-  const [notifyOnCreate, setNotifyOnCreate] = useState(true);
-  const [notifyOnComplete, setNotifyOnComplete] = useState(true);
-  const [notifyOnOverdue, setNotifyOnOverdue] = useState(true);
-  const [notifyOnLiquidation, setNotifyOnLiquidation] = useState(true);
+  const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
+  const [companyName, setCompanyName] = useState("");
+  const [companyEmail, setCompanyEmail] = useState("");
   const [saved, setSaved] = useState(false);
+  const [costoRevisionLider, setCostoRevisionLider] = useState("");
+  const [porcentajeExtraLider, setPorcentajeExtraLider] = useState("");
+  const [extraLiderActivo, setExtraLiderActivo] = useState(true);
+  const [costoRecorridoNormal, setCostoRecorridoNormal] = useState("");
+  const [costoRecorridoHerramienta, setCostoRecorridoHerramienta] = useState("");
+  const [porcentajeDescuentoTardanza, setPorcentajeDescuentoTardanza] = useState("");
+  const [periodoInicio, setPeriodoInicio] = useState("");
+  const [periodoFin, setPeriodoFin] = useState("");
+  const [periodoEstado, setPeriodoEstado] = useState<LiquidationPeriod["estado"]>("abierto");
+  const [editingPeriodId, setEditingPeriodId] = useState<string | null>(null);
+  const [savingPeriod, setSavingPeriod] = useState(false);
+  const [deletingPeriodId, setDeletingPeriodId] = useState<string | null>(null);
 
-  const handleSave = () => {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  const loadPeriods = async () => {
+    const p = await getPeriodos();
+    setPeriods(p);
+  };
+
+  useEffect(() => {
+    Promise.all([getConfiguracion(), loadPeriods()])
+      .then(([s]) => {
+        setCompanyName(s.nombre);
+        setCompanyEmail(s.correoRemitente);
+        setCostoRevisionLider(String(s.costoRevisionLider));
+        setPorcentajeExtraLider(String(s.porcentajeExtraLider));
+        setExtraLiderActivo(s.extraLiderActivo);
+        setCostoRecorridoNormal(String(s.costoRecorridoNormal));
+        setCostoRecorridoHerramienta(String(s.costoRecorridoHerramienta));
+        setPorcentajeDescuentoTardanza(String(s.porcentajeDescuentoTardanza));
+      })
+      .catch((err) => console.error("Error cargando configuración:", err));
+  }, []);
+
+  const resetPeriodForm = () => {
+    setPeriodoInicio("");
+    setPeriodoFin("");
+    setPeriodoEstado("abierto");
+    setEditingPeriodId(null);
+  };
+
+  const handleSavePeriod = async () => {
+    if (!periodoInicio || !periodoFin) {
+      alert("Debes definir fecha de inicio y fin.");
+      return;
+    }
+
+    if (periodoInicio > periodoFin) {
+      alert("La fecha de inicio no puede ser mayor que la fecha de fin.");
+      return;
+    }
+
+    setSavingPeriod(true);
+    try {
+      if (editingPeriodId) {
+        await updatePeriodo(editingPeriodId, {
+          fechaInicio: periodoInicio,
+          fechaFin: periodoFin,
+          estado: periodoEstado,
+        });
+      } else {
+        await createPeriodo({
+          fechaInicio: periodoInicio,
+          fechaFin: periodoFin,
+          estado: periodoEstado,
+        });
+      }
+
+      await loadPeriods();
+      resetPeriodForm();
+    } catch (err) {
+      console.error("Error guardando período:", err);
+      alert("No se pudo guardar el período.");
+    } finally {
+      setSavingPeriod(false);
+    }
+  };
+
+  const handleEditPeriod = (period: LiquidationPeriod) => {
+    setEditingPeriodId(period.id);
+    setPeriodoInicio(period.fechaInicio);
+    setPeriodoFin(period.fechaFin);
+    setPeriodoEstado(period.estado);
+  };
+
+  const handleDeletePeriod = async (periodId: string) => {
+    if (!confirm("¿Seguro que deseas eliminar este período?")) return;
+
+    setDeletingPeriodId(periodId);
+    try {
+      await deletePeriodo(periodId);
+      await loadPeriods();
+      if (editingPeriodId === periodId) {
+        resetPeriodForm();
+      }
+    } catch (err) {
+      console.error("Error eliminando período:", err);
+      alert("No se pudo eliminar el período.");
+    } finally {
+      setDeletingPeriodId(null);
+    }
+  };
+
+  const handleSave = async () => {
+    try {
+      await updateConfiguracion({
+        nombre: companyName,
+        correoRemitente: companyEmail,
+        costoRevisionLider: Number(costoRevisionLider),
+        porcentajeExtraLider: Number(porcentajeExtraLider),
+        extraLiderActivo,
+        costoRecorridoNormal: Number(costoRecorridoNormal),
+        costoRecorridoHerramienta: Number(costoRecorridoHerramienta),
+        porcentajeDescuentoTardanza: Number(porcentajeDescuentoTardanza),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      console.error("Error guardando configuraci\u00f3n:", err);
+    }
   };
 
   return (
     <div>
       <AdminHeader title="Configuración General" />
       <div className="p-6 space-y-6">
-        <Tabs defaultValue="empresa" className="space-y-6">
+        <Tabs defaultValue="periodos" className="space-y-6">
           <TabsList className="bg-secondary/50 border border-border/50">
-            <TabsTrigger
-              value="empresa"
-              className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
-            >
-              <Building2 className="h-4 w-4 mr-2" />
-              Empresa
-            </TabsTrigger>
-            <TabsTrigger
-              value="plantilla"
-              className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
-            >
-              <FileText className="h-4 w-4 mr-2" />
-              Plantilla PDF
-            </TabsTrigger>
             <TabsTrigger
               value="periodos"
               className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
@@ -74,133 +174,13 @@ export default function ConfiguracionPage() {
               Períodos
             </TabsTrigger>
             <TabsTrigger
-              value="notificaciones"
+              value="costos"
               className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
             >
-              <Bell className="h-4 w-4 mr-2" />
-              Notificaciones
+              <DollarSign className="h-4 w-4 mr-2" />
+              Costos Aplicativo
             </TabsTrigger>
           </TabsList>
-
-          <TabsContent value="empresa">
-            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="text-lg text-foreground">
-                  Datos de la Empresa
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="flex items-start gap-6">
-                  <div className="flex h-24 w-24 items-center justify-center rounded-xl border-2 border-dashed border-border/50 bg-secondary/30">
-                    <div className="text-center">
-                      <Upload className="h-6 w-6 text-muted-foreground mx-auto mb-1" />
-                      <span className="text-[10px] text-muted-foreground">Logo</span>
-                    </div>
-                  </div>
-                  <div className="flex-1 space-y-4">
-                    <div className="space-y-2">
-                      <Label className="text-foreground/80">Nombre de la Empresa</Label>
-                      <Input
-                        value={companyName}
-                        onChange={(e) => setCompanyName(e.target.value)}
-                        className="bg-secondary/50 border-border/50"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-foreground/80">Correo Remitente</Label>
-                      <Input
-                        type="email"
-                        value={companyEmail}
-                        onChange={(e) => setCompanyEmail(e.target.value)}
-                        className="bg-secondary/50 border-border/50"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Este correo se usará para enviar reportes y notificaciones a los clientes.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex justify-end">
-                  <Button
-                    onClick={handleSave}
-                    className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
-                  >
-                    <Save className="h-4 w-4" />
-                    {saved ? "Guardado ✓" : "Guardar Cambios"}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="plantilla">
-            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="text-lg text-foreground">
-                  Plantilla del Reporte PDF
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="rounded-lg border border-border/50 bg-secondary/30 p-6">
-                  <div className="aspect-[8.5/11] max-w-sm mx-auto rounded-lg border border-border/30 bg-white/5 p-6 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="h-8 w-24 rounded bg-gold/20" />
-                      <div className="text-right">
-                        <div className="h-3 w-32 rounded bg-foreground/10 mb-1" />
-                        <div className="h-2 w-24 rounded bg-foreground/5" />
-                      </div>
-                    </div>
-                    <Separator className="bg-gold/20" />
-                    <div className="space-y-2">
-                      <div className="h-3 w-full rounded bg-foreground/10" />
-                      <div className="h-3 w-3/4 rounded bg-foreground/10" />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="aspect-video rounded bg-cyan-neon/10" />
-                      <div className="aspect-video rounded bg-cyan-neon/10" />
-                    </div>
-                    <div className="space-y-1">
-                      <div className="h-2 w-full rounded bg-foreground/5" />
-                      <div className="h-2 w-full rounded bg-foreground/5" />
-                      <div className="h-2 w-2/3 rounded bg-foreground/5" />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="aspect-video rounded bg-gold/10" />
-                      <div className="aspect-video rounded bg-gold/10" />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <Label className="text-foreground/80">Encabezado del Reporte</Label>
-                    <Textarea
-                      defaultValue="REPORTE DE MANTENIMIENTO - SOLUCIONES & AUTOMATIZACIONES S.A.S."
-                      className="bg-secondary/50 border-border/50"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="text-foreground/80">Pie de Página</Label>
-                    <Input
-                      defaultValue="© 2025 SoluReport - Todos los derechos reservados"
-                      className="bg-secondary/50 border-border/50"
-                    />
-                  </div>
-                </div>
-
-                <div className="flex justify-end">
-                  <Button
-                    onClick={handleSave}
-                    className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
-                  >
-                    <Save className="h-4 w-4" />
-                    {saved ? "Guardado ✓" : "Guardar Cambios"}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
 
           <TabsContent value="periodos">
             <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
@@ -221,13 +201,14 @@ export default function ConfiguracionPage() {
                       <TableHead className="text-muted-foreground">Fecha Fin</TableHead>
                       <TableHead className="text-muted-foreground">Estado</TableHead>
                       <TableHead className="text-muted-foreground">Fecha Cierre</TableHead>
+                      <TableHead className="text-muted-foreground text-right">Acciones</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {mockLiquidationPeriods.map((period, i) => (
+                    {periods.map((period, i) => (
                       <TableRow key={period.id} className="border-border/50 hover:bg-secondary/30">
                         <TableCell className="font-medium text-foreground">
-                          Período {mockLiquidationPeriods.length - i}
+                          Período {periods.length - i}
                         </TableCell>
                         <TableCell className="text-sm text-foreground/80">{period.fechaInicio}</TableCell>
                         <TableCell className="text-sm text-foreground/80">{period.fechaFin}</TableCell>
@@ -247,81 +228,157 @@ export default function ConfiguracionPage() {
                         <TableCell className="text-sm text-foreground/80">
                           {period.fechaCierre || "—"}
                         </TableCell>
+                        <TableCell className="text-right">
+                          <div className="inline-flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => handleEditPeriod(period)}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                              onClick={() => handleDeletePeriod(period.id)}
+                              disabled={deletingPeriodId === period.id}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
                 </Table>
+                <div className="border-t border-border/50 p-4">
+                  <p className="text-sm font-medium text-foreground mb-3">
+                    {editingPeriodId ? "Editar Período" : "Nuevo Período"}
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Fecha Inicio</Label>
+                      <Input
+                        type="date"
+                        value={periodoInicio}
+                        onChange={(e) => setPeriodoInicio(e.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Fecha Fin</Label>
+                      <Input
+                        type="date"
+                        value={periodoFin}
+                        onChange={(e) => setPeriodoFin(e.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Estado</Label>
+                      <select
+                        value={periodoEstado}
+                        onChange={(e) => setPeriodoEstado(e.target.value as LiquidationPeriod["estado"])}
+                        className="h-10 w-full rounded-md border border-border/50 bg-secondary/50 px-3 text-sm"
+                      >
+                        <option value="abierto">Abierto</option>
+                        <option value="cerrado">Cerrado</option>
+                      </select>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        onClick={handleSavePeriod}
+                        disabled={savingPeriod}
+                        className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+                      >
+                        <Plus className="h-4 w-4" />
+                        {savingPeriod
+                          ? "Guardando..."
+                          : editingPeriodId
+                            ? "Actualizar"
+                            : "Crear"}
+                      </Button>
+                      {editingPeriodId && (
+                        <Button
+                          variant="outline"
+                          onClick={resetPeriodForm}
+                          className="border-border/50"
+                        >
+                          Cancelar
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           </TabsContent>
-
-          <TabsContent value="notificaciones">
+          <TabsContent value="costos">
             <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
               <CardHeader>
                 <CardTitle className="text-lg text-foreground">
-                  Configuración de Correos y Notificaciones
+                  Costos del Aplicativo Móvil
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-6">
                 <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                    <Star className="h-4 w-4 text-purple-400" />
+                    Extra Líder
+                  </h3>
                   <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 p-4">
                     <div className="space-y-1">
                       <p className="text-sm font-medium text-foreground">
-                        Mantenimiento Creado
+                        Extra Líder Activo
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        Notificar al técnico asignado cuando se crea un nuevo mantenimiento.
+                        Habilitar el porcentaje extra para el líder sobre las actividades del grupo (excluye recorridos y primer integrante).
                       </p>
                     </div>
                     <Switch
-                      checked={notifyOnCreate}
-                      onCheckedChange={setNotifyOnCreate}
+                      checked={extraLiderActivo}
+                      onCheckedChange={setExtraLiderActivo}
                     />
                   </div>
-
-                  <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 p-4">
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-foreground">
-                        Mantenimiento Completado
-                      </p>
+                  {extraLiderActivo && (
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Porcentaje Extra Líder (%)</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={porcentajeExtraLider}
+                        onChange={(e) => setPorcentajeExtraLider(e.target.value)}
+                        className="bg-secondary/50 border-border/50 max-w-xs"
+                      />
                       <p className="text-xs text-muted-foreground">
-                        Notificar al administrador cuando un técnico completa un mantenimiento.
+                        Este porcentaje se aplica sobre el valor total de las actividades (sin recorridos) desde el segundo integrante del grupo en adelante. Puede variar en cada cierre de actividades.
                       </p>
                     </div>
-                    <Switch
-                      checked={notifyOnComplete}
-                      onCheckedChange={setNotifyOnComplete}
-                    />
-                  </div>
+                  )}
+                </div>
 
-                  <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 p-4">
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-foreground">
-                        Mantenimiento Vencido
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Alertar cuando un mantenimiento programado ha pasado su fecha sin completarse.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={notifyOnOverdue}
-                      onCheckedChange={setNotifyOnOverdue}
-                    />
-                  </div>
+                <Separator className="bg-border/50" />
 
-                  <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 p-4">
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-foreground">
-                        Cierre de Liquidación
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Enviar resumen de liquidación a todos los técnicos al cerrar un período.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={notifyOnLiquidation}
-                      onCheckedChange={setNotifyOnLiquidation}
+                <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                    <DollarSign className="h-4 w-4 text-gold" />
+                    Costo Revisión Líder
+                  </h3>
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Costo por cada actividad revisada y aprobada ($)</Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      value={costoRevisionLider}
+                      onChange={(e) => setCostoRevisionLider(e.target.value)}
+                      className="bg-secondary/50 border-border/50 max-w-xs"
                     />
+                    <p className="text-xs text-muted-foreground">
+                      Este valor se paga al líder por cada actividad que revisa y aprueba. Es administrable y puede cambiar según la cantidad de actividades.
+                    </p>
                   </div>
                 </div>
 
@@ -329,24 +386,55 @@ export default function ConfiguracionPage() {
 
                 <div className="space-y-4">
                   <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                    <Mail className="h-4 w-4 text-gold" />
-                    Plantilla de Correo
+                    <Route className="h-4 w-4 text-emerald-400" />
+                    Costos de Recorridos
+                  </h3>
+                  <div className="grid grid-cols-2 gap-4 max-w-lg">
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Recorrido Normal ($)</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        value={costoRecorridoNormal}
+                        onChange={(e) => setCostoRecorridoNormal(e.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Recorrido con Herramienta ($)</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        value={costoRecorridoHerramienta}
+                        onChange={(e) => setCostoRecorridoHerramienta(e.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Estos valores se asignan automáticamente a los recorridos reportados desde el aplicativo según la modalidad seleccionada.
+                  </p>
+                </div>
+
+                <Separator className="bg-border/50" />
+
+                <div className="space-y-4">
+                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                    <Percent className="h-4 w-4 text-red-400" />
+                    Descuento por Tardanza
                   </h3>
                   <div className="space-y-2">
-                    <Label className="text-foreground/80">Asunto del Reporte</Label>
+                    <Label className="text-foreground/80">Porcentaje de descuento sobre actividades (%)</Label>
                     <Input
-                      defaultValue="Reporte de Mantenimiento - {cliente} - {fecha}"
-                      className="bg-secondary/50 border-border/50"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="text-foreground/80">Cuerpo del Correo</Label>
-                    <Textarea
-                      defaultValue={`Estimado/a {contacto},\n\nAdjunto encontrará el reporte de mantenimiento realizado el {fecha} en {edificio}.\n\nQuedamos atentos a cualquier observación.\n\nCordialmente,\n{empresa}`}
-                      className="bg-secondary/50 border-border/50 min-h-[120px]"
+                      type="number"
+                      min="0"
+                      max="100"
+                      value={porcentajeDescuentoTardanza}
+                      onChange={(e) => setPorcentajeDescuentoTardanza(e.target.value)}
+                      className="bg-secondary/50 border-border/50 max-w-xs"
                     />
                     <p className="text-xs text-muted-foreground">
-                      Variables disponibles: {"{cliente}"}, {"{contacto}"}, {"{fecha}"}, {"{edificio}"}, {"{empresa}"}, {"{tecnico}"}
+                      Este porcentaje se descuenta de las actividades del técnico cuando se registra una tardanza.
                     </p>
                   </div>
                 </div>
@@ -365,6 +453,6 @@ export default function ConfiguracionPage() {
           </TabsContent>
         </Tabs>
       </div>
-    </div>
+    </div >
   );
 }
