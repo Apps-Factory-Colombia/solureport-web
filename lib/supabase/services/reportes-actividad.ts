@@ -2,9 +2,11 @@ import { supabase } from "../client";
 import { ActivityReport, LeaderApprovalBatch, LeaderAccumulation } from "@/lib/types";
 
 function mapReport(row: any, fotosAntes: string[], fotosDespues: string[]): ActivityReport {
+  const normalizedTipo = row.tipo === "actividad" ? "actividad_grupal" : row.tipo;
+
   return {
     id: row.id,
-    tipo: row.tipo,
+    tipo: normalizedTipo,
     tecnicoId: row.tecnico_id,
     liderGrupoId: row.lider_grupo_id,
     grupoId: row.grupo_id,

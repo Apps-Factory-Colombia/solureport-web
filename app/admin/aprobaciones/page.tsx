@@ -63,7 +63,7 @@ function formatCurrency(value: number) {
   }).format(value);
 }
 
-const tipoConfig: Record<TipoInforme, { label: string; color: string; icon: React.ElementType }> = {
+const tipoConfig: Record<string, { label: string; color: string; icon: React.ElementType }> = {
   mantenimiento_preventivo: {
     label: "Mant. Preventivo",
     color: "bg-blue-500/10 text-blue-400 border-blue-500/20",
@@ -84,7 +84,23 @@ const tipoConfig: Record<TipoInforme, { label: string; color: string; icon: Reac
     color: "bg-purple-500/10 text-purple-400 border-purple-500/20",
     icon: Users,
   },
+  // Legacy value present in reportes_actividad.tipo
+  actividad: {
+    label: "Actividad",
+    color: "bg-purple-500/10 text-purple-400 border-purple-500/20",
+    icon: Users,
+  },
 };
+
+const defaultTipoConfig = {
+  label: "Actividad",
+  color: "bg-secondary text-muted-foreground border-border/50",
+  icon: FileText,
+};
+
+function getTipoConfig(tipo: string) {
+  return tipoConfig[tipo] || defaultTipoConfig;
+}
 
 const estadoAprobacionConfig = {
   pendiente: { label: "Pendiente", color: "bg-amber-500/10 text-amber-400 border-amber-500/20", icon: Clock },
@@ -121,10 +137,11 @@ export default function AprobacionesPage() {
     try {
       await updateEstadoAprobacion(report.id, "aprobado");
       const tech = users.find((u) => u.id === report.tecnicoId);
+      const tipo = getTipoConfig(String(report.tipo));
       await createNotificacion({
         usuarioId: report.tecnicoId,
         titulo: "Actividad Aprobada",
-        mensaje: `Tu informe de ${tipoConfig[report.tipo].label} del ${report.fecha} ha sido aprobado. Valor: $${report.costoActividad.toLocaleString()}.`,
+        mensaje: `Tu informe de ${tipo.label} del ${report.fecha} ha sido aprobado. Valor: $${report.costoActividad.toLocaleString()}.`,
         tipo: "aprobacion",
         datos: { reporteId: report.id, estado: "aprobado" },
       });
@@ -142,10 +159,11 @@ export default function AprobacionesPage() {
     setProcessing(true);
     try {
       await updateEstadoAprobacion(report.id, "rechazado");
+      const tipo = getTipoConfig(String(report.tipo));
       await createNotificacion({
         usuarioId: report.tecnicoId,
         titulo: "Actividad Rechazada",
-        mensaje: `Tu informe de ${tipoConfig[report.tipo].label} del ${report.fecha} ha sido rechazado. Contacta a tu líder para más detalles.`,
+        mensaje: `Tu informe de ${tipo.label} del ${report.fecha} ha sido rechazado. Contacta a tu líder para más detalles.`,
         tipo: "aprobacion",
         datos: { reporteId: report.id, estado: "rechazado" },
       });
@@ -299,7 +317,7 @@ export default function AprobacionesPage() {
                   const tech = users.find((u) => u.id === report.tecnicoId);
                   const leader = users.find((u) => u.id === report.liderGrupoId);
                   const group = groups.find((g) => g.id === report.grupoId);
-                  const tipo = tipoConfig[report.tipo];
+                  const tipo = getTipoConfig(String(report.tipo));
                   const estado = estadoAprobacionConfig[report.estadoAprobacionLider];
                   const TipoIcon = tipo.icon;
 
@@ -399,7 +417,7 @@ export default function AprobacionesPage() {
             const client = selectedReport.clienteId
               ? clients.find((c) => c.id === selectedReport.clienteId)
               : null;
-            const tipo = tipoConfig[selectedReport.tipo];
+            const tipo = getTipoConfig(String(selectedReport.tipo));
             const estado = estadoAprobacionConfig[selectedReport.estadoAprobacionLider];
 
             return (
