@@ -33,6 +33,7 @@ function mapRow(row: any): Maintenance {
     id: row.id,
     clienteId: row.cliente_id,
     tecnicoId: row.tecnico_id,
+    origen: "mantenimiento",
     fechaProgramada: toDateOnly(row.fecha_programada),
     horaProgramada: row.hora_programada || undefined,
     proximaFecha: toDateOnly(row.proxima_fecha) || undefined,
@@ -45,13 +46,48 @@ function mapRow(row: any): Maintenance {
   };
 }
 
+function mapContratoRow(row: any, contrato: any): Maintenance {
+  return {
+    id: row.id,
+    clienteId: contrato?.cliente_id || "",
+    tecnicoId: row.tecnico_id || "",
+    origen: "contrato",
+    contratoId: row.contrato_id,
+    contratoMantenimientoId: row.id,
+    fechaProgramada: toDateOnly(row.fecha_programada),
+    estado: row.estado,
+    valorRecaudado: parseFloat(row.valor_recaudado) || 0,
+    fechaCreacion: contrato?.fecha_creacion?.split("T")[0] || "",
+    fechaCierre: row.fecha_realizado?.split("T")[0] || undefined,
+  };
+}
+
 export async function getMantenimientos(): Promise<Maintenance[]> {
   const { data, error } = await supabase
     .from("mantenimientos")
     .select("*")
     .order("fecha_programada", { ascending: false });
   if (error) throw error;
-  return (data || []).map(mapRow);
+
+  const { data: contratos, error: contratosError } = await supabase
+    .from("contratos_mantenimiento")
+    .select("id, cliente_id, fecha_creacion");
+  if (contratosError) throw contratosError;
+
+  const contratoIds = (contratos || []).map((contrato) => contrato.id);
+  let mantenimientosContrato: any[] = [];
+  if (contratoIds.length > 0) {
+    const { data: contratoMants, error: contratoMantsError } = await supabase
+      .from("contrato_mantenimientos")
+      .select("*")
+      .in("contrato_id", contratoIds);
+    if (contratoMantsError) throw contratoMantsError;
+    mantenimientosContrato = contratoMants || [];
+  }
+
+  const contratosById = new Map((contratos || []).map((contrato) => [contrato.id, contrato]));
+  return [...(data || []).map(mapRow), ...mantenimientosContrato.map((mant) => mapContratoRow(mant, contratosById.get(mant.contrato_id)))]
+    .sort((a, b) => b.fechaProgramada.localeCompare(a.fechaProgramada));
 }
 
 export async function createMantenimiento(m: Partial<Maintenance>): Promise<Maintenance> {
@@ -74,6 +110,47 @@ export async function createMantenimiento(m: Partial<Maintenance>): Promise<Main
 }
 
 export async function updateMantenimiento(id: string, m: Partial<Maintenance>): Promise<Maintenance> {
+  const { data: mantenimientoExistente, error: mantenimientoExistenteError } = await supabase
+    .from("mantenimientos")
+    .select("id")
+    .eq("id", id)
+    .maybeSingle();
+  if (mantenimientoExistenteError) throw mantenimientoExistenteError;
+
+  if (!mantenimientoExistente) {
+    const contractUpdateData: any = {};
+    if (m.tecnicoId !== undefined) contractUpdateData.tecnico_id = m.tecnicoId || null;
+    if (m.fechaProgramada !== undefined) contractUpdateData.fecha_programada = m.fechaProgramada;
+    if (m.estado !== undefined) contractUpdateData.estado = m.estado;
+    if (m.valorRecaudado !== undefined) contractUpdateData.valor_recaudado = m.valorRecaudado;
+
+    const contratoMantQuery = supabase
+      .from("contrato_mantenimientos")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    const { data: contratoMant, error: contratoMantError } = Object.keys(contractUpdateData).length > 0
+      ? await supabase
+        .from("contrato_mantenimientos")
+        .update(contractUpdateData)
+        .eq("id", id)
+        .select("*")
+        .maybeSingle()
+      : await contratoMantQuery;
+    if (contratoMantError) throw contratoMantError;
+    if (!contratoMant) throw new Error("Mantenimiento no encontrado.");
+
+    const { data: contrato, error: contratoError } = await supabase
+      .from("contratos_mantenimiento")
+      .select("id, cliente_id, fecha_creacion")
+      .eq("id", contratoMant.contrato_id)
+      .maybeSingle();
+    if (contratoError) throw contratoError;
+
+    return mapContratoRow(contratoMant, contrato);
+  }
+
   const updateData: any = {};
   if (m.clienteId !== undefined) updateData.cliente_id = m.clienteId;
   if (m.tecnicoId !== undefined) updateData.tecnico_id = m.tecnicoId;
@@ -94,7 +171,20 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
 }
 
 export async function deleteMantenimiento(id: string): Promise<void> {
-  const { error } = await supabase.from("mantenimientos").delete().eq("id", id);
+  const { data: mantenimientoExistente, error: mantenimientoExistenteError } = await supabase
+    .from("mantenimientos")
+    .select("id")
+    .eq("id", id)
+    .maybeSingle();
+  if (mantenimientoExistenteError) throw mantenimientoExistenteError;
+
+  if (mantenimientoExistente) {
+    const { error } = await supabase.from("mantenimientos").delete().eq("id", id);
+    if (error) throw error;
+    return;
+  }
+
+  const { error } = await supabase.from("contrato_mantenimientos").delete().eq("id", id);
   if (error) throw error;
 }
 

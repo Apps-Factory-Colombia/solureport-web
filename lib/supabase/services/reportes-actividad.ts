@@ -136,6 +136,28 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
   return reports;
 }
 
+export async function updateCostoActividadAdmin(id: string, costoActividad: number): Promise<void> {
+  if (id.startsWith("reg-")) {
+    const parts = id.split("-");
+    const tecnicoId = parts[parts.length - 1];
+    const registroId = parts.slice(1, -1).join("-");
+
+    const { error } = await supabase
+      .from("actividad_participantes")
+      .update({ valor_calculado: costoActividad })
+      .eq("registro_actividad_id", registroId)
+      .eq("tecnico_id", tecnicoId);
+    if (error) throw error;
+    return;
+  }
+
+  const { error } = await supabase
+    .from("reportes_actividad")
+    .update({ costo_actividad: costoActividad })
+    .eq("id", id);
+  if (error) throw error;
+}
+
 export async function updateEstadoAprobacion(id: string, estado: "aprobado" | "rechazado"): Promise<void> {
   // IDs que empiezan con "reg-" son actividades grupales del líder (registros_actividades)
   if (id.startsWith("reg-")) {

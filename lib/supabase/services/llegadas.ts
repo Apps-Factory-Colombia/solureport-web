@@ -1,14 +1,38 @@
 import { supabase } from "../client";
 import { ArrivalRecord } from "@/lib/types";
 
-function mapRow(row: any): ArrivalRecord {
+const DAY_NAMES = ["domingo", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado"] as const;
+
+type ScheduleMap = Record<string, { activo: boolean; horaEntrada?: string; horaSalida?: string }>;
+
+function normalizeTimeValue(value?: string | null): string | undefined {
+  if (!value) return undefined;
+  return value.slice(0, 5);
+}
+
+function getScheduleDay(fecha: string): string {
+  const [year, month, day] = fecha.split("-").map(Number);
+  const date = new Date(year, (month || 1) - 1, day || 1);
+  return DAY_NAMES[date.getDay()];
+}
+
+function mapRow(row: any, schedulesByUser: ScheduleMap = {}): ArrivalRecord {
+  const dayName = getScheduleDay(row.fecha);
+  const schedule = schedulesByUser[`${row.usuario_id}-${dayName}`];
+  const horaEsperada = schedule?.activo
+    ? schedule.horaEntrada || row.hora_entrada_programada || ""
+    : row.hora_entrada_programada || "";
+  const horaSalidaProgramada = schedule?.activo
+    ? schedule.horaSalida || row.hora_salida_programada || undefined
+    : row.hora_salida_programada || undefined;
+
   return {
     id: row.id,
     usuarioId: row.usuario_id,
     fecha: row.fecha,
-    horaEsperada: row.hora_entrada_programada || "",
+    horaEsperada,
     horaLlegada: row.hora_entrada_real || "",
-    horaSalidaProgramada: row.hora_salida_programada || undefined,
+    horaSalidaProgramada,
     horaSalidaReal: row.hora_salida_real || undefined,
     estadoEntrada: row.estado_entrada || "no_reportado",
     estadoSalida: row.estado_salida || "no_reportado",
@@ -28,7 +52,35 @@ export async function getLlegadas(): Promise<ArrivalRecord[]> {
     .select("*")
     .order("fecha", { ascending: false });
   if (error) throw error;
-  return (data || []).map(mapRow);
+
+  const rows = data || [];
+  const userIds = [...new Set(rows.map((row: any) => row.usuario_id).filter(Boolean))];
+  let schedulesByUser: ScheduleMap = {};
+
+  if (userIds.length > 0) {
+    const { data: schedules, error: schedulesError } = await supabase
+      .from("usuario_horarios")
+      .select("usuario_id, dia_semana, activo, hora_entrada, hora_salida")
+      .in("usuario_id", userIds);
+
+    if (schedulesError) {
+      const message = `${schedulesError.message || ""} ${schedulesError.details || ""}`.toLowerCase();
+      if (!message.includes("usuario_horarios") && !(message.includes("relation") && message.includes("does not exist"))) {
+        throw schedulesError;
+      }
+    } else {
+      schedulesByUser = (schedules || []).reduce<ScheduleMap>((acc, schedule: any) => {
+        acc[`${schedule.usuario_id}-${schedule.dia_semana}`] = {
+          activo: schedule.activo ?? true,
+          horaEntrada: normalizeTimeValue(schedule.hora_entrada),
+          horaSalida: normalizeTimeValue(schedule.hora_salida),
+        };
+        return acc;
+      }, {});
+    }
+  }
+
+  return rows.map((row: any) => mapRow(row, schedulesByUser));
 }
 
 export async function updateLlegada(id: string, updates: Partial<{

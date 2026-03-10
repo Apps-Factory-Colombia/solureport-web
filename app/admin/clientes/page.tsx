@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { ClientDialog } from "@/components/clientes/client-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -112,6 +113,20 @@ export default function ClientesPage() {
 
   const getMaintenanceCount = (clientId: string) =>
     maintenances.filter((m) => m.clienteId === clientId).length;
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Gestión de Clientes" />
+        <AdminPageLoader
+          title="Cargando clientes"
+          message="Estamos preparando el directorio de clientes y su actividad asociada."
+          showStats={false}
+          rows={6}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { ActivityDialog } from "@/components/catalogo/activity-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -98,6 +99,20 @@ export default function CatalogoPage() {
       console.error("Error eliminando actividad:", err);
     }
   };
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Catálogo de Actividades" />
+        <AdminPageLoader
+          title="Cargando catálogo"
+          message="Estamos preparando las actividades y sus valores configurados."
+          showStats={false}
+          rows={6}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>

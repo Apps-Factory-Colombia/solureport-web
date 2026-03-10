@@ -2,6 +2,19 @@ export type UserRole = "admin" | "tecnico" | "lider";
 
 export type UserStatus = "activo" | "inactivo";
 
+export type ScheduleDay = "lunes" | "martes" | "miercoles" | "jueves" | "viernes" | "sabado" | "domingo";
+
+export interface UserSchedule {
+  id?: string;
+  usuarioId?: string;
+  diaSemana: ScheduleDay;
+  activo: boolean;
+  horaEntrada?: string;
+  horaSalida?: string;
+}
+
+export interface UserScheduleDraft extends UserSchedule { }
+
 export interface User {
   id: string;
   nombre: string;
@@ -17,6 +30,7 @@ export interface User {
   esSupervisor?: boolean;
   horaEntrada?: string;
   horaSalida?: string;
+  horarios?: UserSchedule[];
   fechaCreacion: string;
   avatar?: string;
 }
@@ -51,6 +65,9 @@ export interface Maintenance {
   id: string;
   clienteId: string;
   tecnicoId: string;
+  origen?: "mantenimiento" | "contrato";
+  contratoId?: string;
+  contratoMantenimientoId?: string;
   fechaProgramada: string;
   horaProgramada?: string;
   proximaFecha?: string;
@@ -58,6 +75,7 @@ export interface Maintenance {
   observaciones?: string;
   tipoPendiente?: string;
   descripcionPendiente?: string;
+  valorRecaudado?: number;
   fechaCreacion: string;
   fechaCierre?: string;
 }

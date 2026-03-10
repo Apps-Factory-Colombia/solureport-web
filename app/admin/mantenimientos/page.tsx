@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { MaintenanceDialog } from "@/components/mantenimientos/maintenance-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -224,6 +225,7 @@ export default function MantenimientosPage() {
   const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("todos");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -245,6 +247,7 @@ export default function MantenimientosPage() {
   };
 
   const loadData = useCallback(async () => {
+    setLoading(true);
     try {
       const [m, c, u] = await Promise.all([getMantenimientos(), getClientes(), getUsuarios()]);
       setMaintenances(m);
@@ -252,6 +255,8 @@ export default function MantenimientosPage() {
       setUsers(u);
     } catch (err) {
       console.error("Error cargando mantenimientos:", err);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -373,6 +378,20 @@ export default function MantenimientosPage() {
       setDeletingMaintenanceId(null);
     }
   };
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Programación de Mantenimientos" />
+        <AdminPageLoader
+          title="Cargando mantenimientos"
+          message="Estamos preparando la programación y el calendario de mantenimientos."
+          showStats={false}
+          rows={7}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>

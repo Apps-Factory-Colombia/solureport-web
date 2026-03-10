@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -67,15 +68,18 @@ export default function InformesPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [grupoFilter, setGrupoFilter] = useState<string>("todos");
   const [reportToDelete, setReportToDelete] = useState<ActivityReport | null>(null);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
 
   const loadData = async () => {
+    setLoading(true);
     Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos()])
       .then(([r, u, c, g]) => { setReports(r); setUsers(u); setClients(c); setGroups(g); })
-      .catch((err) => console.error("Error cargando informes:", err));
+      .catch((err) => console.error("Error cargando informes:", err))
+      .finally(() => setLoading(false));
   };
 
   useEffect(() => {

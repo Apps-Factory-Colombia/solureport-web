@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { UserDialog } from "@/components/usuarios/user-dialog";
 import { GroupDialog } from "@/components/usuarios/group-dialog";
 import { Button } from "@/components/ui/button";
@@ -49,7 +50,7 @@ import {
   Route,
   Loader2,
 } from "lucide-react";
-import { User, WorkGroup } from "@/lib/types";
+import { User, UserScheduleDraft, WorkGroup } from "@/lib/types";
 import { getUsuarios, createUsuario, updateUsuario, deleteUsuario } from "@/lib/supabase/services/usuarios";
 import { getGrupos, createGrupo, updateGrupo, deleteGrupo } from "@/lib/supabase/services/grupos";
 import { cn } from "@/lib/utils";
@@ -96,7 +97,7 @@ export default function UsuariosPage() {
       u.email.toLowerCase().includes(search.toLowerCase())
   );
 
-  const handleSaveUser = async (userData: Partial<User> & { password?: string }) => {
+  const handleSaveUser = async (userData: Partial<User> & { password?: string; horarios?: UserScheduleDraft[] }) => {
     try {
       if (editingUser) {
         await updateUsuario(editingUser.id, userData);
@@ -168,6 +169,20 @@ export default function UsuariosPage() {
       console.error("Error guardando grupo:", err);
     }
   };
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Gestión de Usuarios" />
+        <AdminPageLoader
+          title="Cargando usuarios"
+          message="Estamos preparando el listado de usuarios y grupos."
+          showStats={false}
+          rows={7}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { StatsCard } from "@/components/dashboard/stats-cards";
 import { DailySummary } from "@/components/dashboard/daily-summary";
 import {
@@ -13,22 +14,32 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { getMantenimientos } from "@/lib/supabase/services/mantenimientos";
+import { getClientes } from "@/lib/supabase/services/clientes";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getReportesActividad } from "@/lib/supabase/services/reportes-actividad";
-import { Maintenance, User, ActivityReport } from "@/lib/types";
+import { Maintenance, User, ActivityReport, Client } from "@/lib/types";
 
 export default function DashboardPage() {
   const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [reports, setReports] = useState<ActivityReport[]>([]);
+  const [loading, setLoading] = useState(true);
   const touchStartY = useRef<number | null>(null);
   const pullDistance = useRef(0);
   const isPulling = useRef(false);
 
   const loadDashboardData = () => {
-    Promise.all([getMantenimientos(), getUsuarios(), getReportesActividad()])
-      .then(([m, u, r]) => { setMaintenances(m); setUsers(u); setReports(r); })
-      .catch((err) => console.error("Error cargando dashboard:", err));
+    setLoading(true);
+    Promise.all([getMantenimientos(), getClientes(), getUsuarios(), getReportesActividad()])
+      .then(([m, c, u, r]) => {
+        setMaintenances(m);
+        setClients(c);
+        setUsers(u);
+        setReports(r);
+      })
+      .catch((err) => console.error("Error cargando dashboard:", err))
+      .finally(() => setLoading(false));
   };
 
   useEffect(() => {
@@ -111,6 +122,18 @@ export default function DashboardPage() {
     return year === thisYear && month - 1 === thisMonth;
   }).length;
 
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Dashboard" />
+        <AdminPageLoader
+          title="Cargando dashboard"
+          message="Estamos preparando tus indicadores y la actividad reciente."
+        />
+      </div>
+    );
+  }
+
   return (
     <div>
       <AdminHeader title="Dashboard" />
@@ -160,7 +183,7 @@ export default function DashboardPage() {
         </div>
 
         <div className="grid grid-cols-1 gap-6">
-          <DailySummary />
+          <DailySummary maintenances={maintenances} clients={clients} users={users} />
         </div>
       </div>
     </div>

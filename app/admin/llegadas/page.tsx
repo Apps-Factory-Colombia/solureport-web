@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -53,6 +54,7 @@ export default function LlegadasPage() {
   const [records, setRecords] = useState<ArrivalRecord[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [dateFilter, setDateFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("todos");
@@ -64,6 +66,7 @@ export default function LlegadasPage() {
   const [discountPercent, setDiscountPercent] = useState("5");
 
   const loadData = useCallback(async () => {
+    setLoading(true);
     try {
       const [r, u, s] = await Promise.all([getLlegadas(), getUsuarios(), getConfiguracion()]);
       setRecords(r);
@@ -72,10 +75,26 @@ export default function LlegadasPage() {
       setDiscountPercent(String(s.porcentajeDescuentoTardanza));
     } catch (err) {
       console.error("Error cargando llegadas:", err);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Control de Llegadas" />
+        <AdminPageLoader
+          title="Cargando llegadas"
+          message="Estamos preparando los registros de asistencia y tardanzas."
+          showStats={false}
+          rows={6}
+        />
+      </div>
+    );
+  }
 
   const filtered = records.filter((r) => {
     const user = users.find((u) => u.id === r.usuarioId);

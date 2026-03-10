@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -40,6 +41,7 @@ import {
   Trash2,
   Loader2,
   FileSpreadsheet,
+  Save,
 } from "lucide-react";
 import { TechnicalVisit, Client, User } from "@/lib/types";
 import { deleteVisitaTecnica, getVisitasTecnicas, updateVisitaTecnica } from "@/lib/supabase/services/visitas";
@@ -60,6 +62,7 @@ export default function VisitasPage() {
   const [visits, setVisits] = useState<TechnicalVisit[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("todos");
   const [selectedVisit, setSelectedVisit] = useState<TechnicalVisit | null>(null);
@@ -70,19 +73,43 @@ export default function VisitasPage() {
   const [exportFechaFin, setExportFechaFin] = useState("");
   const [visitToDelete, setVisitToDelete] = useState<TechnicalVisit | null>(null);
   const [deletingVisitId, setDeletingVisitId] = useState<string | null>(null);
+  const [editingValues, setEditingValues] = useState<Record<string, string>>({});
+  const [savingValueId, setSavingValueId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
+    setLoading(true);
     try {
       const [v, c, u] = await Promise.all([getVisitasTecnicas(), getClientes(), getUsuarios()]);
       setVisits(v);
       setClients(c);
       setUsers(u);
+      setEditingValues(
+        Object.fromEntries(
+          v.map((visit) => [visit.id, visit.valorCobradoCliente > 0 ? String(visit.valorCobradoCliente) : ""])
+        )
+      );
     } catch (err) {
       console.error("Error cargando visitas:", err);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Visitas Técnicas" />
+        <AdminPageLoader
+          title="Cargando visitas"
+          message="Estamos preparando las visitas técnicas y sus valores registrados."
+          showStats={false}
+          rows={6}
+        />
+      </div>
+    );
+  }
 
   const filtered = visits.filter((v) => {
     const client = clients.find((c) => c.id === v.clienteId);
@@ -104,12 +131,68 @@ export default function VisitasPage() {
   const pendientes = visits.filter((v) => v.estado === "pendiente").length;
   const verificadas = visits.filter((v) => v.estado === "verificada").length;
 
+  const getValorEditado = (visit: TechnicalVisit) => editingValues[visit.id] ?? "";
+
+  const isDirty = (visit: TechnicalVisit) => {
+    const editVal = editingValues[visit.id];
+    if (editVal === undefined) return false;
+    const currentVal = visit.valorCobradoCliente > 0 ? String(visit.valorCobradoCliente) : "";
+    return editVal !== currentVal;
+  };
+
+  const parseValorCobrado = (rawValue: string, fallbackValue: number) => {
+    if (rawValue.trim() === "") return fallbackValue;
+    const parsedValue = Number(rawValue);
+    return Number.isNaN(parsedValue) ? fallbackValue : parsedValue;
+  };
+
+  const saveVisitValue = async (visit: TechnicalVisit, rawValue: string) => {
+    setSavingValueId(visit.id);
+    try {
+      const updatedVisit = await updateVisitaTecnica(visit.id, {
+        valorCobradoCliente: parseValorCobrado(rawValue, visit.valorCobradoCliente),
+      });
+
+      setVisits((currentVisits) =>
+        currentVisits.map((currentVisit) =>
+          currentVisit.id === visit.id ? updatedVisit : currentVisit
+        )
+      );
+      setEditingValues((currentValues) => ({
+        ...currentValues,
+        [visit.id]: updatedVisit.valorCobradoCliente > 0 ? String(updatedVisit.valorCobradoCliente) : "",
+      }));
+
+      if (selectedVisit?.id === visit.id) {
+        setSelectedVisit(updatedVisit);
+        setValorCobrado(updatedVisit.valorCobradoCliente > 0 ? String(updatedVisit.valorCobradoCliente) : "");
+      }
+
+      return updatedVisit;
+    } catch (err) {
+      console.error("Error guardando valor de visita:", err);
+      alert("No se pudo guardar el valor de la visita técnica.");
+      return null;
+    } finally {
+      setSavingValueId(null);
+    }
+  };
+
+  const handleSaveValue = async (visit: TechnicalVisit) => {
+    await saveVisitValue(visit, getValorEditado(visit));
+  };
+
+  const handleSaveSelectedValue = async () => {
+    if (!selectedVisit) return;
+    await saveVisitValue(selectedVisit, valorCobrado);
+  };
+
   const handleVerify = async () => {
     if (!selectedVisit) return;
     try {
       await updateVisitaTecnica(selectedVisit.id, {
         estado: "verificada",
-        valorCobradoCliente: Number(valorCobrado) || selectedVisit.valorCobradoCliente,
+        valorCobradoCliente: parseValorCobrado(valorCobrado, selectedVisit.valorCobradoCliente),
       });
       setDetailOpen(false);
       setSelectedVisit(null);
@@ -290,10 +373,43 @@ export default function VisitasPage() {
                       <TableCell className="text-sm text-foreground/80 max-w-60 truncate">
                         {visit.descripcion}
                       </TableCell>
-                      <TableCell className="text-sm font-semibold text-gold">
-                        {visit.valorCobradoCliente > 0
-                          ? formatCurrency(visit.valorCobradoCliente)
-                          : "—"}
+                      <TableCell>
+                        <div className="flex items-center gap-1.5">
+                          <div className="relative">
+                            <DollarSign className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                            <Input
+                              type="number"
+                              min="0"
+                              value={getValorEditado(visit)}
+                              onChange={(e) =>
+                                setEditingValues((currentValues) => ({
+                                  ...currentValues,
+                                  [visit.id]: e.target.value,
+                                }))
+                              }
+                              className={cn(
+                                "h-8 w-28 pl-7 pr-3 bg-secondary/50 border-border/50 text-sm font-semibold transition-colors",
+                                isDirty(visit) ? "border-gold/50 bg-gold/5 text-gold" : "text-foreground"
+                              )}
+                              placeholder="0"
+                            />
+                          </div>
+                          {isDirty(visit) && (
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-8 w-8 text-gold hover:text-gold hover:bg-gold/10 shrink-0"
+                              onClick={() => handleSaveValue(visit)}
+                              disabled={savingValueId === visit.id}
+                            >
+                              {savingValueId === visit.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Save className="h-4 w-4" />
+                              )}
+                            </Button>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell>
                         <Badge
@@ -316,7 +432,7 @@ export default function VisitasPage() {
                             className="h-8 w-8 text-muted-foreground hover:text-foreground"
                             onClick={() => {
                               setSelectedVisit(visit);
-                              setValorCobrado(String(visit.valorCobradoCliente));
+                              setValorCobrado(getValorEditado(visit));
                               setDetailOpen(true);
                             }}
                           >
@@ -387,18 +503,31 @@ export default function VisitasPage() {
                     {selectedVisit.descripcion}
                   </p>
                 </div>
-                <div className="space-y-2">
-                  <Label className="text-foreground/80">Valor Cobrado al Cliente</Label>
-                  <Input
-                    type="number"
-                    value={valorCobrado}
-                    onChange={(e) => setValorCobrado(e.target.value)}
-                    className="bg-secondary/50 border-border/50"
-                    placeholder="Ingrese el valor cobrado"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Este valor es solo para el área administrativa.
-                  </p>
+                <div className="space-y-3 bg-secondary/20 p-4 rounded-xl border border-border/50">
+                  <div className="space-y-1">
+                    <Label className="text-foreground font-medium flex items-center gap-2">
+                      <DollarSign className="h-4 w-4 text-gold" />
+                      Valor Cobrado al Cliente
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      Este valor es solo para el área administrativa.
+                    </p>
+                  </div>
+                  <div className="relative">
+                    <DollarSign className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      type="number"
+                      value={valorCobrado}
+                      onChange={(e) => setValorCobrado(e.target.value)}
+                      className={cn(
+                        "pl-9 bg-background border-border/50 font-semibold text-lg transition-colors",
+                        (selectedVisit.valorCobradoCliente > 0 ? String(selectedVisit.valorCobradoCliente) : "") !== valorCobrado
+                          ? "border-gold/50 ring-1 ring-gold/20 text-gold"
+                          : ""
+                      )}
+                      placeholder="Ingrese el valor cobrado"
+                    />
+                  </div>
                 </div>
               </div>
             );
@@ -410,6 +539,26 @@ export default function VisitasPage() {
               className="text-muted-foreground"
             >
               Cancelar
+            </Button>
+            <Button
+              onClick={handleSaveSelectedValue}
+              variant="outline"
+              className={cn(
+                "transition-colors",
+                ((selectedVisit?.valorCobradoCliente || 0) > 0 ? String(selectedVisit?.valorCobradoCliente) : "") !== valorCobrado
+                  ? "border-gold text-gold hover:text-gold hover:bg-gold/10"
+                  : "border-border/50 text-foreground/80"
+              )}
+              disabled={
+                savingValueId === selectedVisit?.id ||
+                ((selectedVisit?.valorCobradoCliente || 0) > 0 ? String(selectedVisit?.valorCobradoCliente) : "") === valorCobrado
+              }
+            >
+              {savingValueId === selectedVisit?.id ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                "Guardar valor"
+              )}
             </Button>
             <Button
               onClick={handleVerify}

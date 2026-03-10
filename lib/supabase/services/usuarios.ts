@@ -1,7 +1,35 @@
 import { supabase } from "../client";
-import { User } from "@/lib/types";
+import { User, UserSchedule, UserScheduleDraft } from "@/lib/types";
 
-function mapRow(row: any): User {
+const DAY_ORDER: Record<UserSchedule["diaSemana"], number> = {
+  lunes: 1,
+  martes: 2,
+  miercoles: 3,
+  jueves: 4,
+  viernes: 5,
+  sabado: 6,
+  domingo: 7,
+};
+
+type UserPayload = Partial<User> & { password?: string; horarios?: UserScheduleDraft[] };
+
+function normalizeTimeValue(value?: string | null): string | undefined {
+  if (!value) return undefined;
+  return value.slice(0, 5);
+}
+
+function mapScheduleRow(row: any): UserSchedule {
+  return {
+    id: row.id,
+    usuarioId: row.usuario_id,
+    diaSemana: row.dia_semana,
+    activo: row.activo ?? true,
+    horaEntrada: normalizeTimeValue(row.hora_entrada),
+    horaSalida: normalizeTimeValue(row.hora_salida),
+  };
+}
+
+function mapRow(row: any, horarios: UserSchedule[] = []): User {
   return {
     id: row.id,
     nombre: row.nombre,
@@ -15,11 +43,94 @@ function mapRow(row: any): User {
     tieneRecorrido: row.tiene_recorrido || false,
     tieneMoto: row.tiene_moto || false,
     esSupervisor: row.es_supervisor || false,
-    horaEntrada: row.hora_entrada || undefined,
-    horaSalida: row.hora_salida || undefined,
+    horaEntrada: normalizeTimeValue(row.hora_entrada),
+    horaSalida: normalizeTimeValue(row.hora_salida),
+    horarios,
     fechaCreacion: row.fecha_creacion?.split("T")[0] || "",
     avatar: row.avatar_url || undefined,
   };
+}
+
+function getPrimarySchedule(horarios?: UserScheduleDraft[]): UserScheduleDraft | undefined {
+  return (horarios || [])
+    .filter((horario) => horario.activo && horario.horaEntrada && horario.horaSalida)
+    .sort((a, b) => DAY_ORDER[a.diaSemana] - DAY_ORDER[b.diaSemana])[0];
+}
+
+function isMissingSchedulesTableError(error: { message?: string; details?: string } | null): boolean {
+  const message = `${error?.message || ""} ${error?.details || ""}`.toLowerCase();
+  return message.includes("usuario_horarios") || (message.includes("relation") && message.includes("does not exist"));
+}
+
+async function getHorariosUsuarioMap(userIds: string[]): Promise<Record<string, UserSchedule[]>> {
+  if (userIds.length === 0) return {};
+
+  const { data, error } = await supabase
+    .from("usuario_horarios")
+    .select("*")
+    .in("usuario_id", userIds);
+
+  if (error) {
+    const message = `${error.message || ""} ${error.details || ""}`.toLowerCase();
+    if (message.includes("usuario_horarios") || message.includes("relation") || message.includes("does not exist")) {
+      return {};
+    }
+    throw error;
+  }
+
+  return (data || []).reduce<Record<string, UserSchedule[]>>((acc, row: any) => {
+    const mapped = mapScheduleRow(row);
+    if (!acc[mapped.usuarioId || ""]) acc[mapped.usuarioId || ""] = [];
+    acc[mapped.usuarioId || ""].push(mapped);
+    acc[mapped.usuarioId || ""].sort((a, b) => DAY_ORDER[a.diaSemana] - DAY_ORDER[b.diaSemana]);
+    return acc;
+  }, {});
+}
+
+async function syncHorariosUsuario(userId: string, horarios: UserScheduleDraft[]): Promise<void> {
+  if (horarios.length === 0) {
+    const { error } = await supabase.from("usuario_horarios").delete().eq("usuario_id", userId);
+    if (isMissingSchedulesTableError(error)) {
+      throw new Error('Debes ejecutar la migración de "usuario_horarios" antes de guardar horarios por día.');
+    }
+    if (error) throw error;
+    return;
+  }
+
+  const rows = await Promise.all(
+    horarios.map(async (horario) => {
+      if (!horario.activo) {
+        return {
+          usuario_id: userId,
+          dia_semana: horario.diaSemana,
+          activo: false,
+          hora_entrada: null,
+          hora_salida: null,
+        };
+      }
+
+      if (!horario.horaEntrada || !horario.horaSalida) {
+        throw new Error(`Debes configurar hora de entrada y salida para ${horario.diaSemana}.`);
+      }
+
+      return {
+        usuario_id: userId,
+        dia_semana: horario.diaSemana,
+        activo: true,
+        hora_entrada: horario.horaEntrada,
+        hora_salida: horario.horaSalida,
+      };
+    })
+  );
+
+  const { error } = await supabase
+    .from("usuario_horarios")
+    .upsert(rows, { onConflict: "usuario_id,dia_semana" });
+
+  if (isMissingSchedulesTableError(error)) {
+    throw new Error('Debes ejecutar la migración de "usuario_horarios" antes de guardar horarios por día.');
+  }
+  if (error) throw error;
 }
 
 export async function getUsuarios(): Promise<User[]> {
@@ -28,7 +139,10 @@ export async function getUsuarios(): Promise<User[]> {
     .select("*")
     .order("fecha_creacion", { ascending: false });
   if (error) throw error;
-  return (data || []).map(mapRow);
+
+  const rows = data || [];
+  const schedulesByUser = await getHorariosUsuarioMap(rows.map((row: any) => row.id));
+  return rows.map((row: any) => mapRow(row, schedulesByUser[row.id] || []));
 }
 
 export async function getUsuarioById(id: string): Promise<User | null> {
@@ -38,10 +152,13 @@ export async function getUsuarioById(id: string): Promise<User | null> {
     .eq("id", id)
     .single();
   if (error) return null;
-  return mapRow(data);
+
+  const schedulesByUser = await getHorariosUsuarioMap([id]);
+  return mapRow(data, schedulesByUser[id] || []);
 }
 
-export async function createUsuario(user: Partial<User> & { password?: string }): Promise<User> {
+export async function createUsuario(user: UserPayload): Promise<User> {
+  const primarySchedule = getPrimarySchedule(user.horarios);
   const { data, error } = await supabase
     .from("usuarios")
     .insert({
@@ -57,18 +174,26 @@ export async function createUsuario(user: Partial<User> & { password?: string })
       tiene_recorrido: user.tieneRecorrido || false,
       tiene_moto: user.tieneMoto || false,
       es_supervisor: user.esSupervisor || false,
-      hora_entrada: user.horaEntrada || null,
-      hora_salida: user.horaSalida || null,
+      hora_entrada: primarySchedule?.horaEntrada || user.horaEntrada || null,
+      hora_salida: primarySchedule?.horaSalida || user.horaSalida || null,
       grupo_id: user.grupoId || null,
     })
     .select()
     .single();
   if (error) throw error;
-  return mapRow(data);
+
+  if (user.horarios !== undefined) {
+    await syncHorariosUsuario(data.id, user.horarios);
+  }
+
+  const createdUser = await getUsuarioById(data.id);
+  if (!createdUser) throw new Error("No se pudo cargar el usuario creado.");
+  return createdUser;
 }
 
-export async function updateUsuario(id: string, user: Partial<User> & { password?: string }): Promise<User> {
+export async function updateUsuario(id: string, user: UserPayload): Promise<User> {
   const updateData: any = {};
+  const primarySchedule = getPrimarySchedule(user.horarios);
   if (user.nombre !== undefined) updateData.nombre = user.nombre;
   if (user.apellido !== undefined) updateData.apellido = user.apellido;
   if (user.email !== undefined) { updateData.email = user.email; updateData.username = user.email; }
@@ -79,8 +204,13 @@ export async function updateUsuario(id: string, user: Partial<User> & { password
   if (user.tieneRecorrido !== undefined) updateData.tiene_recorrido = user.tieneRecorrido;
   if (user.tieneMoto !== undefined) updateData.tiene_moto = user.tieneMoto;
   if (user.esSupervisor !== undefined) updateData.es_supervisor = user.esSupervisor;
-  if (user.horaEntrada !== undefined) updateData.hora_entrada = user.horaEntrada || null;
-  if (user.horaSalida !== undefined) updateData.hora_salida = user.horaSalida || null;
+  if (user.horarios !== undefined) {
+    updateData.hora_entrada = primarySchedule?.horaEntrada || null;
+    updateData.hora_salida = primarySchedule?.horaSalida || null;
+  } else {
+    if (user.horaEntrada !== undefined) updateData.hora_entrada = user.horaEntrada || null;
+    if (user.horaSalida !== undefined) updateData.hora_salida = user.horaSalida || null;
+  }
   if (user.grupoId !== undefined) updateData.grupo_id = user.grupoId || null;
   if (user.password !== undefined && user.password.trim() !== "") updateData.password_hash = user.password;
 
@@ -91,7 +221,14 @@ export async function updateUsuario(id: string, user: Partial<User> & { password
     .select()
     .single();
   if (error) throw error;
-  return mapRow(data);
+
+  if (user.horarios !== undefined) {
+    await syncHorariosUsuario(id, user.horarios);
+  }
+
+  const updatedUser = await getUsuarioById(data.id);
+  if (!updatedUser) throw new Error("No se pudo cargar el usuario actualizado.");
+  return updatedUser;
 }
 
 export async function deleteUsuario(id: string): Promise<void> {
@@ -102,7 +239,8 @@ export async function deleteUsuario(id: string): Promise<void> {
   await supabase.from("recorridos").delete().eq("tecnico_id", id);
   await supabase.from("acumulacion_lideres").delete().eq("lider_id", id);
   await supabase.from("lotes_aprobacion_lider").delete().eq("lider_id", id);
-  await supabase.from("items_liquidacion").delete().eq("tecnico_id", id);
+  const { error: horariosError } = await supabase.from("usuario_horarios").delete().eq("usuario_id", id);
+  if (horariosError && !isMissingSchedulesTableError(horariosError)) throw horariosError;
   await supabase
     .from("items_aprobacion")
     .delete()

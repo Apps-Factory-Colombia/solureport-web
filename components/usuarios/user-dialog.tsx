@@ -1,13 +1,13 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { User, UserRole, UserStatus } from "@/lib/types";
+import { User, UserRole, UserScheduleDraft, UserStatus } from "@/lib/types";
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,12 +20,27 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { SCHEDULE_DAYS, UserScheduleEditor } from "@/components/usuarios/user-schedule-editor";
 
 interface UserDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   user?: User | null;
-  onSave: (user: Partial<User> & { password?: string }) => void;
+  onSave: (user: Partial<User> & { password?: string; horarios?: UserScheduleDraft[] }) => void;
+}
+
+function buildDefaultHorarios(user?: User | null): UserScheduleDraft[] {
+  const currentSchedules = new Map((user?.horarios || []).map((horario) => [horario.diaSemana, horario]));
+
+  return SCHEDULE_DAYS.map((day) => {
+    const existing = currentSchedules.get(day.value);
+    return {
+      diaSemana: day.value,
+      activo: existing?.activo ?? day.defaultActive,
+      horaEntrada: existing?.horaEntrada || user?.horaEntrada || "07:00",
+      horaSalida: existing?.horaSalida || user?.horaSalida || "17:00",
+    };
+  });
 }
 
 export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps) {
@@ -40,8 +55,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
     tieneRecorrido: false,
     tieneMoto: false,
     esSupervisor: false,
-    horaEntrada: "07:00",
-    horaSalida: "17:00",
+    horarios: buildDefaultHorarios(),
     password: "",
   });
 
@@ -58,8 +72,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
         tieneRecorrido: user.tieneRecorrido || false,
         tieneMoto: user.tieneMoto || false,
         esSupervisor: user.esSupervisor || false,
-        horaEntrada: user.horaEntrada || "07:00",
-        horaSalida: user.horaSalida || "17:00",
+        horarios: buildDefaultHorarios(user),
         password: "",
       });
     } else {
@@ -74,8 +87,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
         tieneRecorrido: false,
         tieneMoto: false,
         esSupervisor: false,
-        horaEntrada: "07:00",
-        horaSalida: "17:00",
+        horarios: buildDefaultHorarios(),
         password: "",
       });
     }
@@ -83,10 +95,34 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const payload: Partial<User> & { password?: string } = {
-      ...formData,
+
+    const shouldSendSchedules = formData.rol === "tecnico" || formData.rol === "lider";
+    const activeSchedules = formData.horarios.filter((horario) => horario.activo);
+
+    if (shouldSendSchedules) {
+      for (const horario of activeSchedules) {
+        if (!horario.horaEntrada || !horario.horaSalida) {
+          alert(`Debes configurar hora de entrada y salida para ${horario.diaSemana}.`);
+          return;
+        }
+      }
+    }
+
+    const payload: Partial<User> & { password?: string; horarios?: UserScheduleDraft[] } = {
       id: user?.id || `u${Date.now()}`,
+      nombre: formData.nombre,
+      apellido: formData.apellido,
+      email: formData.email,
+      telefono: formData.telefono,
+      rol: formData.rol,
+      estado: formData.estado,
+      esLider: formData.esLider,
+      tieneRecorrido: formData.tieneRecorrido,
+      tieneMoto: formData.tieneMoto,
+      esSupervisor: formData.esSupervisor,
+      horarios: shouldSendSchedules ? formData.horarios : [],
       fechaCreacion: user?.fechaCreacion || new Date().toISOString().split("T")[0],
+      password: formData.password,
     };
 
     if (user && !formData.password.trim()) {
@@ -99,7 +135,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-card border-border sm:max-w-md">
+      <DialogContent className="bg-card border-border sm:max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-foreground">
             {user ? "Editar Usuario" : "Nuevo Usuario"}
@@ -218,31 +254,6 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label className="text-foreground/80">Hora de Entrada</Label>
-              <Input
-                type="time"
-                value={formData.horaEntrada}
-                onChange={(e) =>
-                  setFormData({ ...formData, horaEntrada: e.target.value })
-                }
-                className="bg-secondary/50 border-border/50"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label className="text-foreground/80">Hora de Salida</Label>
-              <Input
-                type="time"
-                value={formData.horaSalida}
-                onChange={(e) =>
-                  setFormData({ ...formData, horaSalida: e.target.value })
-                }
-                className="bg-secondary/50 border-border/50"
-              />
-            </div>
-          </div>
-
           {(formData.rol === "tecnico" || formData.rol === "lider") && (
             <div className="space-y-3">
               <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 p-3">
@@ -303,6 +314,11 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
                   />
                 </div>
               )}
+
+              <UserScheduleEditor
+                horarios={formData.horarios}
+                onChange={(horarios) => setFormData({ ...formData, horarios })}
+              />
             </div>
           )}
 

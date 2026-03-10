@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -36,6 +37,7 @@ import { cn } from "@/lib/utils";
 
 export default function ConfiguracionPage() {
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
+  const [loading, setLoading] = useState(true);
   const [companyName, setCompanyName] = useState("");
   const [companyEmail, setCompanyEmail] = useState("");
   const [saved, setSaved] = useState(false);
@@ -58,6 +60,7 @@ export default function ConfiguracionPage() {
   };
 
   useEffect(() => {
+    setLoading(true);
     Promise.all([getConfiguracion(), loadPeriods()])
       .then(([s]) => {
         setCompanyName(s.nombre);
@@ -69,7 +72,8 @@ export default function ConfiguracionPage() {
         setCostoRecorridoHerramienta(String(s.costoRecorridoHerramienta));
         setPorcentajeDescuentoTardanza(String(s.porcentajeDescuentoTardanza));
       })
-      .catch((err) => console.error("Error cargando configuración:", err));
+      .catch((err) => console.error("Error cargando configuración:", err))
+      .finally(() => setLoading(false));
   }, []);
 
   const resetPeriodForm = () => {
@@ -159,6 +163,20 @@ export default function ConfiguracionPage() {
       console.error("Error guardando configuraci\u00f3n:", err);
     }
   };
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Configuración General" />
+        <AdminPageLoader
+          title="Cargando configuración"
+          message="Estamos preparando la configuración general y los períodos de liquidación."
+          showStats={false}
+          rows={5}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>

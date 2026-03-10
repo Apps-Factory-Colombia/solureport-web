@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -30,7 +32,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, Clock, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, } from "lucide-react";
+import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, Clock, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, } from "lucide-react";
 import { MaintenanceContract, Client } from "@/lib/types";
 import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/supabase/services/contratos";
 import { getClientes } from "@/lib/supabase/services/clientes";
@@ -51,8 +53,10 @@ const monthNames = [
 ];
 
 export default function ContratosPage() {
+  const router = useRouter();
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedContract, setSelectedContract] = useState<MaintenanceContract | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -68,6 +72,7 @@ export default function ContratosPage() {
   const [newCostoTotal, setNewCostoTotal] = useState("");
   const [newCantidad, setNewCantidad] = useState("3");
   const [creating, setCreating] = useState(false);
+  const [createdContractInfo, setCreatedContractInfo] = useState<{ cliente: string; cantidad: number } | null>(null);
 
   // Estados para edición del contrato general en el modal unificado
   const [editClienteId, setEditClienteId] = useState("");
@@ -93,12 +98,15 @@ export default function ContratosPage() {
   const [savingMant, setSavingMant] = useState(false);
 
   const loadData = async () => {
+    setLoading(true);
     try {
       const [ct, cl] = await Promise.all([getContratos(), getClientes()]);
       setContracts(ct);
       setClients(cl);
     } catch (err) {
       console.error("Error cargando contratos:", err);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -137,7 +145,7 @@ export default function ContratosPage() {
       const costoPorMantenimiento = Math.round(costoTotal / cantidad);
       const mantenimientos = buildMantenimientos(cantidad, anio, mesInicio, diaInicio);
 
-      await createContrato({
+      const createdContract = await createContrato({
         clienteId: newClienteId,
         anio,
         mesInicio,
@@ -149,12 +157,18 @@ export default function ContratosPage() {
         estado: "activo",
       });
 
+      const selectedClient = clients.find((client) => client.id === newClienteId);
+
       setCreateOpen(false);
       setNewClienteId("");
       setNewCostoTotal("");
       setNewCantidad("3");
       setNewMesInicio("1");
       setNewDiaInicio("1");
+      setCreatedContractInfo({
+        cliente: selectedClient?.edificio || selectedClient?.nombre || "el cliente seleccionado",
+        cantidad: createdContract.mantenimientosRealizados.length,
+      });
       await loadData();
     } catch (err) {
       console.error("Error creando contrato:", err);
@@ -419,6 +433,30 @@ export default function ContratosPage() {
               <Plus className="h-4 w-4" />
               Nuevo Contrato
             </Button>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-cyan-neon/20 bg-cyan-neon/5 p-4">
+          <div className="flex items-start gap-3">
+            <div className="rounded-lg bg-cyan-neon/10 p-2">
+              <CheckCircle2 className="h-5 w-5 text-cyan-neon" />
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-foreground">
+                El contrato ya genera sus mantenimientos automáticamente
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Al crear un contrato se crean de una vez los mantenimientos programados según la cantidad, mes y día de inicio. No necesitas crearlos por separado en la vista de mantenimientos.
+              </p>
+              <button
+                type="button"
+                onClick={() => router.push("/admin/mantenimientos")}
+                className="inline-flex items-center gap-1 text-sm font-medium text-cyan-neon hover:underline"
+              >
+                Ir a programación de mantenimientos
+                <ArrowRight className="h-4 w-4" />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1195,6 +1233,19 @@ export default function ContratosPage() {
                 </p>
               </div>
             )}
+            <div className="rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-3">
+              <div className="flex items-start gap-2">
+                <CheckCircle2 className="mt-0.5 h-4 w-4 text-cyan-neon" />
+                <div className="space-y-1">
+                  <p className="text-sm font-medium text-foreground">
+                    Este contrato generará automáticamente los mantenimientos
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Cuando pulses <span className="font-medium text-foreground">Crear Contrato</span>, se crearán también los {newCantidad || "0"} mantenimientos asociados y luego podrás revisarlos desde <span className="font-medium text-foreground">Mantenimientos</span>.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -1338,6 +1389,53 @@ export default function ContratosPage() {
                 <Trash2 className="h-4 w-4" />
               )}
               {deleting ? "Eliminando..." : "Eliminar Contrato"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!createdContractInfo} onOpenChange={(open) => { if (!open) setCreatedContractInfo(null); }}>
+        <DialogContent className="bg-card border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Contrato creado correctamente</DialogTitle>
+          </DialogHeader>
+          {createdContractInfo && (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                <div className="flex items-start gap-3">
+                  <div className="rounded-lg bg-emerald-500/10 p-2">
+                    <CheckCircle2 className="h-5 w-5 text-emerald-400" />
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-semibold text-foreground">{createdContractInfo.cliente}</p>
+                    <p className="text-sm text-muted-foreground">
+                      Se generaron automáticamente <span className="font-medium text-foreground">{createdContractInfo.cantidad}</span> mantenimientos asociados a este contrato.
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Puedes revisarlos o programarlos ahora mismo desde la vista de mantenimientos.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setCreatedContractInfo(null)}
+              className="text-muted-foreground"
+            >
+              Seguir en contratos
+            </Button>
+            <Button
+              onClick={() => {
+                setCreatedContractInfo(null);
+                router.push("/admin/mantenimientos");
+              }}
+              className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+            >
+              Ir a mantenimientos
+              <ArrowRight className="h-4 w-4" />
             </Button>
           </DialogFooter>
         </DialogContent>

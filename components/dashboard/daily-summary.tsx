@@ -1,11 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { getMantenimientos } from "@/lib/supabase/services/mantenimientos";
-import { getClientes } from "@/lib/supabase/services/clientes";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { Maintenance, Client, User } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Clock, CheckCircle2, AlertTriangle, Play } from "lucide-react";
@@ -33,16 +29,13 @@ const statusConfig: Record<string, { label: string; color: string; icon: React.E
   },
 };
 
-export function DailySummary() {
-  const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
-  const [clients, setClients] = useState<Client[]>([]);
-  const [users, setUsers] = useState<User[]>([]);
+interface DailySummaryProps {
+  maintenances: Maintenance[];
+  clients: Client[];
+  users: User[];
+}
 
-  useEffect(() => {
-    Promise.all([getMantenimientos(), getClientes(), getUsuarios()])
-      .then(([m, c, u]) => { setMaintenances(m); setClients(c); setUsers(u); })
-      .catch((err) => console.error("Error cargando resumen:", err));
-  }, []);
+export function DailySummary({ maintenances, clients, users }: DailySummaryProps) {
 
   const recentMaintenances = maintenances.slice(0, 6);
 

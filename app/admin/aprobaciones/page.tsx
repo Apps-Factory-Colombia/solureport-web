@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -45,9 +46,10 @@ import {
   FileText,
   Package,
   Users,
+  Save,
 } from "lucide-react";
 import { ActivityReport, TipoInforme, User, Client, WorkGroup, CompanySettings } from "@/lib/types";
-import { getReportesActividad, updateEstadoAprobacion } from "@/lib/supabase/services/reportes-actividad";
+import { getReportesActividad, updateCostoActividadAdmin, updateEstadoAprobacion } from "@/lib/supabase/services/reportes-actividad";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
@@ -119,22 +121,58 @@ export default function AprobacionesPage() {
   const [grupoFilter, setGrupoFilter] = useState<string>("todos");
   const [selectedReport, setSelectedReport] = useState<ActivityReport | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [editableCost, setEditableCost] = useState("");
+  const [savingCost, setSavingCost] = useState(false);
 
   const loadData = useCallback(async () => {
+    setLoading(true);
     try {
       const [r, u, c, g] = await Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos()]);
       setReports(r); setUsers(u); setClients(c); setGroups(g);
     } catch (err) {
       console.error("Error cargando aprobaciones:", err);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  useEffect(() => {
+    setEditableCost(selectedReport ? String(selectedReport.costoActividad) : "");
+  }, [selectedReport]);
+
+  const costDraft = Number(editableCost || 0);
+  const isCostDirty = selectedReport ? costDraft !== selectedReport.costoActividad : false;
+
+  const persistCost = useCallback(async (report: ActivityReport, nextCost: number) => {
+    await updateCostoActividadAdmin(report.id, nextCost);
+    setReports((prev) => prev.map((item) => item.id === report.id ? { ...item, costoActividad: nextCost } : item));
+    setSelectedReport((prev) => prev && prev.id === report.id ? { ...prev, costoActividad: nextCost } : prev);
+  }, []);
+
+  const handleSaveCost = async () => {
+    if (!selectedReport) return;
+    setSavingCost(true);
+    try {
+      await persistCost(selectedReport, costDraft);
+    } catch (err) {
+      console.error("Error actualizando costo de actividad:", err);
+    } finally {
+      setSavingCost(false);
+    }
+  };
+
   const handleApprove = async (report: ActivityReport) => {
     setProcessing(true);
     try {
+      const nextCost = selectedReport?.id === report.id ? costDraft : report.costoActividad;
+      if (nextCost !== report.costoActividad) {
+        await persistCost(report, nextCost);
+        report = { ...report, costoActividad: nextCost };
+      }
       await updateEstadoAprobacion(report.id, "aprobado");
       const tech = users.find((u) => u.id === report.tecnicoId);
       const tipo = getTipoConfig(String(report.tipo));
@@ -158,6 +196,11 @@ export default function AprobacionesPage() {
   const handleReject = async (report: ActivityReport) => {
     setProcessing(true);
     try {
+      const nextCost = selectedReport?.id === report.id ? costDraft : report.costoActividad;
+      if (nextCost !== report.costoActividad) {
+        await persistCost(report, nextCost);
+        report = { ...report, costoActividad: nextCost };
+      }
       await updateEstadoAprobacion(report.id, "rechazado");
       const tipo = getTipoConfig(String(report.tipo));
       await createNotificacion({
@@ -199,6 +242,20 @@ export default function AprobacionesPage() {
   const totalValor = reports
     .filter((r) => r.estadoAprobacionLider === "aprobado")
     .reduce((s, r) => s + r.costoActividad, 0);
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Aprobaciones de Actividades" />
+        <AdminPageLoader
+          title="Cargando aprobaciones"
+          message="Estamos preparando los informes pendientes y el historial de aprobación."
+          statsCount={4}
+          rows={6}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -602,9 +659,40 @@ export default function AprobacionesPage() {
                 )}
 
                 <div className="flex items-center justify-between rounded-lg border border-gold/20 bg-gold/5 p-4">
-                  <div>
+                  <div className="flex-1">
                     <p className="text-xs text-muted-foreground">Costo de la Actividad</p>
-                    <p className="text-lg font-bold text-gold">{formatCurrency(selectedReport.costoActividad)}</p>
+                    <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <div className="relative w-full max-w-xs">
+                        <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
+                        <Input
+                          type="number"
+                          min="0"
+                          value={editableCost}
+                          onChange={(e) => setEditableCost(e.target.value)}
+                          className={cn(
+                            "pl-9 bg-background/70 border-gold/20 text-gold font-semibold",
+                            isCostDirty && "border-gold shadow-[0_0_0_1px_rgba(234,179,8,0.25)]"
+                          )}
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
+                        onClick={handleSaveCost}
+                        disabled={!isCostDirty || savingCost || processing}
+                      >
+                        {savingCost ? (
+                          <div className="h-4 w-4 animate-spin rounded-full border-2 border-gold border-t-transparent" />
+                        ) : (
+                          <Save className="h-4 w-4" />
+                        )}
+                        {savingCost ? "Guardando..." : "Guardar valor"}
+                      </Button>
+                    </div>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      El admin puede ajustar este valor incluso si la actividad sigue pendiente por aprobar.
+                    </p>
                   </div>
                   {selectedReport.fechaAprobacionLider && (
                     <div className="text-right">

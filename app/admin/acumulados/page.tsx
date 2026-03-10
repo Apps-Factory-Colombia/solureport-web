@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -56,9 +57,11 @@ export default function AcumuladosPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
+  const [loading, setLoading] = useState(true);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
 
   useEffect(() => {
+    setLoading(true);
     Promise.all([
       getPeriodos(), getAcumulacionesLider(), getLotesAprobacion(),
       getReportesActividad(), getUsuarios(), getGrupos(), getConfiguracion(),
@@ -66,7 +69,8 @@ export default function AcumuladosPage() {
       setPeriods(p); setAccumulations(a); setBatches(b);
       setActReports(r); setUsers(u); setGroups(g); setCompanySettings(s);
       if (p.length > 0) setSelectedPeriodId(p[0].id);
-    }).catch((err) => console.error("Error cargando acumulados:", err));
+    }).catch((err) => console.error("Error cargando acumulados:", err))
+      .finally(() => setLoading(false));
   }, []);
 
   const selectedPeriod = periods.find((p) => p.id === selectedPeriodId);
@@ -156,6 +160,20 @@ export default function AcumuladosPage() {
   const totalExtraLider = periodAccumulations.reduce((s, a) => s + a.extraLider, 0);
   const totalRecorridos = periodAccumulations.reduce((s, a) => s + a.totalRecorridos, 0);
   const grandTotal = periodAccumulations.reduce((s, a) => s + a.totalAcumulado, 0);
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Acumulados de Líderes" />
+        <AdminPageLoader
+          title="Cargando acumulados"
+          message="Estamos preparando los acumulados, lotes de aprobación y reportes del período."
+          statsCount={4}
+          rows={6}
+        />
+      </div>
+    );
+  }
 
   return (
     <div>

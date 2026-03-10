@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -50,6 +51,7 @@ export default function ReportesPage() {
   const [reports, setReports] = useState<MaintenanceReport[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedReport, setSelectedReport] = useState<MaintenanceReport | null>(null);
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -58,15 +60,32 @@ export default function ReportesPage() {
   const [sendingReportId, setSendingReportId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
+    setLoading(true);
     try {
       const [r, c, u] = await Promise.all([getReportesMantenimiento(), getClientes(), getUsuarios()]);
       setReports(r); setClients(c); setUsers(u);
     } catch (err) {
       console.error("Error cargando reportes:", err);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Reportes de Mantenimiento" />
+        <AdminPageLoader
+          title="Cargando reportes"
+          message="Estamos preparando los reportes y sus evidencias asociadas."
+          showStats={false}
+          rows={6}
+        />
+      </div>
+    );
+  }
 
   const handleSendEmail = async (report: MaintenanceReport) => {
     const client = clients.find((c) => c.id === report.clienteId);

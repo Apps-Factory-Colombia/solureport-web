@@ -135,6 +135,18 @@ export async function updateVisitaTecnica(id: string, v: Partial<TechnicalVisit>
     .select()
     .single();
   if (error) throw error;
+
+  if (v.valorCobradoCliente !== undefined) {
+    const fecha = data.fecha_inicio?.split("T")[0];
+
+    await supabase
+      .from("reportes_actividad")
+      .update({ costo_actividad: v.valorCobradoCliente })
+      .eq("tipo", "visita_tecnica")
+      .eq("tecnico_id", data.tecnico_id)
+      .eq("fecha", fecha);
+  }
+
   return mapRow(data);
 }
 

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
+import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -71,6 +72,7 @@ export default function LiquidacionPage() {
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [leaderAccumulations, setLeaderAccumulations] = useState<LeaderAccumulation[]>([]);
   const [actReports, setActReports] = useState<ActivityReport[]>([]);
+  const [loading, setLoading] = useState(true);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
   const [comprobanteOpen, setComprobanteOpen] = useState(false);
@@ -134,6 +136,7 @@ export default function LiquidacionPage() {
   };
 
   useEffect(() => {
+    setLoading(true);
     Promise.all([
       getPeriodos(), getLiquidationEntries(), getActividades(),
       getUsuarios(), getGrupos(), getAcumulacionesLider(), getReportesActividad(),
@@ -141,8 +144,23 @@ export default function LiquidacionPage() {
       setPeriods(p); setEntries(e); setActivities(a);
       setUsers(u); setGroups(g); setLeaderAccumulations(la); setActReports(ar);
       if (p.length > 0) setSelectedPeriodId(p[0].id);
-    }).catch((err) => console.error("Error cargando liquidación:", err));
+    }).catch((err) => console.error("Error cargando liquidación:", err))
+      .finally(() => setLoading(false));
   }, []);
+
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Liquidación" />
+        <AdminPageLoader
+          title="Cargando liquidación"
+          message="Estamos preparando períodos, reportes y acumulados para la liquidación."
+          statsCount={4}
+          rows={7}
+        />
+      </div>
+    );
+  }
 
   const selectedPeriod = periods.find((p) => p.id === selectedPeriodId);
   const periodEntries = entries.filter(
