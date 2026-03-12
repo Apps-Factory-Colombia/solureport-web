@@ -217,6 +217,11 @@ export default function VisitasPage() {
 
   const handleVerify = async () => {
     if (!selectedVisit) return;
+    if (selectedVisit.estado === "verificada") {
+      setDetailOpen(false);
+      setSelectedVisit(null);
+      return;
+    }
     try {
       const updatedVisit = await updateVisitaTecnica(selectedVisit.id, {
         estado: "verificada",
@@ -677,13 +682,15 @@ export default function VisitasPage() {
                 "Guardar valor"
               )}
             </Button>
-            <Button
-              onClick={handleVerify}
-              className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
-            >
-              <CheckCircle2 className="h-4 w-4" />
-              Verificar y Guardar
-            </Button>
+            {selectedVisit?.estado !== "verificada" && (
+              <Button
+                onClick={handleVerify}
+                className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                Verificar visita
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
