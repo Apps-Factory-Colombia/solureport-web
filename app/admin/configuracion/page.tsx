@@ -9,7 +9,6 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import {
   Table,
@@ -27,7 +26,6 @@ import {
   Trash2,
   DollarSign,
   Percent,
-  Star,
   Route,
 } from "lucide-react";
 import { CompanySettings, LiquidationPeriod } from "@/lib/types";
@@ -39,11 +37,9 @@ export default function ConfiguracionPage() {
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [loading, setLoading] = useState(true);
   const [companyName, setCompanyName] = useState("");
-  const [companyEmail, setCompanyEmail] = useState("");
+  const [companyOperationalEmail, setCompanyOperationalEmail] = useState("");
   const [saved, setSaved] = useState(false);
   const [costoRevisionLider, setCostoRevisionLider] = useState("");
-  const [porcentajeExtraLider, setPorcentajeExtraLider] = useState("");
-  const [extraLiderActivo, setExtraLiderActivo] = useState(true);
   const [costoRecorridoNormal, setCostoRecorridoNormal] = useState("");
   const [costoRecorridoHerramienta, setCostoRecorridoHerramienta] = useState("");
   const [porcentajeDescuentoTardanza, setPorcentajeDescuentoTardanza] = useState("");
@@ -64,10 +60,8 @@ export default function ConfiguracionPage() {
     Promise.all([getConfiguracion(), loadPeriods()])
       .then(([s]) => {
         setCompanyName(s.nombre);
-        setCompanyEmail(s.correoRemitente);
+        setCompanyOperationalEmail(s.correoEmpresa);
         setCostoRevisionLider(String(s.costoRevisionLider));
-        setPorcentajeExtraLider(String(s.porcentajeExtraLider));
-        setExtraLiderActivo(s.extraLiderActivo);
         setCostoRecorridoNormal(String(s.costoRecorridoNormal));
         setCostoRecorridoHerramienta(String(s.costoRecorridoHerramienta));
         setPorcentajeDescuentoTardanza(String(s.porcentajeDescuentoTardanza));
@@ -149,10 +143,8 @@ export default function ConfiguracionPage() {
     try {
       await updateConfiguracion({
         nombre: companyName,
-        correoRemitente: companyEmail,
+        correoEmpresa: companyOperationalEmail,
         costoRevisionLider: Number(costoRevisionLider),
-        porcentajeExtraLider: Number(porcentajeExtraLider),
-        extraLiderActivo,
         costoRecorridoNormal: Number(costoRecorridoNormal),
         costoRecorridoHerramienta: Number(costoRecorridoHerramienta),
         porcentajeDescuentoTardanza: Number(porcentajeDescuentoTardanza),
@@ -341,41 +333,33 @@ export default function ConfiguracionPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-6">
-                <div className="space-y-4">
-                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                    <Star className="h-4 w-4 text-purple-400" />
-                    Extra Líder
-                  </h3>
-                  <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 p-4">
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-foreground">
-                        Extra Líder Activo
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Habilitar el porcentaje extra para el líder sobre las actividades del grupo (excluye recorridos y primer integrante).
-                      </p>
-                    </div>
-                    <Switch
-                      checked={extraLiderActivo}
-                      onCheckedChange={setExtraLiderActivo}
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Nombre de la empresa</Label>
+                    <Input
+                      value={companyName}
+                      onChange={(e) => setCompanyName(e.target.value)}
+                      className="bg-secondary/50 border-border/50"
                     />
                   </div>
-                  {extraLiderActivo && (
-                    <div className="space-y-2">
-                      <Label className="text-foreground/80">Porcentaje Extra Líder (%)</Label>
-                      <Input
-                        type="number"
-                        min="0"
-                        max="100"
-                        value={porcentajeExtraLider}
-                        onChange={(e) => setPorcentajeExtraLider(e.target.value)}
-                        className="bg-secondary/50 border-border/50 max-w-xs"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Este porcentaje se aplica sobre el valor total de las actividades (sin recorridos) desde el segundo integrante del grupo en adelante. Puede variar en cada cierre de actividades.
-                      </p>
-                    </div>
-                  )}
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Correo empresa / seguimiento</Label>
+                    <Input
+                      type="email"
+                      value={companyOperationalEmail}
+                      onChange={(e) => setCompanyOperationalEmail(e.target.value)}
+                      className="bg-secondary/50 border-border/50"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Dominio de envío</Label>
+                    <Input
+                      value="notificaciones@solucionesyautomatizaciones.com"
+                      className="bg-secondary/50 border-border/50"
+                      readOnly
+                      disabled
+                    />
+                  </div>
                 </div>
 
                 <Separator className="bg-border/50" />

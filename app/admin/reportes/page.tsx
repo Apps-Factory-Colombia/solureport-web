@@ -43,14 +43,19 @@ import {
   deleteReporteMantenimiento,
 } from "@/lib/supabase/services/mantenimientos";
 import { getClientes } from "@/lib/supabase/services/clientes";
+import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
+import { CompanySettings } from "@/lib/types";
+
+const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 
 export default function ReportesPage() {
   const [reports, setReports] = useState<MaintenanceReport[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedReport, setSelectedReport] = useState<MaintenanceReport | null>(null);
@@ -62,8 +67,8 @@ export default function ReportesPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [r, c, u] = await Promise.all([getReportesMantenimiento(), getClientes(), getUsuarios()]);
-      setReports(r); setClients(c); setUsers(u);
+      const [r, c, u, s] = await Promise.all([getReportesMantenimiento(), getClientes(), getUsuarios(), getConfiguracion()]);
+      setReports(r); setClients(c); setUsers(u); setCompanySettings(s);
     } catch (err) {
       console.error("Error cargando reportes:", err);
     } finally {
@@ -96,13 +101,17 @@ export default function ReportesPage() {
       return;
     }
 
+    const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
+    const operationalEmail = companySettings?.correoEmpresa || DEFAULT_NOTIFICATION_BCC;
+    const ccRecipients = [client.correoAliado, operationalEmail].filter(Boolean);
+
     setSendingReportId(report.id);
 
     try {
       // Generar PDF en Base64 para adjunto
       const base64Pdf = await generateReportePDF({
         titulo: "REPORTE DE MANTENIMIENTO PREVENTIVO",
-        empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
+        empresa: companyName,
         fecha: report.fechaGeneracion,
         tecnico: tech ? `${tech.nombre} ${tech.apellido}` : "—",
         cliente: client?.nombre || "—",
@@ -124,14 +133,18 @@ export default function ReportesPage() {
         },
         body: JSON.stringify({
           to: client.correo,
+          cc: ccRecipients,
           subject: `Reporte de mantenimiento - ${client.edificio}`,
+          template: "maintenance-report",
           data: {
+            companyName,
             clienteNombre: client.contacto || client.nombre,
             edificio: client.edificio,
             fecha: report.fechaGeneracion,
             tecnicoNombre: tech ? `${tech.nombre} ${tech.apellido}` : "No disponible",
             observaciones: report.observaciones,
           },
+          replyTo: operationalEmail,
           pdfAttachment: {
             filename: `Reporte_${client.edificio.replace(/\s+/g, '_')}_${report.fechaGeneracion}.pdf`,
             base64: base64Content

@@ -38,6 +38,7 @@ function mapRow(row: any, schedulesByUser: ScheduleMap = {}): ArrivalRecord {
     estadoSalida: row.estado_salida || "no_reportado",
     tarde: row.tarde || false,
     minutosRetraso: row.minutos_retraso || 0,
+    fotoObraUrl: row.foto_obra_url || undefined,
     mensajeEnviado: row.mensaje_enviado || undefined,
     tipoMensaje: row.tipo_mensaje || undefined,
     descuentoAplicado: row.descuento_aplicado || false,

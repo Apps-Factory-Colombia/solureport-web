@@ -4,7 +4,12 @@ import { useState, useMemo, useEffect } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -30,11 +35,13 @@ import {
   TrendingUp,
   ArrowRight,
   AlertTriangle,
-  Percent,
   Users,
+  Save,
+  Search,
+  ChevronDown,
 } from "lucide-react";
 import { LeaderAccumulation, LiquidationPeriod, LeaderApprovalBatch, ActivityReport, User, WorkGroup, CompanySettings } from "@/lib/types";
-import { getAcumulacionesLider, getLotesAprobacion, getReportesActividad } from "@/lib/supabase/services/reportes-actividad";
+import { getAcumulacionesLider, getLotesAprobacion, getReportesActividad, upsertConfiguracionExtraLider } from "@/lib/supabase/services/reportes-actividad";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getGrupos } from "@/lib/supabase/services/grupos";
 import { getPeriodos } from "@/lib/supabase/services/liquidacion";
@@ -59,6 +66,10 @@ export default function AcumuladosPage() {
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
+  const [leaderExtraDrafts, setLeaderExtraDrafts] = useState<Record<string, { porcentaje: string; activo: boolean }>>({});
+  const [savingLeaderId, setSavingLeaderId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [openCards, setOpenCards] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setLoading(true);
@@ -85,9 +96,18 @@ export default function AcumuladosPage() {
 
   const leaders = users.filter((u) => u.esLider);
 
+  const periodAccumulationSettings = useMemo(() => {
+    return accumulations.reduce<Map<string, LeaderAccumulation>>((acc, item) => {
+      if (item.periodoId === selectedPeriodId) {
+        acc.set(item.liderId, item);
+      }
+      return acc;
+    }, new Map());
+  }, [accumulations, selectedPeriodId]);
+
   // Computar acumulaciones desde reportes_actividad
-  const extraPct = companySettings?.porcentajeExtraLider || 0;
-  const extraActivo = companySettings?.extraLiderActivo ?? false;
+  const defaultExtraPct = companySettings?.porcentajeExtraLider || 0;
+  const defaultExtraActivo = companySettings?.extraLiderActivo ?? false;
   const costoRevision = companySettings?.costoRevisionLider || 0;
 
   const periodAccumulations = useMemo(() => {
@@ -103,10 +123,26 @@ export default function AcumuladosPage() {
       reportesAprobados: number;
     }>();
 
+    leaders.forEach((leader) => {
+      const persisted = periodAccumulationSettings.get(leader.id);
+      accMap.set(leader.id, {
+        liderId: leader.id,
+        totalAprobadoPago: persisted?.totalAprobadoPago ?? 0,
+        totalPendientePago: persisted?.totalPendientePago ?? 0,
+        extraLider: persisted?.extraLider ?? 0,
+        totalRecorridos: persisted?.totalRecorridos ?? 0,
+        totalAcumulado: persisted?.totalAcumulado ?? 0,
+        porcentajeExtraLiderAplicado: persisted?.porcentajeExtraLiderAplicado ?? defaultExtraPct,
+        extraLiderActivo: persisted?.extraLiderActivo ?? defaultExtraActivo,
+        reportesAprobados: 0,
+      });
+    });
+
     // Agrupar reportes por líder
     periodReports.forEach((r) => {
       const liderId = r.liderGrupoId;
       if (!liderId) return;
+      const persisted = periodAccumulationSettings.get(liderId);
       const acc = accMap.get(liderId) || {
         liderId,
         totalAprobadoPago: 0,
@@ -114,8 +150,8 @@ export default function AcumuladosPage() {
         extraLider: 0,
         totalRecorridos: 0,
         totalAcumulado: 0,
-        porcentajeExtraLiderAplicado: extraPct,
-        extraLiderActivo: extraActivo,
+        porcentajeExtraLiderAplicado: persisted?.porcentajeExtraLiderAplicado ?? defaultExtraPct,
+        extraLiderActivo: persisted?.extraLiderActivo ?? defaultExtraActivo,
         reportesAprobados: 0,
       };
 
@@ -135,7 +171,7 @@ export default function AcumuladosPage() {
 
     // Calcular extra líder y totales
     accMap.forEach((acc) => {
-      if (extraActivo && extraPct > 0) {
+      if (acc.extraLiderActivo && acc.porcentajeExtraLiderAplicado > 0) {
         // Extra se calcula sobre actividades aprobadas (excluidos recorridos) del grupo desde el 2do integrante
         const group = groups.find((g) => g.liderId === acc.liderId);
         const groupMembers = group ? users.filter((u) => group.miembros.includes(u.id) && u.id !== acc.liderId) : [];
@@ -147,19 +183,91 @@ export default function AcumuladosPage() {
           );
           extraBase += memberReports.reduce((s, r) => s + r.costoActividad, 0);
         });
-        acc.extraLider = Math.round(extraBase * extraPct / 100);
+        acc.extraLider = Math.round(extraBase * acc.porcentajeExtraLiderAplicado / 100);
       }
       acc.totalAcumulado = acc.totalAprobadoPago + acc.totalPendientePago + acc.extraLider + acc.totalRecorridos;
     });
 
     return Array.from(accMap.values());
-  }, [periodReports, extraPct, extraActivo, groups, users]);
+  }, [periodReports, periodAccumulationSettings, defaultExtraPct, defaultExtraActivo, groups, users, leaders]);
+
+  const handleLeaderExtraDraftChange = (liderId: string, updates: Partial<{ porcentaje: string; activo: boolean }>, current: { porcentajeExtraLiderAplicado: number; extraLiderActivo: boolean }) => {
+    const existing = leaderExtraDrafts[liderId] || {
+      porcentaje: String(current.porcentajeExtraLiderAplicado),
+      activo: current.extraLiderActivo,
+    };
+
+    setLeaderExtraDrafts((prev) => ({
+      ...prev,
+      [liderId]: {
+        ...existing,
+        ...updates,
+      },
+    }));
+  };
+
+  const handleSaveLeaderExtra = async (liderId: string, current: { porcentajeExtraLiderAplicado: number; extraLiderActivo: boolean }) => {
+    if (!selectedPeriodId) return;
+
+    const draft = leaderExtraDrafts[liderId] || {
+      porcentaje: String(current.porcentajeExtraLiderAplicado),
+      activo: current.extraLiderActivo,
+    };
+
+    const porcentaje = Number(draft.porcentaje);
+    if (Number.isNaN(porcentaje) || porcentaje < 0 || porcentaje > 100) {
+      alert("El porcentaje del extra líder debe estar entre 0 y 100.");
+      return;
+    }
+
+    setSavingLeaderId(liderId);
+    try {
+      const updated = await upsertConfiguracionExtraLider(liderId, selectedPeriodId, {
+        porcentajeExtraLiderAplicado: porcentaje,
+        extraLiderActivo: draft.activo,
+      });
+
+      setAccumulations((prev) => {
+        const exists = prev.some((item) => item.liderId === updated.liderId && item.periodoId === updated.periodoId);
+        if (exists) {
+          return prev.map((item) => item.liderId === updated.liderId && item.periodoId === updated.periodoId ? { ...item, ...updated } : item);
+        }
+        return [...prev, updated];
+      });
+
+      setLeaderExtraDrafts((prev) => {
+        const next = { ...prev };
+        delete next[liderId];
+        return next;
+      });
+    } catch (error) {
+      console.error("Error guardando configuración de extra líder:", error);
+      alert("No se pudo guardar la configuración del extra líder para este líder.");
+    } finally {
+      setSavingLeaderId(null);
+    }
+  };
 
   const totalAprobado = periodAccumulations.reduce((s, a) => s + a.totalAprobadoPago, 0);
   const totalPendiente = periodAccumulations.reduce((s, a) => s + a.totalPendientePago, 0);
   const totalExtraLider = periodAccumulations.reduce((s, a) => s + a.extraLider, 0);
   const totalRecorridos = periodAccumulations.reduce((s, a) => s + a.totalRecorridos, 0);
   const grandTotal = periodAccumulations.reduce((s, a) => s + a.totalAcumulado, 0);
+
+  const toggleCard = (liderId: string) => {
+    setOpenCards((prev) => ({ ...prev, [liderId]: !prev[liderId] }));
+  };
+
+  const filteredAccumulations = useMemo(() => {
+    if (!searchQuery.trim()) return periodAccumulations;
+    const lowerQuery = searchQuery.toLowerCase();
+    return periodAccumulations.filter((acc) => {
+      const leader = users.find((u) => u.id === acc.liderId);
+      if (!leader) return false;
+      const fullName = `${leader.nombre} ${leader.apellido}`.toLowerCase();
+      return fullName.includes(lowerQuery);
+    });
+  }, [periodAccumulations, searchQuery, users]);
 
   if (loading) {
     return (
@@ -179,30 +287,36 @@ export default function AcumuladosPage() {
     <div>
       <AdminHeader title="Acumulados por Líder" />
       <div className="p-6 space-y-6">
-        <div className="flex items-center gap-3">
-          <CalendarDays className="h-5 w-5 text-gold" />
-          <Select value={selectedPeriodId} onValueChange={setSelectedPeriodId}>
-            <SelectTrigger className="w-72 bg-secondary/50 border-border/50">
-              <SelectValue placeholder="Seleccionar período" />
-            </SelectTrigger>
-            <SelectContent className="bg-card border-border">
-              {periods.map((p) => (
-                <SelectItem key={p.id} value={p.id}>
-                  {p.fechaInicio} → {p.fechaFin}{" "}
-                  {p.estado === "cerrado" ? "(Cerrado)" : "(Abierto)"}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {companySettings?.extraLiderActivo ? (
-            <Badge variant="outline" className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20 text-xs">
-              Extra Líder Activo ({companySettings?.porcentajeExtraLider}%)
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <CalendarDays className="h-5 w-5 text-gold" />
+            <Select value={selectedPeriodId} onValueChange={setSelectedPeriodId}>
+              <SelectTrigger className="w-72 bg-secondary/50 border-border/50">
+                <SelectValue placeholder="Seleccionar período" />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-border">
+                {periods.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.fechaInicio} → {p.fechaFin}{" "}
+                    {p.estado === "cerrado" ? "(Cerrado)" : "(Abierto)"}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Badge variant="outline" className="bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20 text-xs hidden sm:inline-flex">
+              Configuración individual por líder
             </Badge>
-          ) : (
-            <Badge variant="outline" className="bg-muted text-muted-foreground border-border/50 text-xs">
-              Extra Líder Inactivo
-            </Badge>
-          )}
+          </div>
+
+          <div className="relative w-full sm:w-72">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder="Buscar líder..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-9 bg-secondary/50 border-border/50"
+            />
+          </div>
         </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
@@ -271,7 +385,15 @@ export default function AcumuladosPage() {
           </Card>
         )}
 
-        {periodAccumulations.map((acc) => {
+        {filteredAccumulations.length === 0 && periodAccumulations.length > 0 && (
+          <Card className="border-border/50 bg-card/80">
+            <CardContent className="p-8 text-center">
+              <p className="text-muted-foreground text-sm">No se encontraron líderes que coincidan con "{searchQuery}".</p>
+            </CardContent>
+          </Card>
+        )}
+
+        {filteredAccumulations.map((acc) => {
           const leader = users.find((u) => u.id === acc.liderId);
           const group = groups.find((g) => g.liderId === acc.liderId);
           const batch = periodBatches.find((b) => b.liderId === acc.liderId);
@@ -282,158 +404,218 @@ export default function AcumuladosPage() {
           const nonRecorridoReports = approvedReports.filter((r) => r.tipo !== "recorrido");
 
           const groupMembers = group ? users.filter((u) => group.miembros.includes(u.id) && u.id !== acc.liderId) : [];
+          const draft = leaderExtraDrafts[acc.liderId];
+          const draftPercentage = draft?.porcentaje ?? String(acc.porcentajeExtraLiderAplicado);
+          const draftActive = draft?.activo ?? acc.extraLiderActivo;
+          const isOpen = openCards[acc.liderId] ?? false;
 
           return (
-            <Card key={acc.liderId} className="border-border/50 bg-card/80 backdrop-blur-sm">
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-lg text-foreground flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gold/10">
-                      <Users className="h-5 w-5 text-gold" />
-                    </div>
-                    <div>
-                      <p>{leader?.nombre} {leader?.apellido}</p>
-                      <p className="text-xs text-muted-foreground font-normal">{group?.nombre} · Líder</p>
-                    </div>
-                  </CardTitle>
-                  {leader?.esSupervisor && (
-                    <Badge variant="outline" className="bg-purple-500/10 text-purple-400 border-purple-500/20 text-xs">
-                      Supervisor
-                    </Badge>
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="grid grid-cols-5 gap-3">
-                  <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-center">
-                    <p className="text-lg font-bold text-emerald-400">{formatCurrency(acc.totalAprobadoPago)}</p>
-                    <p className="text-[10px] text-muted-foreground">Aprobado Pago</p>
-                  </div>
-                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-center">
-                    <p className="text-lg font-bold text-amber-400">{formatCurrency(acc.totalPendientePago)}</p>
-                    <p className="text-[10px] text-muted-foreground">Pendiente Pago</p>
-                    {acc.totalPendientePago > 0 && (
-                      <p className="text-[9px] text-amber-400 mt-1 flex items-center justify-center gap-0.5">
-                        <ArrowRight className="h-3 w-3" /> Pasa al siguiente período
-                      </p>
-                    )}
-                  </div>
-                  <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-3 text-center">
-                    <p className="text-lg font-bold text-purple-400">{formatCurrency(acc.extraLider)}</p>
-                    <p className="text-[10px] text-muted-foreground">Extra Líder</p>
-                    <p className="text-[9px] text-purple-400/70 mt-1">
-                      {acc.extraLiderActivo ? `${acc.porcentajeExtraLiderAplicado}% activo` : "Inactivo"}
-                    </p>
-                  </div>
-                  <div className="rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-3 text-center">
-                    <p className="text-lg font-bold text-cyan-neon">{formatCurrency(acc.totalRecorridos)}</p>
-                    <p className="text-[10px] text-muted-foreground">Recorridos</p>
-                  </div>
-                  <div className="rounded-lg border border-gold/20 bg-gold/5 p-3 text-center">
-                    <p className="text-lg font-bold text-gold">{formatCurrency(acc.totalAcumulado)}</p>
-                    <p className="text-[10px] text-muted-foreground">Total Acumulado</p>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  <p className="text-sm font-semibold text-foreground flex items-center gap-2">
-                    <Star className="h-4 w-4 text-purple-400" />
-                    Cálculo Extra Líder
-                  </p>
-                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2 text-sm">
-                    <p className="text-xs text-muted-foreground">
-                      El extra líder corresponde a un <span className="text-purple-400 font-bold">{acc.porcentajeExtraLiderAplicado}%</span> del valor total de las actividades (excluidos recorridos) desde el <span className="text-foreground font-medium">segundo integrante</span> del grupo en adelante. El primer integrante queda excluido.
-                    </p>
-                    <div className="grid grid-cols-1 gap-1 mt-2">
-                      {groupMembers.map((member, idx) => {
-                        const memberReports = nonRecorridoReports.filter(
-                          (r) => r.tecnicoId === member.id
-                        );
-                        const memberTotal = memberReports.reduce((s, r) => s + r.costoActividad, 0);
-                        const isExcluded = idx === 0;
-                        const extraApplied = isExcluded ? 0 : Math.round(memberTotal * acc.porcentajeExtraLiderAplicado / 100);
-
-                        return (
-                          <div
-                            key={member.id}
-                            className={cn(
-                              "flex items-center justify-between rounded px-3 py-1.5",
-                              isExcluded ? "bg-muted/30" : "bg-purple-500/5"
-                            )}
-                          >
-                            <div className="flex items-center gap-2">
-                              <Badge
-                                variant="outline"
-                                className={cn(
-                                  "text-[10px] w-5 h-5 p-0 flex items-center justify-center",
-                                  isExcluded
-                                    ? "bg-muted text-muted-foreground border-border/50"
-                                    : "bg-purple-500/10 text-purple-400 border-purple-500/20"
-                                )}
-                              >
-                                {idx + 1}
-                              </Badge>
-                              <span className="text-sm text-foreground/80">
-                                {member.nombre} {member.apellido}
-                              </span>
-                              {isExcluded && (
-                                <Badge variant="outline" className="text-[9px] bg-muted text-muted-foreground border-border/50">
-                                  Excluido
-                                </Badge>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-3">
-                              <span className="text-xs text-muted-foreground">
-                                Actividades: {formatCurrency(memberTotal)}
-                              </span>
-                              {!isExcluded && (
-                                <span className="text-xs font-medium text-purple-400">
-                                  +{formatCurrency(extraApplied)}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-
-                {acc.reportesAprobados > 0 && costoRevision > 0 && (
-                  <div className="space-y-3">
-                    <p className="text-sm font-semibold text-foreground flex items-center gap-2">
-                      <DollarSign className="h-4 w-4 text-gold" />
-                      Costo por Revisión de Actividades
-                    </p>
-                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
-                      <div className="grid grid-cols-3 gap-4 text-sm">
-                        <div>
-                          <p className="text-xs text-muted-foreground">Costo por revisión</p>
-                          <p className="font-medium text-foreground">{formatCurrency(costoRevision)}</p>
-                          <p className="text-[10px] text-muted-foreground">Administrable</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">Revisiones realizadas</p>
-                          <p className="font-medium text-foreground">{acc.reportesAprobados}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-muted-foreground">Total costo líder</p>
-                          <p className="font-bold text-gold">{formatCurrency(costoRevision * acc.reportesAprobados)}</p>
-                        </div>
+            <Card key={acc.liderId} className="border-border/50 bg-card/80 backdrop-blur-sm overflow-hidden">
+              <Collapsible open={isOpen} onOpenChange={() => toggleCard(acc.liderId)}>
+                <CardHeader className="py-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <CollapsibleTrigger asChild>
+                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                          <ChevronDown className={cn("h-4 w-4 transition-transform duration-200", isOpen && "rotate-180")} />
+                          <span className="sr-only">Toggle</span>
+                        </Button>
+                      </CollapsibleTrigger>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gold/10">
+                        <Users className="h-5 w-5 text-gold" />
+                      </div>
+                      <div>
+                        <CardTitle className="text-base text-foreground flex items-center gap-2">
+                          {leader?.nombre} {leader?.apellido}
+                          {leader?.esSupervisor && (
+                            <Badge variant="outline" className="bg-purple-500/10 text-purple-400 border-purple-500/20 text-[10px] h-5 py-0">
+                              Supervisor
+                            </Badge>
+                          )}
+                        </CardTitle>
+                        <p className="text-xs text-muted-foreground font-normal">{group?.nombre || "Sin grupo"} · Líder</p>
                       </div>
                     </div>
-                  </div>
-                )}
 
-                {acc.totalPendientePago > 0 && (
-                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 flex items-center gap-3">
-                    <AlertTriangle className="h-5 w-5 text-amber-400 shrink-0" />
-                    <p className="text-xs text-amber-400">
-                      <strong>Arrastre de período:</strong> Al cerrar este período, {formatCurrency(acc.totalPendientePago)} pendiente de pago se trasladará automáticamente al siguiente período quincenal.
-                    </p>
+                    <div className="text-right hidden sm:block">
+                      <p className="text-sm font-bold text-gold">{formatCurrency(acc.totalAcumulado)}</p>
+                      <p className="text-[10px] text-muted-foreground">Total Acumulado</p>
+                    </div>
                   </div>
-                )}
-              </CardContent>
+                </CardHeader>
+
+                <CollapsibleContent>
+                  <CardContent className="space-y-6 pt-0 border-t border-border/20 mt-2">
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                      <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-center">
+                        <p className="text-lg font-bold text-emerald-400">{formatCurrency(acc.totalAprobadoPago)}</p>
+                        <p className="text-[10px] text-muted-foreground">Aprobado Pago</p>
+                      </div>
+                      <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-center">
+                        <p className="text-lg font-bold text-amber-400">{formatCurrency(acc.totalPendientePago)}</p>
+                        <p className="text-[10px] text-muted-foreground">Pendiente Pago</p>
+                        {acc.totalPendientePago > 0 && (
+                          <p className="text-[9px] text-amber-400 mt-1 flex items-center justify-center gap-0.5">
+                            <ArrowRight className="h-3 w-3" /> Arrastre
+                          </p>
+                        )}
+                      </div>
+                      <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-3 text-center">
+                        <p className="text-lg font-bold text-purple-400">{formatCurrency(acc.extraLider)}</p>
+                        <p className="text-[10px] text-muted-foreground">Extra Líder</p>
+                        <p className="text-[9px] text-purple-400/70 mt-1">
+                          {acc.extraLiderActivo ? `${acc.porcentajeExtraLiderAplicado}% activo` : "Inactivo"}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-3 text-center">
+                        <p className="text-lg font-bold text-cyan-neon">{formatCurrency(acc.totalRecorridos)}</p>
+                        <p className="text-[10px] text-muted-foreground">Recorridos</p>
+                      </div>
+                      <div className="rounded-lg border border-gold/20 bg-gold/5 p-3 text-center sm:hidden">
+                        <p className="text-lg font-bold text-gold">{formatCurrency(acc.totalAcumulado)}</p>
+                        <p className="text-[10px] text-muted-foreground">Total Acumulado</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <p className="text-sm font-semibold text-foreground flex items-center gap-2">
+                        <Star className="h-4 w-4 text-purple-400" />
+                        Configuración y Cálculo Extra Líder
+                      </p>
+                      <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto_auto] md:items-end">
+                          <div className="space-y-2">
+                            <Label className="text-foreground/80">Porcentaje para este líder (%)</Label>
+                            <Input
+                              type="number"
+                              min="0"
+                              max="100"
+                              value={draftPercentage}
+                              onChange={(e) => handleLeaderExtraDraftChange(acc.liderId, { porcentaje: e.target.value }, acc)}
+                              className="max-w-xs bg-secondary/50 border-border/50"
+                            />
+                            <p className="text-xs text-muted-foreground">
+                              Este valor solo afecta a {leader?.nombre} en el período seleccionado.
+                            </p>
+                          </div>
+                          <div className="flex items-center justify-between gap-3 rounded-lg border border-border/50 bg-secondary/30 px-4 py-2">
+                            <span className="text-sm text-foreground/80">Activo</span>
+                            <Switch
+                              checked={draftActive}
+                              onCheckedChange={(checked) => handleLeaderExtraDraftChange(acc.liderId, { activo: checked }, acc)}
+                            />
+                          </div>
+                          <Button
+                            type="button"
+                            onClick={() => handleSaveLeaderExtra(acc.liderId, acc)}
+                            disabled={savingLeaderId === acc.liderId}
+                            className="bg-gold hover:bg-gold-dark text-background font-semibold w-full md:w-auto"
+                          >
+                            <Save className="h-4 w-4 mr-2" />
+                            {savingLeaderId === acc.liderId ? "Guardando..." : "Guardar Cambios"}
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2 text-sm">
+                        <p className="text-xs text-muted-foreground">
+                          El extra líder corresponde a un <span className="text-purple-400 font-bold">{acc.porcentajeExtraLiderAplicado}%</span> del valor total de las actividades (excluidos recorridos) desde el <span className="text-foreground font-medium">segundo integrante</span> del grupo en adelante. El primer integrante queda excluido.
+                        </p>
+                        {groupMembers.length === 0 ? (
+                          <p className="text-xs text-muted-foreground italic mt-2">No hay integrantes en el grupo de este líder.</p>
+                        ) : (
+                          <div className="grid grid-cols-1 gap-1 mt-2">
+                            {groupMembers.map((member, idx) => {
+                              const memberReports = nonRecorridoReports.filter(
+                                (r) => r.tecnicoId === member.id
+                              );
+                              const memberTotal = memberReports.reduce((s, r) => s + r.costoActividad, 0);
+                              const isExcluded = idx === 0;
+                              const extraApplied = isExcluded ? 0 : Math.round(memberTotal * acc.porcentajeExtraLiderAplicado / 100);
+
+                              return (
+                                <div
+                                  key={member.id}
+                                  className={cn(
+                                    "flex items-center justify-between rounded px-3 py-1.5",
+                                    isExcluded ? "bg-muted/30" : "bg-purple-500/5"
+                                  )}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <Badge
+                                      variant="outline"
+                                      className={cn(
+                                        "text-[10px] w-5 h-5 p-0 flex items-center justify-center",
+                                        isExcluded
+                                          ? "bg-muted text-muted-foreground border-border/50"
+                                          : "bg-purple-500/10 text-purple-400 border-purple-500/20"
+                                      )}
+                                    >
+                                      {idx + 1}
+                                    </Badge>
+                                    <span className="text-sm text-foreground/80">
+                                      {member.nombre} {member.apellido}
+                                    </span>
+                                    {isExcluded && (
+                                      <Badge variant="outline" className="text-[9px] bg-muted text-muted-foreground border-border/50">
+                                        Excluido
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs text-muted-foreground">
+                                      Actividades: {formatCurrency(memberTotal)}
+                                    </span>
+                                    {!isExcluded && (
+                                      <span className="text-xs font-medium text-purple-400">
+                                        +{formatCurrency(extraApplied)}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {acc.reportesAprobados > 0 && costoRevision > 0 && (
+                      <div className="space-y-3">
+                        <p className="text-sm font-semibold text-foreground flex items-center gap-2">
+                          <DollarSign className="h-4 w-4 text-gold" />
+                          Costo por Revisión de Actividades
+                        </p>
+                        <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                          <div className="grid grid-cols-3 gap-4 text-sm">
+                            <div>
+                              <p className="text-xs text-muted-foreground">Costo por revisión</p>
+                              <p className="font-medium text-foreground">{formatCurrency(costoRevision)}</p>
+                              <p className="text-[10px] text-muted-foreground">Administrable</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-muted-foreground">Revisiones realizadas</p>
+                              <p className="font-medium text-foreground">{acc.reportesAprobados}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-muted-foreground">Total costo líder</p>
+                              <p className="font-bold text-gold">{formatCurrency(costoRevision * acc.reportesAprobados)}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {acc.totalPendientePago > 0 && (
+                      <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 flex items-center gap-3">
+                        <AlertTriangle className="h-5 w-5 text-amber-400 shrink-0" />
+                        <p className="text-xs text-amber-400">
+                          <strong>Arrastre de período:</strong> Al cerrar este período, {formatCurrency(acc.totalPendientePago)} pendiente de pago se trasladará automáticamente al siguiente período quincenal.
+                        </p>
+                      </div>
+                    )}
+                  </CardContent>
+                </CollapsibleContent>
+              </Collapsible>
             </Card>
           );
         })}

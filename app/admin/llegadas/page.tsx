@@ -41,7 +41,7 @@ import {
   MessageSquareWarning,
   FileWarning,
   Percent,
-  Users,
+  ImageIcon,
 } from "lucide-react";
 import { ArrivalRecord, User, CompanySettings } from "@/lib/types";
 import { getLlegadas, updateLlegada } from "@/lib/supabase/services/llegadas";
@@ -64,6 +64,7 @@ export default function LlegadasPage() {
   const [messageText, setMessageText] = useState("");
   const [discountOpen, setDiscountOpen] = useState(false);
   const [discountPercent, setDiscountPercent] = useState("5");
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -257,6 +258,7 @@ export default function LlegadasPage() {
                   <TableHead className="text-muted-foreground">Entrada</TableHead>
                   <TableHead className="text-muted-foreground">Salida</TableHead>
                   <TableHead className="text-muted-foreground">Retraso</TableHead>
+                  <TableHead className="text-muted-foreground">Evidencia</TableHead>
                   <TableHead className="text-muted-foreground">Mensaje</TableHead>
                   <TableHead className="text-muted-foreground">Descuento</TableHead>
                   <TableHead className="text-muted-foreground w-28">Acciones</TableHead>
@@ -321,6 +323,23 @@ export default function LlegadasPage() {
                           </Badge>
                         ) : (
                           <span className="text-xs text-emerald-400">A tiempo</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {record.fotoObraUrl ? (
+                          <button
+                            type="button"
+                            onClick={() => setImagePreviewUrl(record.fotoObraUrl || null)}
+                            className="group relative h-12 w-12 overflow-hidden rounded-md border border-border/50 bg-secondary/40"
+                          >
+                            <img
+                              src={record.fotoObraUrl}
+                              alt={`Evidencia de asistencia de ${user?.nombre || "empleado"}`}
+                              className="h-full w-full object-cover transition-transform group-hover:scale-105"
+                            />
+                          </button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
                         )}
                       </TableCell>
                       <TableCell>
@@ -538,6 +557,26 @@ export default function LlegadasPage() {
               {selectedRecord?.descuentoAplicado ? "Actualizar Descuento" : "Aplicar Descuento"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(imagePreviewUrl)} onOpenChange={(open) => !open && setImagePreviewUrl(null)}>
+        <DialogContent className="bg-card border-border sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-foreground">
+              <ImageIcon className="h-5 w-5 text-gold" />
+              Evidencia de asistencia
+            </DialogTitle>
+          </DialogHeader>
+          {imagePreviewUrl && (
+            <div className="overflow-hidden rounded-lg border border-border/50 bg-secondary/20">
+              <img
+                src={imagePreviewUrl}
+                alt="Evidencia de asistencia"
+                className="max-h-[70vh] w-full object-contain"
+              />
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

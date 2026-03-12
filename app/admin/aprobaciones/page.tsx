@@ -56,6 +56,14 @@ import { getGrupos } from "@/lib/supabase/services/grupos";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { cn } from "@/lib/utils";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
@@ -125,6 +133,12 @@ export default function AprobacionesPage() {
   const [processing, setProcessing] = useState(false);
   const [editableCost, setEditableCost] = useState("");
   const [savingCost, setSavingCost] = useState(false);
+  const [inlineCostDrafts, setInlineCostDrafts] = useState<Record<string, string>>({});
+  const [savingInlineCostId, setSavingInlineCostId] = useState<string | null>(null);
+
+  // Paginación
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -146,11 +160,28 @@ export default function AprobacionesPage() {
 
   const costDraft = Number(editableCost || 0);
   const isCostDirty = selectedReport ? costDraft !== selectedReport.costoActividad : false;
+  const getInlineCostValue = useCallback(
+    (report: ActivityReport) => inlineCostDrafts[report.id] ?? String(report.costoActividad),
+    [inlineCostDrafts]
+  );
+  const getNextCostForReport = useCallback(
+    (report: ActivityReport) => {
+      if (selectedReport?.id === report.id) return costDraft;
+      return Number((inlineCostDrafts[report.id] ?? String(report.costoActividad)) || 0);
+    },
+    [costDraft, inlineCostDrafts, selectedReport]
+  );
 
   const persistCost = useCallback(async (report: ActivityReport, nextCost: number) => {
     await updateCostoActividadAdmin(report.id, nextCost);
     setReports((prev) => prev.map((item) => item.id === report.id ? { ...item, costoActividad: nextCost } : item));
     setSelectedReport((prev) => prev && prev.id === report.id ? { ...prev, costoActividad: nextCost } : prev);
+    setInlineCostDrafts((prev) => {
+      if (!(report.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[report.id];
+      return next;
+    });
   }, []);
 
   const handleSaveCost = async () => {
@@ -165,10 +196,24 @@ export default function AprobacionesPage() {
     }
   };
 
+  const handleInlineSaveCost = async (report: ActivityReport) => {
+    const nextCost = getNextCostForReport(report);
+    if (nextCost === report.costoActividad) return;
+
+    setSavingInlineCostId(report.id);
+    try {
+      await persistCost(report, nextCost);
+    } catch (err) {
+      console.error("Error actualizando costo de actividad desde la tabla:", err);
+    } finally {
+      setSavingInlineCostId(null);
+    }
+  };
+
   const handleApprove = async (report: ActivityReport) => {
     setProcessing(true);
     try {
-      const nextCost = selectedReport?.id === report.id ? costDraft : report.costoActividad;
+      const nextCost = getNextCostForReport(report);
       if (nextCost !== report.costoActividad) {
         await persistCost(report, nextCost);
         report = { ...report, costoActividad: nextCost };
@@ -196,7 +241,7 @@ export default function AprobacionesPage() {
   const handleReject = async (report: ActivityReport) => {
     setProcessing(true);
     try {
-      const nextCost = selectedReport?.id === report.id ? costDraft : report.costoActividad;
+      const nextCost = getNextCostForReport(report);
       if (nextCost !== report.costoActividad) {
         await persistCost(report, nextCost);
         report = { ...report, costoActividad: nextCost };
@@ -235,6 +280,17 @@ export default function AprobacionesPage() {
       return matchSearch && matchTipo && matchEstado && matchGrupo;
     });
   }, [reports, search, tipoFilter, estadoFilter, grupoFilter]);
+
+  // Paginación de resultados filtrados
+  const totalPages = Math.ceil(filtered.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentReports = filtered.slice(startIndex, endIndex);
+
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, tipoFilter, estadoFilter, grupoFilter]);
 
   const totalReportes = reports.length;
   const aprobados = reports.filter((r) => r.estadoAprobacionLider === "aprobado").length;
@@ -359,24 +415,28 @@ export default function AprobacionesPage() {
             <Table>
               <TableHeader>
                 <TableRow className="border-border/50 hover:bg-transparent">
-                  <TableHead className="text-muted-foreground">Tipo</TableHead>
-                  <TableHead className="text-muted-foreground">Técnico</TableHead>
-                  <TableHead className="text-muted-foreground">Grupo / Líder</TableHead>
-                  <TableHead className="text-muted-foreground">Fecha</TableHead>
-                  <TableHead className="text-muted-foreground">Descripción</TableHead>
-                  <TableHead className="text-muted-foreground">Costo</TableHead>
-                  <TableHead className="text-muted-foreground">Aprobación</TableHead>
-                  <TableHead className="text-muted-foreground w-12"></TableHead>
+                  <TableHead>Fecha</TableHead>
+                  <TableHead>Tipo</TableHead>
+                  <TableHead>Técnico</TableHead>
+                  <TableHead>Cliente / Proyecto</TableHead>
+                  <TableHead>Estado Lider</TableHead>
+                  <TableHead className="text-right">Valor</TableHead>
+                  <TableHead className="text-right">Acciones</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((report) => {
+                {currentReports.map((report) => {
                   const tech = users.find((u) => u.id === report.tecnicoId);
-                  const leader = users.find((u) => u.id === report.liderGrupoId);
+                  const client = report.clienteId ? clients.find((c) => c.id === report.clienteId) : null;
                   const group = groups.find((g) => g.id === report.grupoId);
+                  const leader = group ? users.find((u) => u.id === group.liderId) : null;
                   const tipo = getTipoConfig(String(report.tipo));
                   const estado = estadoAprobacionConfig[report.estadoAprobacionLider];
                   const TipoIcon = tipo.icon;
+                  const inlineCostValue = getInlineCostValue(report);
+                  const inlineCost = Number(inlineCostValue || 0);
+                  const isInlineCostDirty = inlineCost !== report.costoActividad;
+                  const isInlineSaving = savingInlineCostId === report.id;
 
                   return (
                     <TableRow
@@ -386,6 +446,9 @@ export default function AprobacionesPage() {
                         report.estadoAprobacionLider === "pendiente" && "bg-amber-500/3"
                       )}
                     >
+                      <TableCell className="text-sm text-foreground/80 whitespace-nowrap">
+                        {report.fecha}
+                      </TableCell>
                       <TableCell>
                         <Badge variant="outline" className={cn("text-[10px] gap-1", tipo.color)}>
                           <TipoIcon className="h-3 w-3" />
@@ -396,25 +459,64 @@ export default function AprobacionesPage() {
                         <p className="text-sm font-medium text-foreground">
                           {tech?.nombre} {tech?.apellido}
                         </p>
-                      </TableCell>
-                      <TableCell>
-                        <p className="text-sm text-foreground/80">{group?.nombre}</p>
                         <p className="text-xs text-muted-foreground">
-                          Líder: {leader?.nombre} {leader?.apellido}
+                          Grupo: {group?.nombre || "Sin grupo"}
                         </p>
                       </TableCell>
-                      <TableCell className="text-sm text-foreground/80">{report.fecha}</TableCell>
-                      <TableCell className="text-sm text-foreground/80 max-w-48 truncate">
-                        {report.descripcion}
-                      </TableCell>
-                      <TableCell className="text-sm font-semibold text-gold">
-                        {formatCurrency(report.costoActividad)}
+                      <TableCell className="max-w-64">
+                        <p className="text-sm text-foreground/80 truncate">
+                          {client ? `${client.nombre} — ${client.edificio}` : report.descripcion}
+                        </p>
+                        <p className="text-xs text-muted-foreground truncate">
+                          Líder: {leader?.nombre} {leader?.apellido}
+                        </p>
                       </TableCell>
                       <TableCell>
                         <Badge variant="outline" className={cn("text-xs gap-1", estado.color)}>
                           <estado.icon className="h-3 w-3" />
                           {estado.label}
                         </Badge>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="ml-auto flex w-full max-w-[180px] items-center justify-end gap-2">
+                          <div className="relative flex-1">
+                            <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
+                            <Input
+                              type="number"
+                              min="0"
+                              value={inlineCostValue}
+                              onChange={(e) =>
+                                setInlineCostDrafts((prev) => ({
+                                  ...prev,
+                                  [report.id]: e.target.value,
+                                }))
+                              }
+                              className={cn(
+                                "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
+                                isInlineCostDirty && "border-gold/50 bg-gold/5"
+                              )}
+                            />
+                          </div>
+                          {isInlineCostDirty && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
+                              onClick={() => handleInlineSaveCost(report)}
+                              disabled={isInlineSaving || processing}
+                            >
+                              {isInlineSaving ? (
+                                <div className="h-4 w-4 animate-spin rounded-full border-2 border-gold border-t-transparent" />
+                              ) : (
+                                <Save className="h-4 w-4" />
+                              )}
+                            </Button>
+                          )}
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {formatCurrency(report.costoActividad)} actual
+                        </p>
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
@@ -436,7 +538,7 @@ export default function AprobacionesPage() {
                                 size="icon"
                                 className="h-8 w-8 text-muted-foreground hover:text-emerald-400"
                                 onClick={() => handleApprove(report)}
-                                disabled={processing}
+                                disabled={processing || isInlineSaving}
                               >
                                 <CheckCircle2 className="h-4 w-4" />
                               </Button>
@@ -445,7 +547,7 @@ export default function AprobacionesPage() {
                                 size="icon"
                                 className="h-8 w-8 text-muted-foreground hover:text-red-400"
                                 onClick={() => handleReject(report)}
-                                disabled={processing}
+                                disabled={processing || isInlineSaving}
                               >
                                 <XCircle className="h-4 w-4" />
                               </Button>
@@ -458,6 +560,38 @@ export default function AprobacionesPage() {
                 })}
               </TableBody>
             </Table>
+
+            {totalPages > 1 && (
+              <div className="p-4 border-t border-border/50 flex justify-end">
+                <Pagination>
+                  <PaginationContent>
+                    <PaginationItem>
+                      <PaginationPrevious
+                        onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                        className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                      />
+                    </PaginationItem>
+                    {Array.from({ length: totalPages }).map((_, i) => (
+                      <PaginationItem key={i + 1}>
+                        <PaginationLink
+                          onClick={() => setCurrentPage(i + 1)}
+                          isActive={currentPage === i + 1}
+                          className="cursor-pointer"
+                        >
+                          {i + 1}
+                        </PaginationLink>
+                      </PaginationItem>
+                    ))}
+                    <PaginationItem>
+                      <PaginationNext
+                        onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                        className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                      />
+                    </PaginationItem>
+                  </PaginationContent>
+                </Pagination>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -691,7 +825,7 @@ export default function AprobacionesPage() {
                       </Button>
                     </div>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      El admin puede ajustar este valor incluso si la actividad sigue pendiente por aprobar.
+                      El admin puede ajustar este valor incluso si la actividad está pendiente o ya fue aprobada.
                     </p>
                   </div>
                   {selectedReport.fechaAprobacionLider && (

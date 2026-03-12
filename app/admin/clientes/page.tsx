@@ -200,6 +200,12 @@ export default function ClientesPage() {
                             {client.correo}
                           </span>
                         </div>
+                        {client.correoAliado && (
+                          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                            <Mail className="h-3 w-3" />
+                            Aliado: {client.correoAliado}
+                          </div>
+                        )}
                         <div className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Phone className="h-3 w-3" />
                           {client.telefono}

@@ -254,6 +254,61 @@ export async function getAcumulacionesLider(): Promise<LeaderAccumulation[]> {
   return (data || []).map(mapAccumulation);
 }
 
+export async function upsertConfiguracionExtraLider(
+  liderId: string,
+  periodoId: string,
+  settings: {
+    porcentajeExtraLiderAplicado: number;
+    extraLiderActivo: boolean;
+  }
+): Promise<LeaderAccumulation> {
+  const { data: existing, error: existingError } = await supabase
+    .from("acumulacion_lideres")
+    .select("*")
+    .eq("lider_id", liderId)
+    .eq("periodo_id", periodoId)
+    .limit(1)
+    .maybeSingle();
+
+  if (existingError) throw existingError;
+
+  const payload = {
+    porcentaje_extra_lider_aplicado: settings.porcentajeExtraLiderAplicado,
+    extra_lider_activo: settings.extraLiderActivo,
+    fecha_actualizacion: new Date().toISOString(),
+  };
+
+  if (existing) {
+    const { data, error } = await supabase
+      .from("acumulacion_lideres")
+      .update(payload)
+      .eq("lider_id", liderId)
+      .eq("periodo_id", periodoId)
+      .select("*")
+      .limit(1)
+      .single();
+    if (error) throw error;
+    return mapAccumulation(data);
+  }
+
+  const { data, error } = await supabase
+    .from("acumulacion_lideres")
+    .insert({
+      lider_id: liderId,
+      periodo_id: periodoId,
+      total_aprobado_pago: 0,
+      total_pendiente_pago: 0,
+      extra_lider: 0,
+      total_recorridos: 0,
+      total_acumulado: 0,
+      ...payload,
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return mapAccumulation(data);
+}
+
 export async function deleteReporteActividadAdmin(id: string): Promise<void> {
   // Actividades grupales del líder tienen IDs con formato reg-{registroId}-{tecnicoId}
   if (id.startsWith("reg-")) {

@@ -43,12 +43,23 @@ import {
   FileSpreadsheet,
   Save,
 } from "lucide-react";
-import { TechnicalVisit, Client, User } from "@/lib/types";
+import { TechnicalVisit, Client, User, CompanySettings } from "@/lib/types";
 import { deleteVisitaTecnica, getVisitasTecnicas, updateVisitaTecnica } from "@/lib/supabase/services/visitas";
 import { getClientes } from "@/lib/supabase/services/clientes";
+import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { cn } from "@/lib/utils";
-import { generateTablePDF } from "@/lib/utils/pdf-generator";
+import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
+
+const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
@@ -62,6 +73,7 @@ export default function VisitasPage() {
   const [visits, setVisits] = useState<TechnicalVisit[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("todos");
@@ -76,13 +88,18 @@ export default function VisitasPage() {
   const [editingValues, setEditingValues] = useState<Record<string, string>>({});
   const [savingValueId, setSavingValueId] = useState<string | null>(null);
 
+  // Paginación
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
+
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [v, c, u] = await Promise.all([getVisitasTecnicas(), getClientes(), getUsuarios()]);
+      const [v, c, u, s] = await Promise.all([getVisitasTecnicas(), getClientes(), getUsuarios(), getConfiguracion()]);
       setVisits(v);
       setClients(c);
       setUsers(u);
+      setCompanySettings(s);
       setEditingValues(
         Object.fromEntries(
           v.map((visit) => [visit.id, visit.valorCobradoCliente > 0 ? String(visit.valorCobradoCliente) : ""])
@@ -96,6 +113,11 @@ export default function VisitasPage() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter]);
 
   if (loading) {
     return (
@@ -111,7 +133,7 @@ export default function VisitasPage() {
     );
   }
 
-  const filtered = visits.filter((v) => {
+  const filteredVisits = visits.filter((v) => {
     const client = clients.find((c) => c.id === v.clienteId);
     const tech = users.find((u) => u.id === v.tecnicoId);
     const matchesSearch =
@@ -124,6 +146,12 @@ export default function VisitasPage() {
       statusFilter === "todos" || v.estado === statusFilter;
     return matchesSearch && matchesStatus;
   });
+
+  // Paginación de resultados filtrados
+  const totalPages = Math.ceil(filteredVisits.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentVisits = filteredVisits.slice(startIndex, endIndex);
 
   const totalCobrado = visits
     .filter((v) => v.estado === "verificada")
@@ -190,10 +218,68 @@ export default function VisitasPage() {
   const handleVerify = async () => {
     if (!selectedVisit) return;
     try {
-      await updateVisitaTecnica(selectedVisit.id, {
+      const updatedVisit = await updateVisitaTecnica(selectedVisit.id, {
         estado: "verificada",
         valorCobradoCliente: parseValorCobrado(valorCobrado, selectedVisit.valorCobradoCliente),
       });
+
+      const client = clients.find((c) => c.id === selectedVisit.clienteId);
+      const tech = users.find((u) => u.id === selectedVisit.tecnicoId);
+      const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
+      const operationalEmail = companySettings?.correoEmpresa || DEFAULT_NOTIFICATION_BCC;
+
+      if (client?.correo && tech) {
+        try {
+          const pdfBase64 = await generateReportePDF({
+            titulo: "REPORTE DE VISITA TÉCNICA",
+            subtitulo: `Tipo de visita: ${updatedVisit.tipoVisita}`,
+            empresa: companyName,
+            fecha: updatedVisit.fecha,
+            tecnico: `${tech.nombre} ${tech.apellido}`,
+            cliente: client.nombre,
+            edificio: client.edificio,
+            observaciones: updatedVisit.observaciones
+              ? `${updatedVisit.descripcion}\n\nObservaciones: ${updatedVisit.observaciones}`
+              : updatedVisit.descripcion,
+            fotosAntes: updatedVisit.fotosAntes,
+            fotosDespues: updatedVisit.fotosDespues,
+            firmaUrl: updatedVisit.firmaReceptorUrl,
+          }, true) as string;
+
+          const base64Content = pdfBase64.split(",")[1];
+
+          await fetch("/api/send-email", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              to: client.correo,
+              cc: [client.correoAliado, operationalEmail].filter(Boolean),
+              subject: `Reporte de visita técnica - ${client.edificio}`,
+              template: "technical-visit-report",
+              data: {
+                companyName,
+                clienteNombre: client.contacto || client.nombre,
+                edificio: client.edificio,
+                fecha: updatedVisit.fecha,
+                tecnicoNombre: `${tech.nombre} ${tech.apellido}`,
+                tipoVisita: updatedVisit.tipoVisita,
+                descripcion: updatedVisit.descripcion,
+                observaciones: updatedVisit.observaciones,
+              },
+              replyTo: operationalEmail,
+              pdfAttachment: {
+                filename: `Visita_${client.edificio.replace(/\s+/g, '_')}_${updatedVisit.fecha}.pdf`,
+                base64: base64Content,
+              },
+            }),
+          });
+        } catch (emailErr) {
+          console.error("Error enviando correo de visita técnica:", emailErr);
+        }
+      }
+
       setDetailOpen(false);
       setSelectedVisit(null);
       await loadData();
@@ -356,7 +442,7 @@ export default function VisitasPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((visit) => {
+                {currentVisits.map((visit: TechnicalVisit) => {
                   const client = clients.find((c) => c.id === visit.clienteId);
                   const tech = users.find((u) => u.id === visit.tecnicoId);
 
@@ -455,6 +541,37 @@ export default function VisitasPage() {
             </Table>
           </CardContent>
         </Card>
+        {totalPages > 1 && (
+          <div className="mt-4 flex justify-end">
+            <Pagination>
+              <PaginationContent>
+                <PaginationItem>
+                  <PaginationPrevious
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                  />
+                </PaginationItem>
+                {Array.from({ length: totalPages }).map((_, i) => (
+                  <PaginationItem key={i + 1}>
+                    <PaginationLink
+                      onClick={() => setCurrentPage(i + 1)}
+                      isActive={currentPage === i + 1}
+                      className="cursor-pointer"
+                    >
+                      {i + 1}
+                    </PaginationLink>
+                  </PaginationItem>
+                ))}
+                <PaginationItem>
+                  <PaginationNext
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                  />
+                </PaginationItem>
+              </PaginationContent>
+            </Pagination>
+          </div>
+        )}
       </div>
 
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>

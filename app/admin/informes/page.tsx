@@ -131,6 +131,20 @@ export default function InformesPage() {
       return matchSearch && matchGrupo;
     });
 
+  if (loading) {
+    return (
+      <div>
+        <AdminHeader title="Informes Técnicos" />
+        <AdminPageLoader
+          title="Cargando informes técnicos"
+          message="Estamos preparando los reportes, técnicos, clientes y grupos."
+          statsCount={4}
+          rows={6}
+        />
+      </div>
+    );
+  }
+
   return (
     <div>
       <AdminHeader title="Informes Técnicos" />

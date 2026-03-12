@@ -13,7 +13,7 @@ export interface UserSchedule {
   horaSalida?: string;
 }
 
-export interface UserScheduleDraft extends UserSchedule { }
+export type UserScheduleDraft = UserSchedule;
 
 export interface User {
   id: string;
@@ -51,6 +51,7 @@ export interface Client {
   direccion: string;
   contacto: string;
   correo: string;
+  correoAliado?: string;
   telefono: string;
   frecuenciaMantenimiento: number;
   puertasPeatonales: number;
@@ -142,6 +143,7 @@ export interface CompanySettings {
   nombre: string;
   logo: string;
   correoRemitente: string;
+  correoEmpresa: string;
   plantillaReportePDF: string;
   porcentajeDescuentoTardanza: number;
   porcentajeExtraLider: number;
@@ -209,6 +211,7 @@ export interface ArrivalRecord {
   estadoSalida?: "normal" | "salida_anticipada" | "no_reportado";
   tarde: boolean;
   minutosRetraso: number;
+  fotoObraUrl?: string;
   mensajeEnviado?: string;
   tipoMensaje?: "pedagogico" | "citacion_descargos";
   descuentoAplicado: boolean;

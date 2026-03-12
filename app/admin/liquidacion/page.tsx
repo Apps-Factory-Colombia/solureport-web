@@ -50,11 +50,24 @@ import {
 import { LiquidationPeriod, LiquidationEntry, Activity, User, WorkGroup, LeaderAccumulation, ActivityReport } from "@/lib/types";
 import { getPeriodos, getLiquidationEntries, closePeriodo } from "@/lib/supabase/services/liquidacion";
 import { getActividades } from "@/lib/supabase/services/actividades";
+import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getGrupos } from "@/lib/supabase/services/grupos";
 import { deleteReporteActividadAdmin, getAcumulacionesLider, getReportesActividad } from "@/lib/supabase/services/reportes-actividad";
 import { cn } from "@/lib/utils";
 import { generateTablePDF, generateComprobantePDF } from "@/lib/utils/pdf-generator";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
+
+import { CompanySettings } from "@/lib/types";
+
+const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
@@ -72,6 +85,7 @@ export default function LiquidacionPage() {
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [leaderAccumulations, setLeaderAccumulations] = useState<LeaderAccumulation[]>([]);
   const [actReports, setActReports] = useState<ActivityReport[]>([]);
+  const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
@@ -82,11 +96,18 @@ export default function LiquidacionPage() {
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
 
+  // Paginación para tabla detallada
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
+
   const handleClosePeriod = async () => {
     if (!selectedPeriod) return;
     setClosing(true);
     try {
       await closePeriodo(selectedPeriod.id);
+
+      const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
+      const operationalEmail = companySettings?.correoEmpresa || DEFAULT_NOTIFICATION_BCC;
 
       const techIds = Array.from(techSummary.keys());
       const techEmails = techIds
@@ -102,21 +123,18 @@ export default function LiquidacionPage() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               to: tech.email,
+              cc: operationalEmail,
               subject: `SoluReport - Liquidación Cerrada (${selectedPeriod.fechaInicio} → ${selectedPeriod.fechaFin})`,
-              html: `
-                <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
-                  <h2 style="color:#D4A843">Liquidación Cerrada</h2>
-                  <p>Hola <strong>${tech.nombre} ${tech.apellido}</strong>,</p>
-                  <p>El período de liquidación <strong>${selectedPeriod.fechaInicio} → ${selectedPeriod.fechaFin}</strong> ha sido cerrado.</p>
-                  <table style="width:100%;border-collapse:collapse;margin:16px 0">
-                    <tr style="background:#f5f5f5"><td style="padding:8px;border:1px solid #ddd">Actividades</td><td style="padding:8px;border:1px solid #ddd;text-align:right"><strong>${data?.actividades || 0}</strong></td></tr>
-                    <tr><td style="padding:8px;border:1px solid #ddd">Total Liquidación</td><td style="padding:8px;border:1px solid #ddd;text-align:right;color:#D4A843"><strong>${formatCurrency(data?.total || 0)}</strong></td></tr>
-                  </table>
-                  <p>Ingresa al aplicativo para descargar tu comprobante individual.</p>
-                  <hr style="border:none;border-top:1px solid #eee;margin:24px 0" />
-                  <p style="font-size:11px;color:#999">SOLUCIONES & AUTOMATIZACIONES S.A.S. — SoluReport</p>
-                </div>
-              `,
+              template: "liquidation-closed",
+              data: {
+                companyName,
+                tecnicoNombre: `${tech.nombre} ${tech.apellido}`,
+                fechaInicio: selectedPeriod.fechaInicio,
+                fechaFin: selectedPeriod.fechaFin,
+                actividades: data?.actividades || 0,
+                total: formatCurrency(data?.total || 0),
+              },
+              replyTo: operationalEmail,
             }),
           });
         });
@@ -139,14 +157,19 @@ export default function LiquidacionPage() {
     setLoading(true);
     Promise.all([
       getPeriodos(), getLiquidationEntries(), getActividades(),
-      getUsuarios(), getGrupos(), getAcumulacionesLider(), getReportesActividad(),
-    ]).then(([p, e, a, u, g, la, ar]) => {
+      getUsuarios(), getGrupos(), getAcumulacionesLider(), getReportesActividad(), getConfiguracion(),
+    ]).then(([p, e, a, u, g, la, ar, s]) => {
       setPeriods(p); setEntries(e); setActivities(a);
-      setUsers(u); setGroups(g); setLeaderAccumulations(la); setActReports(ar);
+      setUsers(u); setGroups(g); setLeaderAccumulations(la); setActReports(ar); setCompanySettings(s);
       if (p.length > 0) setSelectedPeriodId(p[0].id);
     }).catch((err) => console.error("Error cargando liquidación:", err))
       .finally(() => setLoading(false));
   }, []);
+
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedPeriodId, selectedGroupId]);
 
   if (loading) {
     return (
@@ -210,6 +233,12 @@ export default function LiquidacionPage() {
   const filteredPeriodReports = periodReports.filter(
     (r) => selectedGroupId === "todos" || r.grupoId === selectedGroupId
   );
+
+  // Paginación de resultados filtrados
+  const totalPages = Math.ceil(filteredPeriodReports.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentReports = filteredPeriodReports.slice(startIndex, endIndex);
 
   const handleDeleteActivity = async () => {
     if (!reportToDelete) return;
@@ -463,7 +492,7 @@ export default function LiquidacionPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredPeriodReports.map((r) => {
+                    {currentReports.map((r) => {
                       const tech = users.find((u) => u.id === r.tecnicoId);
                       const group = groups.find((g) => g.id === r.grupoId);
                       const tipoLabel = r.tipo === "mantenimiento_preventivo" ? "Mant. Preventivo"
@@ -523,7 +552,7 @@ export default function LiquidacionPage() {
                         </TableRow>
                       );
                     })}
-                    {periodReports.length === 0 && (
+                    {filteredPeriodReports.length === 0 && (
                       <TableRow>
                         <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-8">
                           No hay actividades registradas en este período.
@@ -532,6 +561,38 @@ export default function LiquidacionPage() {
                     )}
                   </TableBody>
                 </Table>
+
+                {totalPages > 1 && (
+                  <div className="p-4 border-t border-border/50 flex justify-end">
+                    <Pagination>
+                      <PaginationContent>
+                        <PaginationItem>
+                          <PaginationPrevious
+                            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                            className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                          />
+                        </PaginationItem>
+                        {Array.from({ length: totalPages }).map((_, i) => (
+                          <PaginationItem key={i + 1}>
+                            <PaginationLink
+                              onClick={() => setCurrentPage(i + 1)}
+                              isActive={currentPage === i + 1}
+                              className="cursor-pointer"
+                            >
+                              {i + 1}
+                            </PaginationLink>
+                          </PaginationItem>
+                        ))}
+                        <PaginationItem>
+                          <PaginationNext
+                            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                            className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                          />
+                        </PaginationItem>
+                      </PaginationContent>
+                    </Pagination>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>

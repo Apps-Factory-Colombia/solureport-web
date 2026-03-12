@@ -11,56 +11,50 @@ import {
 } from "@react-email/components";
 import * as React from "react";
 
-interface MaintenanceReportEmailProps {
+interface LiquidationClosedEmailProps {
   companyName?: string;
-  clienteNombre: string;
-  edificio: string;
-  fecha: string;
   tecnicoNombre: string;
-  observaciones: string;
+  fechaInicio: string;
+  fechaFin: string;
+  actividades: number;
+  total: string;
 }
 
-export default function MaintenanceReportEmail({
+export default function LiquidationClosedEmail({
   companyName = "Soluciones & Automatizaciones S.A.S.",
-  clienteNombre = "Cliente",
-  edificio = "Edificio",
-  fecha = "2023-01-01",
   tecnicoNombre = "Técnico",
-  observaciones = "Sin observaciones",
-}: MaintenanceReportEmailProps) {
+  fechaInicio = "2026-01-01",
+  fechaFin = "2026-01-15",
+  actividades = 0,
+  total = "$0",
+}: LiquidationClosedEmailProps) {
   return (
     <Html>
       <Head />
-      <Preview>Reporte de mantenimiento preventivo - {edificio}</Preview>
+      <Preview>
+        Liquidación cerrada del período {fechaInicio} al {fechaFin}
+      </Preview>
       <Body style={main}>
         <Container style={container}>
           <Section style={header}>
             <Text style={eyebrow}>{companyName}</Text>
-            <Heading style={heading}>Reporte de mantenimiento preventivo</Heading>
+            <Heading style={heading}>Liquidación cerrada</Heading>
           </Section>
           <Section style={content}>
-            <Text style={greeting}>Hola {clienteNombre},</Text>
+            <Text style={greeting}>Hola {tecnicoNombre},</Text>
             <Text style={paragraph}>
-              Se generó el reporte correspondiente al mantenimiento preventivo realizado en sus instalaciones.
-              En este correo encontrará un resumen de la visita y el documento completo en PDF adjunto para su control.
+              El período de liquidación comprendido entre el <strong>{fechaInicio}</strong> y el <strong>{fechaFin}</strong> ha sido cerrado.
             </Text>
-
             <Section style={infoBox}>
-              <Text style={infoText}><strong>Edificio:</strong> {edificio}</Text>
-              <Text style={infoText}><strong>Fecha del servicio:</strong> {fecha}</Text>
-              <Text style={infoText}><strong>Técnico responsable:</strong> {tecnicoNombre}</Text>
-              <Text style={infoText}><strong>Tipo de informe:</strong> Mantenimiento preventivo</Text>
+              <Text style={infoText}>
+                <strong>Actividades liquidadas:</strong> {actividades}
+              </Text>
+              <Text style={totalText}>
+                <strong>Total liquidado:</strong> {total}
+              </Text>
             </Section>
-
-            {observaciones && (
-              <Section style={observacionesBox}>
-                <Text style={infoText}><strong>Resumen de observaciones:</strong></Text>
-                <Text style={paragraph}>{observaciones}</Text>
-              </Section>
-            )}
-
             <Text style={paragraph}>
-              Si requiere validar alguna novedad adicional del servicio, puede apoyarse en el PDF adjunto como soporte del mantenimiento realizado.
+              Ingresa al aplicativo para revisar el detalle y descargar tu comprobante individual.
             </Text>
           </Section>
           <Hr style={hr} />
@@ -91,13 +85,13 @@ const container = {
 };
 
 const header = {
-  backgroundColor: "#0d8abc",
+  backgroundColor: "#D4A843",
   padding: "30px 20px",
   textAlign: "center" as const,
 };
 
 const eyebrow = {
-  color: "#dbeafe",
+  color: "#422006",
   fontSize: "12px",
   letterSpacing: "0.08em",
   textTransform: "uppercase" as const,
@@ -105,7 +99,7 @@ const eyebrow = {
 };
 
 const heading = {
-  color: "#ffffff",
+  color: "#111827",
   fontSize: "24px",
   margin: "0",
   fontWeight: "bold",
@@ -136,18 +130,16 @@ const infoBox = {
   border: "1px solid #e2e8f0",
 };
 
-const observacionesBox = {
-  backgroundColor: "#fffbeb",
-  borderRadius: "6px",
-  padding: "16px",
-  marginBottom: "20px",
-  border: "1px solid #fef3c7",
-};
-
 const infoText = {
   fontSize: "15px",
   color: "#333333",
   margin: "0 0 8px 0",
+};
+
+const totalText = {
+  fontSize: "16px",
+  color: "#D4A843",
+  margin: "0",
 };
 
 const hr = {

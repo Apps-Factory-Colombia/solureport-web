@@ -11,56 +11,64 @@ import {
 } from "@react-email/components";
 import * as React from "react";
 
-interface MaintenanceReportEmailProps {
+interface TechnicalVisitEmailProps {
   companyName?: string;
   clienteNombre: string;
   edificio: string;
   fecha: string;
   tecnicoNombre: string;
-  observaciones: string;
+  tipoVisita: string;
+  descripcion: string;
+  observaciones?: string;
 }
 
-export default function MaintenanceReportEmail({
+export default function TechnicalVisitEmail({
   companyName = "Soluciones & Automatizaciones S.A.S.",
   clienteNombre = "Cliente",
   edificio = "Edificio",
-  fecha = "2023-01-01",
+  fecha = "2026-01-01",
   tecnicoNombre = "Técnico",
-  observaciones = "Sin observaciones",
-}: MaintenanceReportEmailProps) {
+  tipoVisita = "imprevisto",
+  descripcion = "Sin descripción registrada.",
+  observaciones,
+}: TechnicalVisitEmailProps) {
   return (
     <Html>
       <Head />
-      <Preview>Reporte de mantenimiento preventivo - {edificio}</Preview>
+      <Preview>Reporte de visita técnica - {edificio}</Preview>
       <Body style={main}>
         <Container style={container}>
           <Section style={header}>
             <Text style={eyebrow}>{companyName}</Text>
-            <Heading style={heading}>Reporte de mantenimiento preventivo</Heading>
+            <Heading style={heading}>Reporte de visita técnica</Heading>
           </Section>
           <Section style={content}>
             <Text style={greeting}>Hola {clienteNombre},</Text>
             <Text style={paragraph}>
-              Se generó el reporte correspondiente al mantenimiento preventivo realizado en sus instalaciones.
-              En este correo encontrará un resumen de la visita y el documento completo en PDF adjunto para su control.
+              Se registró una visita técnica relacionada con sus instalaciones. A continuación encontrará el resumen principal y el soporte en PDF adjunto.
             </Text>
 
             <Section style={infoBox}>
               <Text style={infoText}><strong>Edificio:</strong> {edificio}</Text>
               <Text style={infoText}><strong>Fecha del servicio:</strong> {fecha}</Text>
               <Text style={infoText}><strong>Técnico responsable:</strong> {tecnicoNombre}</Text>
-              <Text style={infoText}><strong>Tipo de informe:</strong> Mantenimiento preventivo</Text>
+              <Text style={infoText}><strong>Tipo de visita:</strong> {tipoVisita}</Text>
+            </Section>
+
+            <Section style={summaryBox}>
+              <Text style={infoText}><strong>Descripción del trabajo realizado:</strong></Text>
+              <Text style={paragraph}>{descripcion}</Text>
             </Section>
 
             {observaciones && (
-              <Section style={observacionesBox}>
-                <Text style={infoText}><strong>Resumen de observaciones:</strong></Text>
+              <Section style={notesBox}>
+                <Text style={infoText}><strong>Observaciones adicionales:</strong></Text>
                 <Text style={paragraph}>{observaciones}</Text>
               </Section>
             )}
 
             <Text style={paragraph}>
-              Si requiere validar alguna novedad adicional del servicio, puede apoyarse en el PDF adjunto como soporte del mantenimiento realizado.
+              Este mensaje fue enviado a los contactos definidos para seguimiento operativo del servicio.
             </Text>
           </Section>
           <Hr style={hr} />
@@ -91,13 +99,13 @@ const container = {
 };
 
 const header = {
-  backgroundColor: "#0d8abc",
+  backgroundColor: "#14532d",
   padding: "30px 20px",
   textAlign: "center" as const,
 };
 
 const eyebrow = {
-  color: "#dbeafe",
+  color: "#dcfce7",
   fontSize: "12px",
   letterSpacing: "0.08em",
   textTransform: "uppercase" as const,
@@ -136,7 +144,15 @@ const infoBox = {
   border: "1px solid #e2e8f0",
 };
 
-const observacionesBox = {
+const summaryBox = {
+  backgroundColor: "#eff6ff",
+  borderRadius: "6px",
+  padding: "16px",
+  marginBottom: "20px",
+  border: "1px solid #bfdbfe",
+};
+
+const notesBox = {
   backgroundColor: "#fffbeb",
   borderRadius: "6px",
   padding: "16px",

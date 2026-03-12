@@ -27,53 +27,36 @@ interface ClientDialogProps {
   onSave: (client: Partial<Client>) => void;
 }
 
+function getInitialFormData(client?: Client | null) {
+  return {
+    nombre: client?.nombre || "",
+    edificio: client?.edificio || "",
+    direccion: client?.direccion || "",
+    contacto: client?.contacto || "",
+    correo: client?.correo || "",
+    correoAliado: client?.correoAliado || "",
+    telefono: client?.telefono || "",
+    frecuenciaMantenimiento: client?.frecuenciaMantenimiento || 4,
+    puertasPeatonales: client?.puertasPeatonales || 0,
+    puertasVehiculares: client?.puertasVehiculares || 0,
+    estado: client?.estado || ("activo" as "activo" | "inactivo"),
+  };
+}
+
 export function ClientDialog({
   open,
   onOpenChange,
   client,
   onSave,
 }: ClientDialogProps) {
-  const [formData, setFormData] = useState({
-    nombre: "",
-    edificio: "",
-    direccion: "",
-    contacto: "",
-    correo: "",
-    telefono: "",
-    frecuenciaMantenimiento: 4,
-    puertasPeatonales: 0,
-    puertasVehiculares: 0,
-    estado: "activo" as "activo" | "inactivo",
-  });
+  const [formData, setFormData] = useState(() => getInitialFormData(client));
 
   useEffect(() => {
-    if (client) {
-      setFormData({
-        nombre: client.nombre,
-        edificio: client.edificio,
-        direccion: client.direccion,
-        contacto: client.contacto,
-        correo: client.correo,
-        telefono: client.telefono,
-        frecuenciaMantenimiento: client.frecuenciaMantenimiento,
-        puertasPeatonales: client.puertasPeatonales,
-        puertasVehiculares: client.puertasVehiculares,
-        estado: client.estado,
-      });
-    } else {
-      setFormData({
-        nombre: "",
-        edificio: "",
-        direccion: "",
-        contacto: "",
-        correo: "",
-        telefono: "",
-        frecuenciaMantenimiento: 4,
-        puertasPeatonales: 0,
-        puertasVehiculares: 0,
-        estado: "activo",
-      });
-    }
+    const timer = window.setTimeout(() => {
+      setFormData(getInitialFormData(client));
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, [client, open]);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -131,7 +114,6 @@ export function ClientDialog({
                 className="bg-secondary/50 border-border/50"
                 required
               />
-
             </div>
           </div>
 
@@ -160,6 +142,21 @@ export function ClientDialog({
                 required
               />
             </div>
+            <div className="space-y-2">
+              <Label className="text-foreground/80">Correo del aliado</Label>
+              <Input
+                type="email"
+                value={formData.correoAliado}
+                onChange={(e) =>
+                  setFormData({ ...formData, correoAliado: e.target.value })
+                }
+                placeholder="Opcional"
+                className="bg-secondary/50 border-border/50"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label className="text-foreground/80">Teléfono directo del contacto</Label>
               <Input
