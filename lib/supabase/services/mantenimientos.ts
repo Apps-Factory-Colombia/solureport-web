@@ -1,6 +1,12 @@
 import { supabase } from "../client";
 import { Maintenance, MaintenanceReport } from "@/lib/types";
 import { deleteAllFotosMantenimiento } from "./storage";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+
+const MANTENIMIENTOS_CACHE_KEY = "mantenimientos:list";
+const MANTENIMIENTOS_CACHE_TTL = 30_000;
+const REPORTES_MANTENIMIENTO_CACHE_KEY = "mantenimientos:reportes";
+const REPORTES_MANTENIMIENTO_CACHE_TTL = 30_000;
 
 function toDateOnly(value: unknown): string {
   if (typeof value !== "string") return "";
@@ -63,31 +69,33 @@ function mapContratoRow(row: any, contrato: any): Maintenance {
 }
 
 export async function getMantenimientos(): Promise<Maintenance[]> {
-  const { data, error } = await supabase
-    .from("mantenimientos")
-    .select("*")
-    .order("fecha_programada", { ascending: false });
-  if (error) throw error;
-
-  const { data: contratos, error: contratosError } = await supabase
-    .from("contratos_mantenimiento")
-    .select("id, cliente_id, fecha_creacion");
-  if (contratosError) throw contratosError;
-
-  const contratoIds = (contratos || []).map((contrato) => contrato.id);
-  let mantenimientosContrato: any[] = [];
-  if (contratoIds.length > 0) {
-    const { data: contratoMants, error: contratoMantsError } = await supabase
-      .from("contrato_mantenimientos")
+  return getCachedValue(MANTENIMIENTOS_CACHE_KEY, MANTENIMIENTOS_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("mantenimientos")
       .select("*")
-      .in("contrato_id", contratoIds);
-    if (contratoMantsError) throw contratoMantsError;
-    mantenimientosContrato = contratoMants || [];
-  }
+      .order("fecha_programada", { ascending: false });
+    if (error) throw error;
 
-  const contratosById = new Map((contratos || []).map((contrato) => [contrato.id, contrato]));
-  return [...(data || []).map(mapRow), ...mantenimientosContrato.map((mant) => mapContratoRow(mant, contratosById.get(mant.contrato_id)))]
-    .sort((a, b) => b.fechaProgramada.localeCompare(a.fechaProgramada));
+    const { data: contratos, error: contratosError } = await supabase
+      .from("contratos_mantenimiento")
+      .select("id, cliente_id, fecha_creacion");
+    if (contratosError) throw contratosError;
+
+    const contratoIds = (contratos || []).map((contrato) => contrato.id);
+    let mantenimientosContrato: any[] = [];
+    if (contratoIds.length > 0) {
+      const { data: contratoMants, error: contratoMantsError } = await supabase
+        .from("contrato_mantenimientos")
+        .select("*")
+        .in("contrato_id", contratoIds);
+      if (contratoMantsError) throw contratoMantsError;
+      mantenimientosContrato = contratoMants || [];
+    }
+
+    const contratosById = new Map((contratos || []).map((contrato) => [contrato.id, contrato]));
+    return [...(data || []).map(mapRow), ...mantenimientosContrato.map((mant) => mapContratoRow(mant, contratosById.get(mant.contrato_id)))]
+      .sort((a, b) => b.fechaProgramada.localeCompare(a.fechaProgramada));
+  });
 }
 
 export async function createMantenimiento(m: Partial<Maintenance>): Promise<Maintenance> {
@@ -106,6 +114,7 @@ export async function createMantenimiento(m: Partial<Maintenance>): Promise<Main
     .select()
     .single();
   if (error) throw error;
+  invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
   return mapRow(data);
 }
 
@@ -148,6 +157,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
       .maybeSingle();
     if (contratoError) throw contratoError;
 
+    invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
     return mapContratoRow(contratoMant, contrato);
   }
 
@@ -167,6 +177,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
     .select()
     .single();
   if (error) throw error;
+  invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
   return mapRow(data);
 }
 
@@ -181,11 +192,13 @@ export async function deleteMantenimiento(id: string): Promise<void> {
   if (mantenimientoExistente) {
     const { error } = await supabase.from("mantenimientos").delete().eq("id", id);
     if (error) throw error;
+    invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
     return;
   }
 
   const { error } = await supabase.from("contrato_mantenimientos").delete().eq("id", id);
   if (error) throw error;
+  invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
 }
 
 function mapReport(
@@ -223,30 +236,44 @@ function mapReport(
 }
 
 export async function getReportesMantenimiento(): Promise<MaintenanceReport[]> {
-  const { data, error } = await supabase
-    .from("reportes_mantenimiento")
-    .select("*")
-    .order("fecha_generacion", { ascending: false });
-  if (error) throw error;
+  return getCachedValue(REPORTES_MANTENIMIENTO_CACHE_KEY, REPORTES_MANTENIMIENTO_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("reportes_mantenimiento")
+      .select("*")
+      .order("fecha_generacion", { ascending: false });
+    if (error) throw error;
 
-  const mantenimientoIds = Array.from(
-    new Set(
-      (data || [])
-        .map((row: any) => row.mantenimiento_id || row.id)
-        .filter(Boolean)
-    )
-  );
+    const mantenimientoIds = Array.from(
+      new Set(
+        (data || [])
+          .map((row: any) => row.mantenimiento_id || row.id)
+          .filter(Boolean)
+      )
+    );
 
-  const bitacoraByMantenimientoId = new Map<string, string>();
-  const tipoPendienteByMantenimientoId = new Map<string, string>();
-  const descripcionPendienteByMantenimientoId = new Map<string, string>();
-  if (mantenimientoIds.length > 0) {
-    const { data: mantenimientosData } = await supabase
-      .from("mantenimientos")
-      .select("id, foto_bitacora_url, tipo_pendiente, descripcion_pendiente")
-      .in("id", mantenimientoIds);
+    const [mantenimientosResponse, fotosResponse] = await Promise.all([
+      mantenimientoIds.length > 0
+        ? supabase
+          .from("mantenimientos")
+          .select("id, foto_bitacora_url, tipo_pendiente, descripcion_pendiente")
+          .in("id", mantenimientoIds)
+        : Promise.resolve({ data: [], error: null }),
+      mantenimientoIds.length > 0
+        ? supabase
+          .from("mantenimiento_fotos")
+          .select("mantenimiento_id, tipo, url, orden")
+          .in("mantenimiento_id", mantenimientoIds)
+          .order("orden")
+        : Promise.resolve({ data: [], error: null }),
+    ]);
 
-    for (const mantenimiento of mantenimientosData || []) {
+    if (mantenimientosResponse.error) throw mantenimientosResponse.error;
+    if (fotosResponse.error) throw fotosResponse.error;
+
+    const bitacoraByMantenimientoId = new Map<string, string>();
+    const tipoPendienteByMantenimientoId = new Map<string, string>();
+    const descripcionPendienteByMantenimientoId = new Map<string, string>();
+    for (const mantenimiento of mantenimientosResponse.data || []) {
       if (mantenimiento?.id && mantenimiento?.foto_bitacora_url) {
         bitacoraByMantenimientoId.set(mantenimiento.id, mantenimiento.foto_bitacora_url);
       }
@@ -257,44 +284,57 @@ export async function getReportesMantenimiento(): Promise<MaintenanceReport[]> {
         descripcionPendienteByMantenimientoId.set(mantenimiento.id, mantenimiento.descripcion_pendiente);
       }
     }
-  }
 
-  const reports: MaintenanceReport[] = [];
-  for (const row of data || []) {
-    const mantenimientoRefId = row.mantenimiento_id || row.id;
-    const { data: fotos } = await supabase
-      .from("mantenimiento_fotos")
-      .select("*")
-      .eq("mantenimiento_id", mantenimientoRefId)
-      .order("orden");
-    const fotosAntes = (fotos || []).filter((f: any) => f.tipo === "antes").map((f: any) => f.url);
-    const fotosDespues = (fotos || []).filter((f: any) => f.tipo === "despues").map((f: any) => f.url);
-    const rawBitacoraUrl =
-      bitacoraByMantenimientoId.get(mantenimientoRefId) ||
-      row.foto_bitacora_url ||
-      row.foto_bitacora ||
-      undefined;
-    const fotoBitacoraUrl = await resolveStorageUrl(rawBitacoraUrl);
-    const tipoPendiente =
-      tipoPendienteByMantenimientoId.get(mantenimientoRefId) ||
-      row.tipo_pendiente ||
-      undefined;
-    const descripcionPendiente =
-      descripcionPendienteByMantenimientoId.get(mantenimientoRefId) ||
-      row.descripcion_pendiente ||
-      undefined;
-    reports.push(
-      mapReport(
-        row,
-        fotosAntes,
-        fotosDespues,
-        fotoBitacoraUrl,
-        tipoPendiente,
-        descripcionPendiente
+    const fotosByMantenimientoId = new Map<string, { antes: string[]; despues: string[] }>();
+    for (const foto of fotosResponse.data || []) {
+      const mantenimientoId = foto.mantenimiento_id;
+      if (!mantenimientoId) continue;
+      const current = fotosByMantenimientoId.get(mantenimientoId) || { antes: [], despues: [] };
+      if (foto.tipo === "antes") current.antes.push(foto.url);
+      if (foto.tipo === "despues") current.despues.push(foto.url);
+      fotosByMantenimientoId.set(mantenimientoId, current);
+    }
+
+    const uniqueBitacoraUrls = Array.from(new Set(
+      (data || []).map((row: any) => {
+        const mantenimientoRefId = row.mantenimiento_id || row.id;
+        return bitacoraByMantenimientoId.get(mantenimientoRefId) || row.foto_bitacora_url || row.foto_bitacora || undefined;
+      }).filter(Boolean)
+    ));
+
+    const resolvedBitacoras = new Map<string, string | undefined>(
+      await Promise.all(
+        uniqueBitacoraUrls.map(async (url) => [url, await resolveStorageUrl(url)] as const)
       )
     );
-  }
-  return reports;
+
+    return (data || []).map((row: any) => {
+      const mantenimientoRefId = row.mantenimiento_id || row.id;
+      const fotos = fotosByMantenimientoId.get(mantenimientoRefId);
+      const rawBitacoraUrl =
+        bitacoraByMantenimientoId.get(mantenimientoRefId) ||
+        row.foto_bitacora_url ||
+        row.foto_bitacora ||
+        undefined;
+      const tipoPendiente =
+        tipoPendienteByMantenimientoId.get(mantenimientoRefId) ||
+        row.tipo_pendiente ||
+        undefined;
+      const descripcionPendiente =
+        descripcionPendienteByMantenimientoId.get(mantenimientoRefId) ||
+        row.descripcion_pendiente ||
+        undefined;
+
+      return mapReport(
+        row,
+        fotos?.antes || [],
+        fotos?.despues || [],
+        rawBitacoraUrl ? resolvedBitacoras.get(rawBitacoraUrl) : undefined,
+        tipoPendiente,
+        descripcionPendiente
+      );
+    });
+  });
 }
 
 export async function syncReporteMantenimientoToActividad(reporteId: string): Promise<void> {
@@ -384,6 +424,9 @@ export async function syncReporteMantenimientoToActividad(reporteId: string): Pr
     costo_administrable: true,
     periodo_id: periodoId,
   });
+
+  invalidateCachedValue(REPORTES_MANTENIMIENTO_CACHE_KEY);
+  invalidateCachedValue("reportes-actividad:list");
 }
 
 export async function updateReporteEnvio(id: string): Promise<void> {
@@ -391,6 +434,8 @@ export async function updateReporteEnvio(id: string): Promise<void> {
     .from("reportes_mantenimiento")
     .update({ enviado: true, fecha_envio: new Date().toISOString() })
     .eq("id", id);
+
+  invalidateCachedValue(REPORTES_MANTENIMIENTO_CACHE_KEY);
 }
 
 export async function deleteReporteMantenimiento(id: string): Promise<void> {
@@ -426,4 +471,8 @@ export async function deleteReporteMantenimiento(id: string): Promise<void> {
     .eq("id", id);
 
   if (deleteReportError) throw deleteReportError;
+
+  invalidateCachedValue(REPORTES_MANTENIMIENTO_CACHE_KEY);
+  invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
+  invalidateCachedValue("reportes-actividad:list");
 }

@@ -29,6 +29,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
+import {
   Plus,
   Search,
   MoreHorizontal,
@@ -56,6 +64,8 @@ export default function CatalogoPage() {
   const [editingActivity, setEditingActivity] = useState<Activity | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyActivity, setHistoryActivity] = useState<Activity | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -76,6 +86,15 @@ export default function CatalogoPage() {
       a.codigo.toLowerCase().includes(search.toLowerCase()) ||
       a.descripcion.toLowerCase().includes(search.toLowerCase())
   );
+
+  const totalPages = Math.ceil(filtered.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentActivities = filtered.slice(startIndex, endIndex);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search]);
 
   const handleSave = async (data: Partial<Activity>) => {
     try {
@@ -154,7 +173,7 @@ export default function CatalogoPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((activity) => (
+                {currentActivities.map((activity) => (
                   <TableRow
                     key={activity.id}
                     className="border-border/50 hover:bg-secondary/30"
@@ -240,6 +259,38 @@ export default function CatalogoPage() {
                 ))}
               </TableBody>
             </Table>
+
+            {totalPages > 1 && (
+              <div className="p-4 border-t border-border/50 flex justify-end">
+                <Pagination>
+                  <PaginationContent>
+                    <PaginationItem>
+                      <PaginationPrevious
+                        onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                        className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                      />
+                    </PaginationItem>
+                    {Array.from({ length: totalPages }).map((_, i) => (
+                      <PaginationItem key={i + 1}>
+                        <PaginationLink
+                          onClick={() => setCurrentPage(i + 1)}
+                          isActive={currentPage === i + 1}
+                          className="cursor-pointer"
+                        >
+                          {i + 1}
+                        </PaginationLink>
+                      </PaginationItem>
+                    ))}
+                    <PaginationItem>
+                      <PaginationNext
+                        onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                        className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                      />
+                    </PaginationItem>
+                  </PaginationContent>
+                </Pagination>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

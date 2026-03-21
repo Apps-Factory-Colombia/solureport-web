@@ -1,23 +1,40 @@
 import { supabase } from "../client";
 import { Activity, PriceHistory } from "@/lib/types";
 
-function mapRow(row: any, historial: PriceHistory[] = []): Activity {
+interface ActivityRow {
+  id: string;
+  codigo: string;
+  nombre?: string | null;
+  descripcion?: string | null;
+  valor_economico?: number | string | null;
+  estado: "activo" | "inactivo";
+  fecha_creacion?: string | null;
+}
+
+interface ActivityHistoryRow {
+  actividad_id: string;
+  fecha: string;
+  valor_anterior?: number | string | null;
+  valor_nuevo?: number | string | null;
+}
+
+function mapRow(row: ActivityRow, historial: PriceHistory[] = []): Activity {
   return {
     id: row.id,
     codigo: row.codigo,
     descripcion: row.nombre || row.descripcion || "",
-    valorEconomico: parseFloat(row.valor_economico) || 0,
+    valorEconomico: Number(row.valor_economico ?? 0) || 0,
     estado: row.estado,
     historialPrecios: historial,
     fechaCreacion: row.fecha_creacion?.split("T")[0] || "",
   };
 }
 
-function mapHistorial(row: any): PriceHistory {
+function mapHistorial(row: ActivityHistoryRow): PriceHistory {
   return {
     fecha: row.fecha,
-    valorAnterior: parseFloat(row.valor_anterior) || 0,
-    valorNuevo: parseFloat(row.valor_nuevo) || 0,
+    valorAnterior: Number(row.valor_anterior ?? 0) || 0,
+    valorNuevo: Number(row.valor_nuevo ?? 0) || 0,
   };
 }
 
@@ -28,16 +45,27 @@ export async function getActividades(): Promise<Activity[]> {
     .order("codigo", { ascending: true });
   if (error) throw error;
 
-  const activities: Activity[] = [];
-  for (const row of data || []) {
-    const { data: hist } = await supabase
+  const activityRows = (data || []) as ActivityRow[];
+  const activityIds = activityRows.map((row) => row.id);
+
+  const { data: historyData, error: historyError } = activityIds.length > 0
+    ? await supabase
       .from("actividades_historial_precios")
-      .select("*")
-      .eq("actividad_id", row.id)
-      .order("fecha", { ascending: false });
-    activities.push(mapRow(row, (hist || []).map(mapHistorial)));
+      .select("actividad_id, fecha, valor_anterior, valor_nuevo")
+      .in("actividad_id", activityIds)
+      .order("fecha", { ascending: false })
+    : { data: [], error: null };
+
+  if (historyError) throw historyError;
+
+  const historyByActivityId = new Map<string, PriceHistory[]>();
+  for (const historyRow of (historyData || []) as ActivityHistoryRow[]) {
+    const current = historyByActivityId.get(historyRow.actividad_id) || [];
+    current.push(mapHistorial(historyRow));
+    historyByActivityId.set(historyRow.actividad_id, current);
   }
-  return activities;
+
+  return activityRows.map((row) => mapRow(row, historyByActivityId.get(row.id) || []));
 }
 
 export async function createActividad(activity: Partial<Activity>): Promise<Activity> {
@@ -59,7 +87,7 @@ export async function createActividad(activity: Partial<Activity>): Promise<Acti
 export async function updateActividad(id: string, activity: Partial<Activity>): Promise<Activity> {
   const current = await supabase.from("actividades").select("valor_economico").eq("id", id).single();
 
-  const updateData: any = {};
+  const updateData: Record<string, unknown> = {};
   if (activity.codigo !== undefined) updateData.codigo = activity.codigo;
   if (activity.descripcion !== undefined) { updateData.nombre = activity.descripcion; updateData.descripcion = activity.descripcion; }
   if (activity.valorEconomico !== undefined) updateData.valor_economico = activity.valorEconomico;
@@ -73,11 +101,12 @@ export async function updateActividad(id: string, activity: Partial<Activity>): 
     .single();
   if (error) throw error;
 
-  if (activity.valorEconomico !== undefined && current.data && parseFloat(current.data.valor_economico) !== activity.valorEconomico) {
+  const currentValue = Number(current.data?.valor_economico ?? 0) || 0;
+  if (activity.valorEconomico !== undefined && current.data && currentValue !== activity.valorEconomico) {
     await supabase.from("actividades_historial_precios").insert({
       actividad_id: id,
       fecha: new Date().toISOString().split("T")[0],
-      valor_anterior: parseFloat(current.data.valor_economico),
+      valor_anterior: currentValue,
       valor_nuevo: activity.valorEconomico,
     });
   }

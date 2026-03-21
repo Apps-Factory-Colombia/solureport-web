@@ -1,5 +1,9 @@
 import { supabase } from "../client";
 import { CompanySettings } from "@/lib/types";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+
+const CONFIGURACION_CACHE_KEY = "configuracion:empresa";
+const CONFIGURACION_CACHE_TTL = 60_000;
 
 interface ConfiguracionEmpresaRow {
   nombre: string;
@@ -32,27 +36,29 @@ function mapRow(row: ConfiguracionEmpresaRow): CompanySettings {
 }
 
 export async function getConfiguracion(): Promise<CompanySettings> {
-  const { data, error } = await supabase
-    .from("configuracion_empresa")
-    .select("*")
-    .limit(1)
-    .single();
-  if (error) {
-    return {
-      nombre: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
-      logo: "/logo.png",
-      correoRemitente: "notificaciones@solucionesyautomatizaciones.com",
-      correoEmpresa: "solucionesyautomatizaciones@hotmail.com",
-      plantillaReportePDF: "default",
-      porcentajeDescuentoTardanza: 5,
-      porcentajeExtraLider: 10,
-      extraLiderActivo: true,
-      costoRevisionLider: 15000,
-      costoRecorridoNormal: 25000,
-      costoRecorridoHerramienta: 40000,
-    };
-  }
-  return mapRow(data);
+  return getCachedValue(CONFIGURACION_CACHE_KEY, CONFIGURACION_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("configuracion_empresa")
+      .select("*")
+      .limit(1)
+      .single();
+    if (error) {
+      return {
+        nombre: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
+        logo: "/logo.png",
+        correoRemitente: "notificaciones@solucionesyautomatizaciones.com",
+        correoEmpresa: "solucionesyautomatizaciones@hotmail.com",
+        plantillaReportePDF: "default",
+        porcentajeDescuentoTardanza: 5,
+        porcentajeExtraLider: 10,
+        extraLiderActivo: true,
+        costoRevisionLider: 15000,
+        costoRecorridoNormal: 25000,
+        costoRecorridoHerramienta: 40000,
+      };
+    }
+    return mapRow(data);
+  });
 }
 
 export async function updateConfiguracion(settings: Partial<CompanySettings>): Promise<CompanySettings> {
@@ -82,6 +88,7 @@ export async function updateConfiguracion(settings: Partial<CompanySettings>): P
       .select()
       .single();
     if (error) throw error;
+    invalidateCachedValue(CONFIGURACION_CACHE_KEY);
     return mapRow(data);
   } else {
     const { data, error } = await supabase
@@ -95,6 +102,7 @@ export async function updateConfiguracion(settings: Partial<CompanySettings>): P
       .select()
       .single();
     if (error) throw error;
+    invalidateCachedValue(CONFIGURACION_CACHE_KEY);
     return mapRow(data);
   }
 }

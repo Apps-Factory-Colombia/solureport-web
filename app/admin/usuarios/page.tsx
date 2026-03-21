@@ -33,6 +33,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
 import { getAvatarUrl } from "@/lib/utils/avatar";
 import {
   Plus,
@@ -74,6 +82,8 @@ export default function UsuariosPage() {
   const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
   const [groupToDelete, setGroupToDelete] = useState<WorkGroup | null>(null);
   const [deletingGroupId, setDeletingGroupId] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -96,6 +106,15 @@ export default function UsuariosPage() {
       u.apellido.toLowerCase().includes(search.toLowerCase()) ||
       u.email.toLowerCase().includes(search.toLowerCase())
   );
+
+  const totalPages = Math.ceil(filteredUsers.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentUsers = filteredUsers.slice(startIndex, endIndex);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search]);
 
   const handleSaveUser = async (userData: Partial<User> & { password?: string; horarios?: UserScheduleDraft[] }) => {
     try {
@@ -246,7 +265,7 @@ export default function UsuariosPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredUsers.map((user) => {
+                    {currentUsers.map((user) => {
                       const group = groups.find((g) =>
                         g.miembros.includes(user.id)
                       );
@@ -383,6 +402,38 @@ export default function UsuariosPage() {
                     })}
                   </TableBody>
                 </Table>
+
+                {totalPages > 1 && (
+                  <div className="p-4 border-t border-border/50 flex justify-end">
+                    <Pagination>
+                      <PaginationContent>
+                        <PaginationItem>
+                          <PaginationPrevious
+                            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                            className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                          />
+                        </PaginationItem>
+                        {Array.from({ length: totalPages }).map((_, i) => (
+                          <PaginationItem key={i + 1}>
+                            <PaginationLink
+                              onClick={() => setCurrentPage(i + 1)}
+                              isActive={currentPage === i + 1}
+                              className="cursor-pointer"
+                            >
+                              {i + 1}
+                            </PaginationLink>
+                          </PaginationItem>
+                        ))}
+                        <PaginationItem>
+                          <PaginationNext
+                            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                            className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                          />
+                        </PaginationItem>
+                      </PaginationContent>
+                    </Pagination>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>

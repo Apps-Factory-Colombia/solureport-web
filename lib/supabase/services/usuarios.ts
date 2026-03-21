@@ -1,5 +1,9 @@
 import { supabase } from "../client";
 import { User, UserSchedule, UserScheduleDraft } from "@/lib/types";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+
+const USUARIOS_CACHE_KEY = "usuarios:list";
+const USUARIOS_CACHE_TTL = 60_000;
 
 const DAY_ORDER: Record<UserSchedule["diaSemana"], number> = {
   lunes: 1,
@@ -134,15 +138,17 @@ async function syncHorariosUsuario(userId: string, horarios: UserScheduleDraft[]
 }
 
 export async function getUsuarios(): Promise<User[]> {
-  const { data, error } = await supabase
-    .from("usuarios")
-    .select("*")
-    .order("fecha_creacion", { ascending: false });
-  if (error) throw error;
+  return getCachedValue(USUARIOS_CACHE_KEY, USUARIOS_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("usuarios")
+      .select("*")
+      .order("fecha_creacion", { ascending: false });
+    if (error) throw error;
 
-  const rows = data || [];
-  const schedulesByUser = await getHorariosUsuarioMap(rows.map((row: any) => row.id));
-  return rows.map((row: any) => mapRow(row, schedulesByUser[row.id] || []));
+    const rows = data || [];
+    const schedulesByUser = await getHorariosUsuarioMap(rows.map((row: any) => row.id));
+    return rows.map((row: any) => mapRow(row, schedulesByUser[row.id] || []));
+  });
 }
 
 export async function getUsuarioById(id: string): Promise<User | null> {
@@ -186,6 +192,7 @@ export async function createUsuario(user: UserPayload): Promise<User> {
     await syncHorariosUsuario(data.id, user.horarios);
   }
 
+  invalidateCachedValue(USUARIOS_CACHE_KEY);
   const createdUser = await getUsuarioById(data.id);
   if (!createdUser) throw new Error("No se pudo cargar el usuario creado.");
   return createdUser;
@@ -226,6 +233,7 @@ export async function updateUsuario(id: string, user: UserPayload): Promise<User
     await syncHorariosUsuario(id, user.horarios);
   }
 
+  invalidateCachedValue(USUARIOS_CACHE_KEY);
   const updatedUser = await getUsuarioById(data.id);
   if (!updatedUser) throw new Error("No se pudo cargar el usuario actualizado.");
   return updatedUser;
@@ -356,6 +364,7 @@ export async function deleteUsuario(id: string): Promise<void> {
   // 8) Eliminar usuario
   const { error } = await supabase.from("usuarios").delete().eq("id", id);
   if (error) throw error;
+  invalidateCachedValue(USUARIOS_CACHE_KEY);
 }
 
 export async function loginUsuario(email: string, password: string): Promise<User | null> {

@@ -6,7 +6,7 @@ import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -24,6 +24,14 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
 import {
   Select,
   SelectContent,
@@ -65,6 +73,8 @@ export default function LlegadasPage() {
   const [discountOpen, setDiscountOpen] = useState(false);
   const [discountPercent, setDiscountPercent] = useState("5");
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -82,6 +92,10 @@ export default function LlegadasPage() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, dateFilter, statusFilter]);
 
   if (loading) {
     return (
@@ -109,6 +123,11 @@ export default function LlegadasPage() {
       (statusFilter === "puntual" && !r.tarde);
     return matchesSearch && matchesDate && matchesStatus;
   });
+
+  const totalPages = Math.ceil(filtered.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentRecords = filtered.slice(startIndex, endIndex);
 
   const todayRecords = records.filter(
     (r) => r.fecha === new Date().toISOString().split("T")[0]
@@ -265,7 +284,7 @@ export default function LlegadasPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((record) => {
+                {currentRecords.map((record) => {
                   const user = users.find((u) => u.id === record.usuarioId);
 
                   return (
@@ -426,6 +445,38 @@ export default function LlegadasPage() {
                 })}
               </TableBody>
             </Table>
+
+            {totalPages > 1 && (
+              <div className="p-4 border-t border-border/50 flex justify-end">
+                <Pagination>
+                  <PaginationContent>
+                    <PaginationItem>
+                      <PaginationPrevious
+                        onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                        className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                      />
+                    </PaginationItem>
+                    {Array.from({ length: totalPages }).map((_, i) => (
+                      <PaginationItem key={i + 1}>
+                        <PaginationLink
+                          onClick={() => setCurrentPage(i + 1)}
+                          isActive={currentPage === i + 1}
+                          className="cursor-pointer"
+                        >
+                          {i + 1}
+                        </PaginationLink>
+                      </PaginationItem>
+                    ))}
+                    <PaginationItem>
+                      <PaginationNext
+                        onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                        className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                      />
+                    </PaginationItem>
+                  </PaginationContent>
+                </Pagination>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

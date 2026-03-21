@@ -3,12 +3,16 @@
 import { useState, useMemo, useEffect } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import {
   Table,
@@ -26,6 +30,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
+import {
   DollarSign,
   CalendarDays,
   CheckCircle2,
@@ -39,6 +51,7 @@ import {
   Save,
   Search,
   ChevronDown,
+  X,
 } from "lucide-react";
 import { LeaderAccumulation, LiquidationPeriod, LeaderApprovalBatch, ActivityReport, User, WorkGroup, CompanySettings } from "@/lib/types";
 import { getAcumulacionesLider, getLotesAprobacion, getReportesActividad, upsertConfiguracionExtraLider } from "@/lib/supabase/services/reportes-actividad";
@@ -66,10 +79,14 @@ export default function AcumuladosPage() {
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
-  const [leaderExtraDrafts, setLeaderExtraDrafts] = useState<Record<string, { porcentaje: string; activo: boolean }>>({});
+  const [leaderExtraDrafts, setLeaderExtraDrafts] = useState<Record<string, { porcentaje: string; activo: boolean; tecnicosExcluidosIds?: string[] }>>({});
   const [savingLeaderId, setSavingLeaderId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [openCards, setOpenCards] = useState<Record<string, boolean>>({});
+  const [excludedSearchByLeader, setExcludedSearchByLeader] = useState<Record<string, string>>({});
+  const [currentPage, setCurrentPage] = useState(1);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const itemsPerPage = 5;
 
   useEffect(() => {
     setLoading(true);
@@ -120,6 +137,7 @@ export default function AcumuladosPage() {
       totalAcumulado: number;
       porcentajeExtraLiderAplicado: number;
       extraLiderActivo: boolean;
+      tecnicosExcluidosExtraIds?: string[];
       reportesAprobados: number;
     }>();
 
@@ -134,6 +152,7 @@ export default function AcumuladosPage() {
         totalAcumulado: persisted?.totalAcumulado ?? 0,
         porcentajeExtraLiderAplicado: persisted?.porcentajeExtraLiderAplicado ?? defaultExtraPct,
         extraLiderActivo: persisted?.extraLiderActivo ?? defaultExtraActivo,
+        tecnicosExcluidosExtraIds: persisted?.tecnicosExcluidosExtraIds,
         reportesAprobados: 0,
       });
     });
@@ -152,6 +171,7 @@ export default function AcumuladosPage() {
         totalAcumulado: 0,
         porcentajeExtraLiderAplicado: persisted?.porcentajeExtraLiderAplicado ?? defaultExtraPct,
         extraLiderActivo: persisted?.extraLiderActivo ?? defaultExtraActivo,
+        tecnicosExcluidosExtraIds: persisted?.tecnicosExcluidosExtraIds,
         reportesAprobados: 0,
       };
 
@@ -172,12 +192,13 @@ export default function AcumuladosPage() {
     // Calcular extra líder y totales
     accMap.forEach((acc) => {
       if (acc.extraLiderActivo && acc.porcentajeExtraLiderAplicado > 0) {
-        // Extra se calcula sobre actividades aprobadas (excluidos recorridos) del grupo desde el 2do integrante
+        // Extra se calcula sobre actividades aprobadas (excluidos recorridos) del grupo, excluyendo al técnico configurado.
         const group = groups.find((g) => g.liderId === acc.liderId);
         const groupMembers = group ? users.filter((u) => group.miembros.includes(u.id) && u.id !== acc.liderId) : [];
+        const excludedTechnicianIds = acc.tecnicosExcluidosExtraIds?.length ? acc.tecnicosExcluidosExtraIds : groupMembers[0] ? [groupMembers[0].id] : [];
         let extraBase = 0;
-        groupMembers.forEach((member, idx) => {
-          if (idx === 0) return; // Primer integrante excluido
+        groupMembers.forEach((member) => {
+          if (excludedTechnicianIds.includes(member.id)) return;
           const memberReports = periodReports.filter(
             (r) => r.tecnicoId === member.id && r.tipo !== "recorrido" && r.estadoAprobacionLider === "aprobado" && r.liderGrupoId === acc.liderId
           );
@@ -191,10 +212,15 @@ export default function AcumuladosPage() {
     return Array.from(accMap.values());
   }, [periodReports, periodAccumulationSettings, defaultExtraPct, defaultExtraActivo, groups, users, leaders]);
 
-  const handleLeaderExtraDraftChange = (liderId: string, updates: Partial<{ porcentaje: string; activo: boolean }>, current: { porcentajeExtraLiderAplicado: number; extraLiderActivo: boolean }) => {
+  const handleLeaderExtraDraftChange = (
+    liderId: string,
+    updates: Partial<{ porcentaje: string; activo: boolean; tecnicosExcluidosIds?: string[] }>,
+    current: { porcentajeExtraLiderAplicado: number; extraLiderActivo: boolean; tecnicosExcluidosExtraIds?: string[] },
+  ) => {
     const existing = leaderExtraDrafts[liderId] || {
       porcentaje: String(current.porcentajeExtraLiderAplicado),
       activo: current.extraLiderActivo,
+      tecnicosExcluidosIds: current.tecnicosExcluidosExtraIds,
     };
 
     setLeaderExtraDrafts((prev) => ({
@@ -206,12 +232,17 @@ export default function AcumuladosPage() {
     }));
   };
 
-  const handleSaveLeaderExtra = async (liderId: string, current: { porcentajeExtraLiderAplicado: number; extraLiderActivo: boolean }) => {
+  const handleSaveLeaderExtra = async (
+    liderId: string,
+    current: { porcentajeExtraLiderAplicado: number; extraLiderActivo: boolean; tecnicosExcluidosExtraIds?: string[] },
+  ) => {
     if (!selectedPeriodId) return;
 
-    const draft = leaderExtraDrafts[liderId] || {
+    const existingDraft = leaderExtraDrafts[liderId];
+    const draft = existingDraft || {
       porcentaje: String(current.porcentajeExtraLiderAplicado),
       activo: current.extraLiderActivo,
+      tecnicosExcluidosIds: current.tecnicosExcluidosExtraIds,
     };
 
     const porcentaje = Number(draft.porcentaje);
@@ -220,11 +251,15 @@ export default function AcumuladosPage() {
       return;
     }
 
+    setSaveError(null);
     setSavingLeaderId(liderId);
     try {
       const updated = await upsertConfiguracionExtraLider(liderId, selectedPeriodId, {
         porcentajeExtraLiderAplicado: porcentaje,
         extraLiderActivo: draft.activo,
+        tecnicosExcluidosExtraIds: existingDraft && Object.prototype.hasOwnProperty.call(existingDraft, "tecnicosExcluidosIds")
+          ? draft.tecnicosExcluidosIds
+          : current.tecnicosExcluidosExtraIds,
       });
 
       setAccumulations((prev) => {
@@ -242,7 +277,7 @@ export default function AcumuladosPage() {
       });
     } catch (error) {
       console.error("Error guardando configuración de extra líder:", error);
-      alert("No se pudo guardar la configuración del extra líder para este líder.");
+      setSaveError(error instanceof Error ? error.message : "No se pudo guardar la configuración del extra líder para este líder.");
     } finally {
       setSavingLeaderId(null);
     }
@@ -268,6 +303,15 @@ export default function AcumuladosPage() {
       return fullName.includes(lowerQuery);
     });
   }, [periodAccumulations, searchQuery, users]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, selectedPeriodId]);
+
+  const totalPages = Math.ceil(filteredAccumulations.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const currentAccumulations = filteredAccumulations.slice(startIndex, endIndex);
 
   if (loading) {
     return (
@@ -377,6 +421,14 @@ export default function AcumuladosPage() {
           </Card>
         </div>
 
+        {saveError && (
+          <Alert variant="destructive" className="border-destructive/40 bg-destructive/5">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>No se pudo guardar la configuración</AlertTitle>
+            <AlertDescription>{saveError}</AlertDescription>
+          </Alert>
+        )}
+
         {periodAccumulations.length === 0 && (
           <Card className="border-border/50 bg-card/80">
             <CardContent className="p-8 text-center">
@@ -393,7 +445,7 @@ export default function AcumuladosPage() {
           </Card>
         )}
 
-        {filteredAccumulations.map((acc) => {
+        {currentAccumulations.map((acc) => {
           const leader = users.find((u) => u.id === acc.liderId);
           const group = groups.find((g) => g.liderId === acc.liderId);
           const batch = periodBatches.find((b) => b.liderId === acc.liderId);
@@ -404,9 +456,15 @@ export default function AcumuladosPage() {
           const nonRecorridoReports = approvedReports.filter((r) => r.tipo !== "recorrido");
 
           const groupMembers = group ? users.filter((u) => group.miembros.includes(u.id) && u.id !== acc.liderId) : [];
+          const defaultExcludedIds = groupMembers[0] ? [groupMembers[0].id] : [];
           const draft = leaderExtraDrafts[acc.liderId];
           const draftPercentage = draft?.porcentaje ?? String(acc.porcentajeExtraLiderAplicado);
           const draftActive = draft?.activo ?? acc.extraLiderActivo;
+          const resolvedExcludedIds = draft?.tecnicosExcluidosIds ?? acc.tecnicosExcluidosExtraIds ?? defaultExcludedIds;
+          const excludedSearch = excludedSearchByLeader[acc.liderId] || "";
+          const filteredGroupMembers = groupMembers.filter((member) =>
+            `${member.nombre} ${member.apellido}`.toLowerCase().includes(excludedSearch.toLowerCase())
+          );
           const isOpen = openCards[acc.liderId] ?? false;
 
           return (
@@ -483,7 +541,7 @@ export default function AcumuladosPage() {
                         Configuración y Cálculo Extra Líder
                       </p>
                       <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
-                        <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto_auto] md:items-end">
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_1fr_auto_auto] md:items-end">
                           <div className="space-y-2">
                             <Label className="text-foreground/80">Porcentaje para este líder (%)</Label>
                             <Input
@@ -496,6 +554,94 @@ export default function AcumuladosPage() {
                             />
                             <p className="text-xs text-muted-foreground">
                               Este valor solo afecta a {leader?.nombre} en el período seleccionado.
+                            </p>
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-foreground/80">Técnicos excluidos de comisión</Label>
+                            <Popover>
+                              <PopoverTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  className="w-full justify-between border-border/50 bg-secondary/50 text-foreground hover:bg-secondary/70"
+                                  disabled={groupMembers.length === 0}
+                                >
+                                  <span className="truncate">
+                                    {resolvedExcludedIds.length > 0 ? `${resolvedExcludedIds.length} técnico(s) excluido(s)` : "Seleccionar técnicos"}
+                                  </span>
+                                  <ChevronDown className="h-4 w-4 opacity-60" />
+                                </Button>
+                              </PopoverTrigger>
+                              <PopoverContent className="w-80 border-border bg-card p-3" align="start">
+                                <div className="space-y-3">
+                                  <Input
+                                    placeholder="Buscar técnico..."
+                                    value={excludedSearch}
+                                    onChange={(e) =>
+                                      setExcludedSearchByLeader((prev) => ({
+                                        ...prev,
+                                        [acc.liderId]: e.target.value,
+                                      }))
+                                    }
+                                    className="bg-secondary/50 border-border/50"
+                                  />
+                                  <ScrollArea className="h-52 rounded-md border border-border/50">
+                                    <div className="space-y-1 p-2">
+                                      {filteredGroupMembers.map((member) => {
+                                        const checked = resolvedExcludedIds.includes(member.id);
+                                        return (
+                                          <label key={member.id} className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-secondary/50">
+                                            <Checkbox
+                                              checked={checked}
+                                              onCheckedChange={(nextChecked) => {
+                                                const nextExcludedIds = nextChecked
+                                                  ? [...resolvedExcludedIds, member.id]
+                                                  : resolvedExcludedIds.filter((id) => id !== member.id);
+                                                handleLeaderExtraDraftChange(
+                                                  acc.liderId,
+                                                  { tecnicosExcluidosIds: nextExcludedIds },
+                                                  acc,
+                                                );
+                                              }}
+                                            />
+                                            <span className="text-sm text-foreground/80">{member.nombre} {member.apellido}</span>
+                                          </label>
+                                        );
+                                      })}
+                                      {filteredGroupMembers.length === 0 && (
+                                        <p className="px-2 py-4 text-center text-xs text-muted-foreground">No hay técnicos que coincidan con la búsqueda.</p>
+                                      )}
+                                    </div>
+                                  </ScrollArea>
+                                  {resolvedExcludedIds.length > 0 && (
+                                    <div className="flex flex-wrap gap-2">
+                                      {resolvedExcludedIds.map((excludedId) => {
+                                        const excludedMember = groupMembers.find((member) => member.id === excludedId);
+                                        if (!excludedMember) return null;
+                                        return (
+                                          <Badge key={excludedId} variant="outline" className="gap-1 border-border/50 bg-secondary/40 text-xs text-foreground/80">
+                                            {excludedMember.nombre} {excludedMember.apellido}
+                                            <button
+                                              type="button"
+                                              className="ml-1"
+                                              onClick={() => handleLeaderExtraDraftChange(
+                                                acc.liderId,
+                                                { tecnicosExcluidosIds: resolvedExcludedIds.filter((id) => id !== excludedId) },
+                                                acc,
+                                              )}
+                                            >
+                                              <X className="h-3 w-3" />
+                                            </button>
+                                          </Badge>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              </PopoverContent>
+                            </Popover>
+                            <p className="text-xs text-muted-foreground">
+                              Los técnicos seleccionados no participarán en la base del extra líder.
                             </p>
                           </div>
                           <div className="flex items-center justify-between gap-3 rounded-lg border border-border/50 bg-secondary/30 px-4 py-2">
@@ -518,7 +664,7 @@ export default function AcumuladosPage() {
                       </div>
                       <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2 text-sm">
                         <p className="text-xs text-muted-foreground">
-                          El extra líder corresponde a un <span className="text-purple-400 font-bold">{acc.porcentajeExtraLiderAplicado}%</span> del valor total de las actividades (excluidos recorridos) desde el <span className="text-foreground font-medium">segundo integrante</span> del grupo en adelante. El primer integrante queda excluido.
+                          El extra líder corresponde a un <span className="text-purple-400 font-bold">{acc.porcentajeExtraLiderAplicado}%</span> del valor total de las actividades aprobadas, excluidos recorridos y excluyendo a los técnicos seleccionados para este líder en el período.
                         </p>
                         {groupMembers.length === 0 ? (
                           <p className="text-xs text-muted-foreground italic mt-2">No hay integrantes en el grupo de este líder.</p>
@@ -529,7 +675,7 @@ export default function AcumuladosPage() {
                                 (r) => r.tecnicoId === member.id
                               );
                               const memberTotal = memberReports.reduce((s, r) => s + r.costoActividad, 0);
-                              const isExcluded = idx === 0;
+                              const isExcluded = resolvedExcludedIds.includes(member.id);
                               const extraApplied = isExcluded ? 0 : Math.round(memberTotal * acc.porcentajeExtraLiderAplicado / 100);
 
                               return (
@@ -619,6 +765,38 @@ export default function AcumuladosPage() {
             </Card>
           );
         })}
+
+        {totalPages > 1 && (
+          <div className="flex justify-end">
+            <Pagination>
+              <PaginationContent>
+                <PaginationItem>
+                  <PaginationPrevious
+                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                    className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                  />
+                </PaginationItem>
+                {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
+                  <PaginationItem key={page}>
+                    <PaginationLink
+                      onClick={() => setCurrentPage(page)}
+                      isActive={currentPage === page}
+                      className="cursor-pointer"
+                    >
+                      {page}
+                    </PaginationLink>
+                  </PaginationItem>
+                ))}
+                <PaginationItem>
+                  <PaginationNext
+                    onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                    className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                  />
+                </PaginationItem>
+              </PaginationContent>
+            </Pagination>
+          </div>
+        )}
       </div>
     </div>
   );

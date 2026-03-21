@@ -29,6 +29,7 @@ export function SoluReportLogo({
           width={s.size}
           height={s.size}
           className="object-contain"
+          style={{ height: "auto" }}
           priority
         />
       </div>

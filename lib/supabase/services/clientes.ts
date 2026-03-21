@@ -1,5 +1,9 @@
 import { supabase } from "../client";
 import { Client } from "@/lib/types";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+
+const CLIENTES_CACHE_KEY = "clientes:list";
+const CLIENTES_CACHE_TTL = 60_000;
 
 interface ClientRow {
   id: string;
@@ -36,12 +40,14 @@ function mapRow(row: ClientRow): Client {
 }
 
 export async function getClientes(): Promise<Client[]> {
-  const { data, error } = await supabase
-    .from("clientes")
-    .select("*")
-    .order("fecha_creacion", { ascending: false });
-  if (error) throw error;
-  return (data || []).map(mapRow);
+  return getCachedValue(CLIENTES_CACHE_KEY, CLIENTES_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("clientes")
+      .select("*")
+      .order("fecha_creacion", { ascending: false });
+    if (error) throw error;
+    return (data || []).map(mapRow);
+  });
 }
 
 export async function getClienteById(id: string): Promise<Client | null> {
@@ -73,6 +79,7 @@ export async function createCliente(client: Partial<Client>): Promise<Client> {
     .select()
     .single();
   if (error) throw error;
+  invalidateCachedValue(CLIENTES_CACHE_KEY);
   return mapRow(data);
 }
 
@@ -97,10 +104,12 @@ export async function updateCliente(id: string, client: Partial<Client>): Promis
     .select()
     .single();
   if (error) throw error;
+  invalidateCachedValue(CLIENTES_CACHE_KEY);
   return mapRow(data);
 }
 
 export async function deleteCliente(id: string): Promise<void> {
   const { error } = await supabase.from("clientes").delete().eq("id", id);
   if (error) throw error;
+  invalidateCachedValue(CLIENTES_CACHE_KEY);
 }

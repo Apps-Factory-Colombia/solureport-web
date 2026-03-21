@@ -330,8 +330,10 @@ export function generateComprobantePDF(data: {
   periodo: string;
   tecnico: string;
   cedula?: string;
-  items: { actividad: string; edificio: string; fecha: string; porcentaje: number; valor: number }[];
+  items: { actividad: string; fecha: string; valorBase: number; porcentaje: number }[];
+  desplazamientos?: { descripcion: string; fecha: string; valor: number }[];
   totalAuxilio: number;
+  totalDescuentoTardanza?: number;
   totalRodamiento: number;
   grandTotal: number;
 }): void {
@@ -374,13 +376,13 @@ export function generateComprobantePDF(data: {
 
   autoTable(doc, {
     startY: y,
-    head: [["Actividad", "Edificio", "Fecha", "%", "Valor"]],
+    head: [["Actividad", "Fecha", "Valor Base", "%", "Valor Liquidado"]],
     body: data.items.map((item) => [
       item.actividad,
-      item.edificio || "—",
       item.fecha,
+      formatCurrencyPDF(item.valorBase),
       `${item.porcentaje}%`,
-      formatCurrencyPDF(item.valor),
+      formatCurrencyPDF(item.valorBase),
     ]),
     styles: { fontSize: 8, cellPadding: 2.5 },
     headStyles: { fillColor: [13, 138, 188], textColor: [255, 255, 255] },
@@ -389,6 +391,33 @@ export function generateComprobantePDF(data: {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   y = (doc as any).lastAutoTable.finalY + 8;
+
+  if ((data.desplazamientos || []).length > 0) {
+    doc.setFontSize(9);
+    doc.setTextColor(60);
+    doc.text("CONCEPTO: RECORRIDOS Y DESPLAZAMIENTOS", 14, y);
+    y += 6;
+
+    autoTable(doc, {
+      startY: y,
+      head: [["Descripción", "Fecha", "Valor"]],
+      body: (data.desplazamientos || []).map((item) => [
+        item.descripcion || "Recorrido",
+        item.fecha,
+        formatCurrencyPDF(item.valor),
+      ]),
+      styles: { fontSize: 8, cellPadding: 2.5 },
+      headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255] },
+      theme: "grid",
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    y = (doc as any).lastAutoTable.finalY + 6;
+    doc.setFontSize(8);
+    doc.setTextColor(100);
+    doc.text(`Cantidad de desplazamientos: ${(data.desplazamientos || []).length}`, 14, y);
+    y += 8;
+  }
 
   // Totals
   const totalsX = pageWidth - 80;
@@ -399,6 +428,19 @@ export function generateComprobantePDF(data: {
   doc.setTextColor(30);
   doc.text(formatCurrencyPDF(data.totalAuxilio), pageWidth - 14, y, { align: "right" });
   y += 6;
+
+  if ((data.totalDescuentoTardanza || 0) > 0) {
+    doc.setTextColor(180, 50, 50);
+    doc.text("Descuento por Tardanza:", totalsX - 5, y);
+    doc.text(`-${formatCurrencyPDF(data.totalDescuentoTardanza || 0)}`, pageWidth - 14, y, { align: "right" });
+    y += 6;
+
+    doc.setTextColor(60);
+    doc.text("Auxilio Neto:", totalsX, y);
+    doc.setTextColor(30);
+    doc.text(formatCurrencyPDF(data.totalAuxilio - (data.totalDescuentoTardanza || 0)), pageWidth - 14, y, { align: "right" });
+    y += 6;
+  }
 
   if (data.totalRodamiento > 0) {
     doc.setTextColor(60);

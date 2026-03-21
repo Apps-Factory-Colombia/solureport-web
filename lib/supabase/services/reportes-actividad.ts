@@ -1,8 +1,126 @@
 import { supabase } from "../client";
 import { ActivityReport, LeaderApprovalBatch, LeaderAccumulation } from "@/lib/types";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
 
-function mapReport(row: any, fotosAntes: string[], fotosDespues: string[]): ActivityReport {
-  const normalizedTipo = row.tipo === "actividad" ? "actividad_grupal" : row.tipo;
+const REPORTES_ACTIVIDAD_CACHE_KEY = "reportes-actividad:list";
+const REPORTES_ACTIVIDAD_CACHE_TTL = 20_000;
+const ACUMULACIONES_LIDER_CACHE_KEY = "acumulaciones-lider:list";
+const ACUMULACIONES_LIDER_CACHE_TTL = 20_000;
+
+interface ReporteActividadRow {
+  id: string;
+  tipo: string;
+  tecnico_id: string;
+  lider_grupo_id: string;
+  grupo_id: string;
+  fecha: string;
+  cliente_id?: string | null;
+  descripcion?: string | null;
+  observaciones?: string | null;
+  firma_receptor_url?: string | null;
+  nombre_receptor?: string | null;
+  cedula_receptor?: string | null;
+  cargo_receptor?: string | null;
+  tiene_bitacora?: boolean | null;
+  foto_bitacora_url?: string | null;
+  punto_partida?: string | null;
+  punto_llegada?: string | null;
+  tipo_recorrido?: ActivityReport["tipoRecorrido"] | null;
+  foto_herramienta_url?: string | null;
+  estado_aprobacion_lider: ActivityReport["estadoAprobacionLider"];
+  fecha_aprobacion_lider?: string | null;
+  costo_actividad?: number | string | null;
+  costo_administrable?: boolean | null;
+  periodo_id: string;
+  fecha_creacion?: string | null;
+}
+
+interface RegistroActividadRow {
+  id: string;
+  actividad_id?: string | null;
+  lider_id: string;
+  grupo_id: string;
+  fecha: string;
+  cliente_id?: string | null;
+  cliente_nombre?: string | null;
+  especificacion?: string | null;
+  periodo_id?: string | null;
+  fecha_creacion?: string | null;
+}
+
+interface ActividadParticipanteRow {
+  registro_actividad_id: string;
+  tecnico_id: string;
+  valor_calculado?: number | string | null;
+}
+
+interface ActividadCatalogoRow {
+  id: string;
+  codigo: string;
+  nombre: string;
+}
+
+interface PeriodoLiquidacionRow {
+  id: string;
+  fecha_inicio: string;
+  fecha_fin: string;
+}
+
+interface ItemAprobacionRow {
+  tecnico_id: string;
+  fecha: string;
+  tipo: string;
+  estado?: string | null;
+  fecha_aprobacion?: string | null;
+}
+
+interface ReporteActividadFotoRow {
+  reporte_actividad_id: string;
+  tipo: string;
+  url: string;
+}
+
+interface LeaderApprovalBatchRow {
+  id: string;
+  lider_id: string;
+  grupo_id: string;
+  periodo_id: string;
+  reportes_aprobados?: string[] | null;
+  fecha_cierre?: string | null;
+  costo_lider_por_revision?: number | string | null;
+  total_revisiones?: number | null;
+  total_costo_lider?: number | string | null;
+}
+
+interface LeaderAccumulationRow {
+  lider_id: string;
+  periodo_id: string;
+  total_aprobado_pago?: number | string | null;
+  total_pendiente_pago?: number | string | null;
+  extra_lider?: number | string | null;
+  total_recorridos?: number | string | null;
+  total_acumulado?: number | string | null;
+  porcentaje_extra_lider_aplicado?: number | string | null;
+  extra_lider_activo?: boolean | null;
+  tecnicos_excluidos_extra_ids?: string[] | null;
+}
+
+interface RegistroBaseRow {
+  id: string;
+}
+
+interface ParticipanteRelacionRow {
+  registro_actividad_id: string;
+  tecnico_id: string;
+}
+
+function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues: string[]): ActivityReport {
+  const normalizedTipo: ActivityReport["tipo"] =
+    row.tipo === "actividad"
+      ? "actividad_grupal"
+      : row.tipo === "mantenimiento_preventivo" || row.tipo === "visita_tecnica" || row.tipo === "recorrido" || row.tipo === "actividad_grupal"
+        ? row.tipo
+        : "actividad_grupal";
 
   return {
     id: row.id,
@@ -28,7 +146,7 @@ function mapReport(row: any, fotosAntes: string[], fotosDespues: string[]): Acti
     fotoHerramienta: row.foto_herramienta_url || undefined,
     estadoAprobacionLider: row.estado_aprobacion_lider,
     fechaAprobacionLider: row.fecha_aprobacion_lider?.split("T")[0] || undefined,
-    costoActividad: parseFloat(row.costo_actividad) || 0,
+    costoActividad: Number(row.costo_actividad ?? 0) || 0,
     costoAdministrable: row.costo_administrable || false,
     periodoId: row.periodo_id,
     fechaCreacion: row.fecha_creacion?.split("T")[0] || "",
@@ -44,30 +162,42 @@ async function getRegistrosComoReports(): Promise<ActivityReport[]> {
     supabase.from("items_aprobacion").select("*"),
   ]);
 
+  const participantesByRegistro = new Map<string, ActividadParticipanteRow[]>();
+  for (const participante of allParticipantes || []) {
+    const registroId = participante.registro_actividad_id;
+    if (!registroId) continue;
+    const current = participantesByRegistro.get(registroId) || [];
+    current.push(participante);
+    participantesByRegistro.set(registroId, current);
+  }
+
+  const actividadesById = new Map(
+    (actividades || []).map((actividad: ActividadCatalogoRow) => [actividad.id, actividad])
+  );
+
+  const approvalByTecnicoFecha = new Map<string, ItemAprobacionRow>(
+    (approvalItems || [])
+      .filter((item: ItemAprobacionRow) => item.tipo === "actividad")
+      .map((item: ItemAprobacionRow) => [`${item.tecnico_id}|${item.fecha}`, item])
+  );
+
   const findPeriodo = (fecha: string) => {
     const p = (periodos || []).find(
-      (per: any) => fecha >= per.fecha_inicio && fecha <= per.fecha_fin
+      (per: PeriodoLiquidacionRow) => fecha >= per.fecha_inicio && fecha <= per.fecha_fin
     );
     return p?.id || "";
   };
 
   const reports: ActivityReport[] = [];
-  for (const reg of registros || []) {
-    const parts = (allParticipantes || []).filter(
-      (p: any) => p.registro_actividad_id === reg.id
-    );
+  for (const reg of (registros || []) as RegistroActividadRow[]) {
+    const parts = participantesByRegistro.get(reg.id) || [];
     if (parts.length === 0) continue;
 
-    const act = (actividades || []).find((a: any) => a.id === reg.actividad_id);
+    const act = reg.actividad_id ? actividadesById.get(reg.actividad_id) : undefined;
     const periodoId = reg.periodo_id || findPeriodo(reg.fecha);
 
     for (const part of parts) {
-      const approval = (approvalItems || []).find(
-        (ai: any) =>
-          ai.tecnico_id === part.tecnico_id &&
-          ai.fecha === reg.fecha &&
-          ai.tipo === "actividad"
-      );
+      const approval = approvalByTecnicoFecha.get(`${part.tecnico_id}|${reg.fecha}`);
       const estadoAprobacion: "pendiente" | "aprobado" | "rechazado" =
         approval?.estado === "aprobada" ? "aprobado"
           : approval?.estado === "rechazada" ? "rechazado"
@@ -82,9 +212,10 @@ async function getRegistrosComoReports(): Promise<ActivityReport[]> {
         fecha: reg.fecha,
         clienteId: reg.cliente_id || undefined,
         descripcion: act ? `${act.codigo} — ${act.nombre}` : reg.cliente_nombre || "Actividad grupal",
+        especificacion: reg.especificacion || undefined,
         estadoAprobacionLider: estadoAprobacion,
         fechaAprobacionLider: approval?.fecha_aprobacion?.split("T")[0] || undefined,
-        costoActividad: parseFloat(part.valor_calculado) || 0,
+        costoActividad: Number(part.valor_calculado ?? 0) || 0,
         costoAdministrable: false,
         periodoId,
         fechaCreacion: reg.fecha_creacion?.split("T")[0] || "",
@@ -95,45 +226,60 @@ async function getRegistrosComoReports(): Promise<ActivityReport[]> {
 }
 
 export async function getReportesActividad(): Promise<ActivityReport[]> {
-  const { data, error } = await supabase
-    .from("reportes_actividad")
-    .select("*")
-    .order("fecha", { ascending: false });
-  if (error) throw error;
-
-  const reports: ActivityReport[] = [];
-  for (const row of data || []) {
-    const { data: fotos } = await supabase
-      .from("reporte_actividad_fotos")
+  return getCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY, REPORTES_ACTIVIDAD_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("reportes_actividad")
       .select("*")
-      .eq("reporte_actividad_id", row.id)
-      .order("orden");
-    const fotosAntes = (fotos || []).filter((f: any) => f.tipo === "antes").map((f: any) => f.url);
-    const fotosDespues = (fotos || []).filter((f: any) => f.tipo === "despues").map((f: any) => f.url);
-    reports.push(mapReport(row, fotosAntes, fotosDespues));
-  }
+      .order("fecha", { ascending: false });
+    if (error) throw error;
 
-  // Fusionar actividades grupales del líder (registros_actividades)
-  try {
-    const registroReports = await getRegistrosComoReports();
-    // Evitar duplicados: no agregar si ya existe un reportes_actividad para mismo técnico+fecha+cliente
-    const existingKeys = new Set(
-      reports.map((r) => `${r.tecnicoId}|${r.fecha}|${r.clienteId || ""}`)
-    );
-    for (const rr of registroReports) {
-      const key = `${rr.tecnicoId}|${rr.fecha}|${rr.clienteId || ""}`;
-      if (!existingKeys.has(key)) {
-        reports.push(rr);
-        existingKeys.add(key);
-      }
+    const reportIds = (data || []).map((row: ReporteActividadRow) => row.id);
+    const { data: fotosData, error: fotosError } = reportIds.length > 0
+      ? await supabase
+        .from("reporte_actividad_fotos")
+        .select("reporte_actividad_id, tipo, url, orden")
+        .in("reporte_actividad_id", reportIds)
+        .order("orden")
+      : { data: [], error: null };
+
+    if (fotosError) throw fotosError;
+
+    const fotosByReporte = new Map<string, Array<{ tipo: string; url: string }>>();
+    for (const foto of (fotosData || []) as ReporteActividadFotoRow[]) {
+      const reporteId = foto.reporte_actividad_id;
+      if (!reporteId) continue;
+      const current = fotosByReporte.get(reporteId) || [];
+      current.push({ tipo: foto.tipo, url: foto.url });
+      fotosByReporte.set(reporteId, current);
     }
-  } catch (err) {
-    console.error("Error cargando registros_actividades como reportes:", err);
-  }
 
-  // Re-ordenar por fecha descendente
-  reports.sort((a, b) => b.fecha.localeCompare(a.fecha));
-  return reports;
+    const reports: ActivityReport[] = [];
+    for (const row of data || []) {
+      const fotos = fotosByReporte.get(row.id) || [];
+      const fotosAntes = fotos.filter((f) => f.tipo === "antes").map((f) => f.url);
+      const fotosDespues = fotos.filter((f) => f.tipo === "despues").map((f) => f.url);
+      reports.push(mapReport(row, fotosAntes, fotosDespues));
+    }
+
+    try {
+      const registroReports = await getRegistrosComoReports();
+      const existingKeys = new Set(
+        reports.map((r) => `${r.tecnicoId}|${r.fecha}|${r.clienteId || ""}`)
+      );
+      for (const rr of registroReports) {
+        const key = `${rr.tecnicoId}|${rr.fecha}|${rr.clienteId || ""}`;
+        if (!existingKeys.has(key)) {
+          reports.push(rr);
+          existingKeys.add(key);
+        }
+      }
+    } catch (err) {
+      console.error("Error cargando registros_actividades como reportes:", err);
+    }
+
+    reports.sort((a, b) => b.fecha.localeCompare(a.fecha));
+    return reports;
+  });
 }
 
 export async function updateCostoActividadAdmin(id: string, costoActividad: number): Promise<void> {
@@ -148,6 +294,7 @@ export async function updateCostoActividadAdmin(id: string, costoActividad: numb
       .eq("registro_actividad_id", registroId)
       .eq("tecnico_id", tecnicoId);
     if (error) throw error;
+    invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
     return;
   }
 
@@ -156,6 +303,7 @@ export async function updateCostoActividadAdmin(id: string, costoActividad: numb
     .update({ costo_actividad: costoActividad })
     .eq("id", id);
   if (error) throw error;
+  invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
 }
 
 export async function updateEstadoAprobacion(id: string, estado: "aprobado" | "rechazado"): Promise<void> {
@@ -195,6 +343,7 @@ export async function updateEstadoAprobacion(id: string, estado: "aprobado" | "r
         .eq("fecha", registro.fecha)
         .eq("tipo", "actividad");
     }
+    invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
     return;
   }
 
@@ -206,9 +355,10 @@ export async function updateEstadoAprobacion(id: string, estado: "aprobado" | "r
     })
     .eq("id", id);
   if (error) throw error;
+  invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
 }
 
-function mapBatch(row: any): LeaderApprovalBatch {
+function mapBatch(row: LeaderApprovalBatchRow): LeaderApprovalBatch {
   return {
     id: row.id,
     liderId: row.lider_id,
@@ -216,9 +366,9 @@ function mapBatch(row: any): LeaderApprovalBatch {
     periodoId: row.periodo_id,
     reportesAprobados: row.reportes_aprobados || [],
     fechaCierre: row.fecha_cierre?.split("T")[0] || "",
-    costoLiderPorRevision: parseFloat(row.costo_lider_por_revision) || 0,
+    costoLiderPorRevision: Number(row.costo_lider_por_revision ?? 0) || 0,
     totalRevisiones: row.total_revisiones || 0,
-    totalCostoLider: parseFloat(row.total_costo_lider) || 0,
+    totalCostoLider: Number(row.total_costo_lider ?? 0) || 0,
   };
 }
 
@@ -231,27 +381,30 @@ export async function getLotesAprobacion(): Promise<LeaderApprovalBatch[]> {
   return (data || []).map(mapBatch);
 }
 
-function mapAccumulation(row: any): LeaderAccumulation {
+function mapAccumulation(row: LeaderAccumulationRow): LeaderAccumulation {
   return {
     liderId: row.lider_id,
     periodoId: row.periodo_id,
-    totalAprobadoPago: parseFloat(row.total_aprobado_pago) || 0,
-    totalPendientePago: parseFloat(row.total_pendiente_pago) || 0,
-    extraLider: parseFloat(row.extra_lider) || 0,
-    totalRecorridos: parseFloat(row.total_recorridos) || 0,
-    totalAcumulado: parseFloat(row.total_acumulado) || 0,
-    porcentajeExtraLiderAplicado: parseFloat(row.porcentaje_extra_lider_aplicado) || 0,
+    totalAprobadoPago: Number(row.total_aprobado_pago ?? 0) || 0,
+    totalPendientePago: Number(row.total_pendiente_pago ?? 0) || 0,
+    extraLider: Number(row.extra_lider ?? 0) || 0,
+    totalRecorridos: Number(row.total_recorridos ?? 0) || 0,
+    totalAcumulado: Number(row.total_acumulado ?? 0) || 0,
+    porcentajeExtraLiderAplicado: Number(row.porcentaje_extra_lider_aplicado ?? 0) || 0,
     extraLiderActivo: row.extra_lider_activo ?? true,
+    tecnicosExcluidosExtraIds: row.tecnicos_excluidos_extra_ids || undefined,
   };
 }
 
 export async function getAcumulacionesLider(): Promise<LeaderAccumulation[]> {
-  const { data, error } = await supabase
-    .from("acumulacion_lideres")
-    .select("*")
-    .order("lider_id");
-  if (error) throw error;
-  return (data || []).map(mapAccumulation);
+  return getCachedValue(ACUMULACIONES_LIDER_CACHE_KEY, ACUMULACIONES_LIDER_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("acumulacion_lideres")
+      .select("*")
+      .order("lider_id");
+    if (error) throw error;
+    return (data || []).map(mapAccumulation);
+  });
 }
 
 export async function upsertConfiguracionExtraLider(
@@ -260,6 +413,7 @@ export async function upsertConfiguracionExtraLider(
   settings: {
     porcentajeExtraLiderAplicado: number;
     extraLiderActivo: boolean;
+    tecnicosExcluidosExtraIds?: string[];
   }
 ): Promise<LeaderAccumulation> {
   const { data: existing, error: existingError } = await supabase
@@ -276,7 +430,29 @@ export async function upsertConfiguracionExtraLider(
     porcentaje_extra_lider_aplicado: settings.porcentajeExtraLiderAplicado,
     extra_lider_activo: settings.extraLiderActivo,
     fecha_actualizacion: new Date().toISOString(),
+    ...(settings.tecnicosExcluidosExtraIds !== undefined
+      ? {
+        tecnicos_excluidos_extra_ids: settings.tecnicosExcluidosExtraIds.length
+          ? settings.tecnicosExcluidosExtraIds
+          : null,
+      }
+      : {}),
   };
+
+  const isMissingExcludedTechniciansColumnError = (candidate: unknown) => {
+    const code = typeof candidate === "object" && candidate !== null && "code" in candidate
+      ? String((candidate as { code?: unknown }).code || "")
+      : "";
+    const message = typeof candidate === "object" && candidate !== null && "message" in candidate
+      ? String((candidate as { message?: unknown }).message || "")
+      : "";
+
+    return code === "PGRST204" && message.includes("tecnicos_excluidos_extra_ids");
+  };
+
+  const missingColumnError = new Error(
+    "La base de datos no tiene la columna tecnicos_excluidos_extra_ids en acumulacion_lideres. Ejecuta la migracion supabase/migration_acumulacion_lider_tecnico_excluido.sql y vuelve a intentar."
+  );
 
   if (existing) {
     const { data, error } = await supabase
@@ -287,7 +463,13 @@ export async function upsertConfiguracionExtraLider(
       .select("*")
       .limit(1)
       .single();
-    if (error) throw error;
+    if (error) {
+      if (settings.tecnicosExcluidosExtraIds !== undefined && isMissingExcludedTechniciansColumnError(error)) {
+        throw missingColumnError;
+      }
+      throw error;
+    }
+    invalidateCachedValue(ACUMULACIONES_LIDER_CACHE_KEY);
     return mapAccumulation(data);
   }
 
@@ -305,7 +487,13 @@ export async function upsertConfiguracionExtraLider(
     })
     .select("*")
     .single();
-  if (error) throw error;
+  if (error) {
+    if (settings.tecnicosExcluidosExtraIds !== undefined && isMissingExcludedTechniciansColumnError(error)) {
+      throw missingColumnError;
+    }
+    throw error;
+  }
+  invalidateCachedValue(ACUMULACIONES_LIDER_CACHE_KEY);
   return mapAccumulation(data);
 }
 
@@ -360,6 +548,7 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
           .eq("id", registroId);
       }
     }
+    invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
     return;
   }
 
@@ -420,7 +609,7 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
     }
 
     const { data: registrosByDateGroup } = await registrosBaseQuery;
-    const candidateRegistroIds = (registrosByDateGroup || []).map((row: any) => row.id);
+    const candidateRegistroIds = (registrosByDateGroup || []).map((row: RegistroBaseRow) => row.id);
 
     if (candidateRegistroIds.length > 0) {
       const { data: participantesRelacionados } = await supabase
@@ -431,8 +620,8 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
       const registroIdsToDelete = Array.from(
         new Set(
           (participantesRelacionados || [])
-            .filter((row: any) => row.tecnico_id === report.tecnico_id)
-            .map((row: any) => row.registro_actividad_id)
+            .filter((row: ParticipanteRelacionRow) => row.tecnico_id === report.tecnico_id)
+            .map((row: ParticipanteRelacionRow) => row.registro_actividad_id)
             .filter(Boolean)
         )
       );
@@ -485,4 +674,8 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
     .delete()
     .eq("id", id);
   if (deleteError) throw deleteError;
+
+  invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+  invalidateCachedValue(ACUMULACIONES_LIDER_CACHE_KEY);
+  invalidateCachedValue("mantenimientos:reportes");
 }

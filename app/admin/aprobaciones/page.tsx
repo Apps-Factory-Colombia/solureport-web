@@ -6,8 +6,7 @@ import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -40,7 +39,7 @@ import {
   ClipboardCheck,
   ShieldCheck,
   DollarSign,
-  Image,
+  ImageIcon,
   MapPin,
   PenLine,
   FileText,
@@ -48,17 +47,17 @@ import {
   Users,
   Save,
 } from "lucide-react";
-import { ActivityReport, TipoInforme, User, Client, WorkGroup, CompanySettings } from "@/lib/types";
+import { ActivityReport, User, Client, WorkGroup } from "@/lib/types";
 import { getReportesActividad, updateCostoActividadAdmin, updateEstadoAprobacion } from "@/lib/supabase/services/reportes-actividad";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
-import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { cn } from "@/lib/utils";
 import {
   Pagination,
   PaginationContent,
+  PaginationEllipsis,
   PaginationItem,
   PaginationLink,
   PaginationNext,
@@ -71,6 +70,15 @@ function formatCurrency(value: number) {
     currency: "COP",
     minimumFractionDigits: 0,
   }).format(value);
+}
+
+function normalizeSearchValue(value?: string | null) {
+  return (value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 const tipoConfig: Record<string, { label: string; color: string; icon: React.ElementType }> = {
@@ -124,6 +132,8 @@ export default function AprobacionesPage() {
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [search, setSearch] = useState("");
+  const [tecnicoFilter, setTecnicoFilter] = useState("");
+  const [dateFilter, setDateFilter] = useState("");
   const [tipoFilter, setTipoFilter] = useState<string>("todos");
   const [estadoFilter, setEstadoFilter] = useState<string>("todos");
   const [grupoFilter, setGrupoFilter] = useState<string>("todos");
@@ -160,6 +170,18 @@ export default function AprobacionesPage() {
 
   const costDraft = Number(editableCost || 0);
   const isCostDirty = selectedReport ? costDraft !== selectedReport.costoActividad : false;
+  const usersById = useMemo(
+    () => new Map(users.map((user) => [user.id, user])),
+    [users]
+  );
+  const clientsById = useMemo(
+    () => new Map(clients.map((client) => [client.id, client])),
+    [clients]
+  );
+  const groupsById = useMemo(
+    () => new Map(groups.map((group) => [group.id, group])),
+    [groups]
+  );
   const getInlineCostValue = useCallback(
     (report: ActivityReport) => inlineCostDrafts[report.id] ?? String(report.costoActividad),
     [inlineCostDrafts]
@@ -197,7 +219,7 @@ export default function AprobacionesPage() {
   };
 
   const handleInlineSaveCost = async (report: ActivityReport) => {
-    const nextCost = getNextCostForReport(report);
+    const nextCost = Number((inlineCostDrafts[report.id] ?? String(report.costoActividad)) || 0);
     if (nextCost === report.costoActividad) return;
 
     setSavingInlineCostId(report.id);
@@ -219,7 +241,6 @@ export default function AprobacionesPage() {
         report = { ...report, costoActividad: nextCost };
       }
       await updateEstadoAprobacion(report.id, "aprobado");
-      const tech = users.find((u) => u.id === report.tecnicoId);
       const tipo = getTipoConfig(String(report.tipo));
       await createNotificacion({
         usuarioId: report.tecnicoId,
@@ -266,31 +287,58 @@ export default function AprobacionesPage() {
   };
 
   const filtered = useMemo(() => {
-    return reports.filter((r) => {
-      const tech = users.find((u) => u.id === r.tecnicoId);
-      const client = r.clienteId ? clients.find((c) => c.id === r.clienteId) : null;
-      const matchSearch =
-        tech?.nombre.toLowerCase().includes(search.toLowerCase()) ||
-        tech?.apellido.toLowerCase().includes(search.toLowerCase()) ||
-        client?.edificio?.toLowerCase().includes(search.toLowerCase()) ||
-        r.descripcion.toLowerCase().includes(search.toLowerCase());
-      const matchTipo = tipoFilter === "todos" || r.tipo === tipoFilter;
-      const matchEstado = estadoFilter === "todos" || r.estadoAprobacionLider === estadoFilter;
-      const matchGrupo = grupoFilter === "todos" || r.grupoId === grupoFilter;
-      return matchSearch && matchTipo && matchEstado && matchGrupo;
-    });
-  }, [reports, search, tipoFilter, estadoFilter, grupoFilter]);
+    const normalizedSearch = normalizeSearchValue(search);
+    const normalizedTecnicoFilter = normalizeSearchValue(tecnicoFilter);
+
+    return reports
+      .filter((r) => {
+        const tech = usersById.get(r.tecnicoId);
+        const client = r.clienteId ? clientsById.get(r.clienteId) : null;
+        const group = groupsById.get(r.grupoId);
+        const techFullName = normalizeSearchValue([tech?.nombre, tech?.apellido].filter(Boolean).join(" "));
+        const searchableFields = [
+          techFullName,
+          normalizeSearchValue(client?.edificio),
+          normalizeSearchValue(client?.nombre),
+          normalizeSearchValue(group?.nombre),
+          normalizeSearchValue(r.fecha),
+          normalizeSearchValue(r.descripcion),
+          normalizeSearchValue(r.especificacion),
+        ];
+        const matchSearch = !normalizedSearch || searchableFields.some((field) => field.includes(normalizedSearch));
+        const matchTecnico = !normalizedTecnicoFilter || techFullName.includes(normalizedTecnicoFilter);
+        const matchDate = !dateFilter || r.fecha === dateFilter;
+        const matchTipo = tipoFilter === "todos" || r.tipo === tipoFilter;
+        const matchEstado = estadoFilter === "todos" || r.estadoAprobacionLider === estadoFilter;
+        const matchGrupo = grupoFilter === "todos" || r.grupoId === grupoFilter;
+        return matchSearch && matchTecnico && matchDate && matchTipo && matchEstado && matchGrupo;
+      })
+      .sort((a, b) => {
+        const dateCompare = b.fecha.localeCompare(a.fecha);
+        if (dateCompare !== 0) return dateCompare;
+
+        const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
+        if (creationCompare !== 0) return creationCompare;
+
+        return b.id.localeCompare(a.id);
+      });
+  }, [reports, search, tecnicoFilter, dateFilter, tipoFilter, estadoFilter, grupoFilter, usersById, clientsById, groupsById]);
 
   // Paginación de resultados filtrados
   const totalPages = Math.ceil(filtered.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
   const currentReports = filtered.slice(startIndex, endIndex);
+  const visiblePages = Array.from({ length: totalPages }, (_, index) => index + 1).filter((page) => {
+    if (totalPages <= 7) return true;
+    if (page === 1 || page === totalPages) return true;
+    return Math.abs(page - currentPage) <= 1;
+  });
 
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [search, tipoFilter, estadoFilter, grupoFilter]);
+  }, [search, tecnicoFilter, dateFilter, tipoFilter, estadoFilter, grupoFilter]);
 
   const totalReportes = reports.length;
   const aprobados = reports.filter((r) => r.estadoAprobacionLider === "aprobado").length;
@@ -368,12 +416,24 @@ export default function AprobacionesPage() {
           <div className="relative flex-1 max-w-sm">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Buscar por técnico, cliente o descripción..."
+              placeholder="Buscar por cliente, grupo, descripción o fecha..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="pl-10 bg-secondary/50 border-border/50"
             />
           </div>
+          <Input
+            placeholder="Filtrar por técnico"
+            value={tecnicoFilter}
+            onChange={(e) => setTecnicoFilter(e.target.value)}
+            className="w-52 bg-secondary/50 border-border/50"
+          />
+          <Input
+            type="date"
+            value={dateFilter}
+            onChange={(e) => setDateFilter(e.target.value)}
+            className="w-44 bg-secondary/50 border-border/50"
+          />
           <Select value={tipoFilter} onValueChange={setTipoFilter}>
             <SelectTrigger className="w-48 bg-secondary/50 border-border/50">
               <SelectValue placeholder="Tipo" />
@@ -426,10 +486,10 @@ export default function AprobacionesPage() {
               </TableHeader>
               <TableBody>
                 {currentReports.map((report) => {
-                  const tech = users.find((u) => u.id === report.tecnicoId);
-                  const client = report.clienteId ? clients.find((c) => c.id === report.clienteId) : null;
-                  const group = groups.find((g) => g.id === report.grupoId);
-                  const leader = group ? users.find((u) => u.id === group.liderId) : null;
+                  const tech = usersById.get(report.tecnicoId);
+                  const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+                  const group = groupsById.get(report.grupoId);
+                  const leader = group ? usersById.get(group.liderId) : null;
                   const tipo = getTipoConfig(String(report.tipo));
                   const estado = estadoAprobacionConfig[report.estadoAprobacionLider];
                   const TipoIcon = tipo.icon;
@@ -467,6 +527,11 @@ export default function AprobacionesPage() {
                         <p className="text-sm text-foreground/80 truncate">
                           {client ? `${client.nombre} — ${client.edificio}` : report.descripcion}
                         </p>
+                        {report.especificacion && (
+                          <p className="text-xs text-muted-foreground truncate">
+                            Especificación: {report.especificacion}
+                          </p>
+                        )}
                         <p className="text-xs text-muted-foreground truncate">
                           Líder: {leader?.nombre} {leader?.apellido}
                         </p>
@@ -562,26 +627,40 @@ export default function AprobacionesPage() {
             </Table>
 
             {totalPages > 1 && (
-              <div className="p-4 border-t border-border/50 flex justify-end">
-                <Pagination>
-                  <PaginationContent>
+              <div className="overflow-x-auto p-4 border-t border-border/50">
+                <Pagination className="justify-center min-w-max">
+                  <PaginationContent className="flex-nowrap">
                     <PaginationItem>
                       <PaginationPrevious
                         onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                         className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
                       />
                     </PaginationItem>
-                    {Array.from({ length: totalPages }).map((_, i) => (
-                      <PaginationItem key={i + 1}>
-                        <PaginationLink
-                          onClick={() => setCurrentPage(i + 1)}
-                          isActive={currentPage === i + 1}
-                          className="cursor-pointer"
-                        >
-                          {i + 1}
-                        </PaginationLink>
-                      </PaginationItem>
-                    ))}
+                    {visiblePages.flatMap((page, index) => {
+                      const items = [];
+
+                      if (index > 0 && visiblePages[index] - visiblePages[index - 1] > 1) {
+                        items.push(
+                          <PaginationItem key={`ellipsis-${visiblePages[index - 1]}-${page}`}>
+                            <PaginationEllipsis />
+                          </PaginationItem>
+                        );
+                      }
+
+                      items.push(
+                        <PaginationItem key={page}>
+                          <PaginationLink
+                            onClick={() => setCurrentPage(page)}
+                            isActive={currentPage === page}
+                            className="cursor-pointer"
+                          >
+                            {page}
+                          </PaginationLink>
+                        </PaginationItem>
+                      );
+
+                      return items;
+                    })}
                     <PaginationItem>
                       <PaginationNext
                         onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
@@ -602,11 +681,11 @@ export default function AprobacionesPage() {
             <DialogTitle className="text-foreground">Detalle del Informe</DialogTitle>
           </DialogHeader>
           {selectedReport && (() => {
-            const tech = users.find((u) => u.id === selectedReport.tecnicoId);
-            const leader = users.find((u) => u.id === selectedReport.liderGrupoId);
-            const group = groups.find((g) => g.id === selectedReport.grupoId);
+            const tech = usersById.get(selectedReport.tecnicoId);
+            const leader = usersById.get(selectedReport.liderGrupoId);
+            const group = groupsById.get(selectedReport.grupoId);
             const client = selectedReport.clienteId
-              ? clients.find((c) => c.id === selectedReport.clienteId)
+              ? clientsById.get(selectedReport.clienteId)
               : null;
             const tipo = getTipoConfig(String(selectedReport.tipo));
             const estado = estadoAprobacionConfig[selectedReport.estadoAprobacionLider];
@@ -661,6 +740,15 @@ export default function AprobacionesPage() {
                     {selectedReport.descripcion}
                   </p>
                 </div>
+
+                {selectedReport.especificacion && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">Especificación</p>
+                    <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50">
+                      {selectedReport.especificacion}
+                    </p>
+                  </div>
+                )}
 
                 {selectedReport.observaciones && (
                   <div className="space-y-2">
@@ -784,7 +872,7 @@ export default function AprobacionesPage() {
                         </Badge>
                         {selectedReport.fotoHerramienta && (
                           <span className="text-xs text-muted-foreground flex items-center gap-1">
-                            <Image className="h-3 w-3" /> Foto herramienta adjunta
+                            <ImageIcon className="h-3 w-3" /> Foto herramienta adjunta
                           </span>
                         )}
                       </div>

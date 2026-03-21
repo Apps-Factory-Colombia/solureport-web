@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { StatsCard } from "@/components/dashboard/stats-cards";
@@ -29,28 +29,40 @@ export default function DashboardPage() {
   const pullDistance = useRef(0);
   const isPulling = useRef(false);
 
-  const loadDashboardData = () => {
-    setLoading(true);
-    Promise.all([getMantenimientos(), getClientes(), getUsuarios(), getReportesActividad()])
-      .then(([m, c, u, r]) => {
-        setMaintenances(m);
-        setClients(c);
-        setUsers(u);
-        setReports(r);
-      })
-      .catch((err) => console.error("Error cargando dashboard:", err))
-      .finally(() => setLoading(false));
-  };
+  const loadCoreDashboardData = useCallback(async (showLoader = true) => {
+    if (showLoader) setLoading(true);
+    try {
+      const [m, c, u] = await Promise.all([getMantenimientos(), getClientes(), getUsuarios()]);
+      setMaintenances(m);
+      setClients(c);
+      setUsers(u);
+    } catch (err) {
+      console.error("Error cargando dashboard:", err);
+    } finally {
+      if (showLoader) setLoading(false);
+    }
+  }, []);
+
+  const loadDashboardReports = useCallback(async () => {
+    try {
+      const r = await getReportesActividad();
+      setReports(r);
+    } catch (err) {
+      console.error("Error cargando reportes del dashboard:", err);
+    }
+  }, []);
 
   useEffect(() => {
-    loadDashboardData();
+    loadCoreDashboardData();
+    loadDashboardReports();
 
     const interval = setInterval(() => {
-      loadDashboardData();
+      loadCoreDashboardData(false);
+      loadDashboardReports();
     }, 30000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [loadCoreDashboardData, loadDashboardReports]);
 
   useEffect(() => {
     const resetPullState = () => {

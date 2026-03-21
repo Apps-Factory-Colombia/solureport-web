@@ -1,5 +1,9 @@
 import { supabase } from "../client";
 import { WorkGroup } from "@/lib/types";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+
+const GRUPOS_CACHE_KEY = "grupos:list";
+const GRUPOS_CACHE_TTL = 60_000;
 
 function mapRow(row: any, miembros: string[]): WorkGroup {
   return {
@@ -13,22 +17,33 @@ function mapRow(row: any, miembros: string[]): WorkGroup {
 }
 
 export async function getGrupos(): Promise<WorkGroup[]> {
-  const { data, error } = await supabase
-    .from("grupos_trabajo")
-    .select("*")
-    .order("fecha_creacion", { ascending: false });
-  if (error) throw error;
+  return getCachedValue(GRUPOS_CACHE_KEY, GRUPOS_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("grupos_trabajo")
+      .select("*")
+      .order("fecha_creacion", { ascending: false });
+    if (error) throw error;
 
-  const groups: WorkGroup[] = [];
-  for (const row of data || []) {
-    const { data: members } = await supabase
-      .from("grupo_miembros")
-      .select("usuario_id")
-      .eq("grupo_id", row.id);
-    const miembros = (members || []).map((m: any) => m.usuario_id);
-    groups.push(mapRow(row, miembros));
-  }
-  return groups;
+    const groupIds = (data || []).map((row: any) => row.id).filter(Boolean);
+    const { data: members, error: membersError } = groupIds.length > 0
+      ? await supabase
+        .from("grupo_miembros")
+        .select("grupo_id, usuario_id")
+        .in("grupo_id", groupIds)
+      : { data: [], error: null };
+    if (membersError) throw membersError;
+
+    const miembrosByGrupo = new Map<string, string[]>();
+    for (const member of members || []) {
+      const groupId = member.grupo_id;
+      if (!groupId) continue;
+      const current = miembrosByGrupo.get(groupId) || [];
+      current.push(member.usuario_id);
+      miembrosByGrupo.set(groupId, current);
+    }
+
+    return (data || []).map((row: any) => mapRow(row, miembrosByGrupo.get(row.id) || []));
+  });
 }
 
 export async function getGrupoById(id: string): Promise<WorkGroup | null> {
@@ -72,6 +87,7 @@ export async function createGrupo(group: Partial<WorkGroup>): Promise<WorkGroup>
     if (usersError) throw usersError;
   }
 
+  invalidateCachedValue(GRUPOS_CACHE_KEY);
   return mapRow(data, miembros);
 }
 
@@ -127,6 +143,7 @@ export async function updateGrupo(id: string, group: Partial<WorkGroup>): Promis
     .select("usuario_id")
     .eq("grupo_id", id);
   const miembros = (members || []).map((m: any) => m.usuario_id);
+  invalidateCachedValue(GRUPOS_CACHE_KEY);
   return mapRow(data, miembros);
 }
 
@@ -155,4 +172,5 @@ export async function deleteGrupo(id: string): Promise<void> {
 
   const { error } = await supabase.from("grupos_trabajo").delete().eq("id", id);
   if (error) throw error;
+  invalidateCachedValue(GRUPOS_CACHE_KEY);
 }

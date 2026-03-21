@@ -232,6 +232,7 @@ export interface ActivityReport {
   fecha: string;
   clienteId?: string;
   descripcion: string;
+  especificacion?: string;
   observaciones?: string;
   fotosAntes?: string[];
   fotosDespues?: string[];
@@ -273,4 +274,5 @@ export interface LeaderAccumulation {
   totalAcumulado: number;
   porcentajeExtraLiderAplicado: number;
   extraLiderActivo: boolean;
+  tecnicosExcluidosExtraIds?: string[];
 }

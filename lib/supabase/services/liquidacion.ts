@@ -1,5 +1,11 @@
 import { supabase } from "../client";
 import { LiquidationEntry, LiquidationParticipant, LiquidationPeriod } from "@/lib/types";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+
+const PERIODOS_CACHE_KEY = "liquidacion:periodos";
+const PERIODOS_CACHE_TTL = 30_000;
+const LIQUIDATION_ENTRIES_CACHE_KEY = "liquidacion:entries";
+const LIQUIDATION_ENTRIES_CACHE_TTL = 30_000;
 
 function mapPeriod(row: any): LiquidationPeriod {
   return {
@@ -12,12 +18,14 @@ function mapPeriod(row: any): LiquidationPeriod {
 }
 
 export async function getPeriodos(): Promise<LiquidationPeriod[]> {
-  const { data, error } = await supabase
-    .from("periodos_liquidacion")
-    .select("*")
-    .order("fecha_inicio", { ascending: false });
-  if (error) throw error;
-  return (data || []).map(mapPeriod);
+  return getCachedValue(PERIODOS_CACHE_KEY, PERIODOS_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("periodos_liquidacion")
+      .select("*")
+      .order("fecha_inicio", { ascending: false });
+    if (error) throw error;
+    return (data || []).map(mapPeriod);
+  });
 }
 
 export async function createPeriodo(p: Partial<LiquidationPeriod>): Promise<LiquidationPeriod> {
@@ -31,6 +39,7 @@ export async function createPeriodo(p: Partial<LiquidationPeriod>): Promise<Liqu
     .select()
     .single();
   if (error) throw error;
+  invalidateCachedValue(PERIODOS_CACHE_KEY);
   return mapPeriod(data);
 }
 
@@ -47,6 +56,7 @@ export async function updatePeriodo(id: string, p: Partial<LiquidationPeriod>): 
     .select()
     .single();
   if (error) throw error;
+  invalidateCachedValue(PERIODOS_CACHE_KEY);
   return mapPeriod(data);
 }
 
@@ -58,6 +68,7 @@ export async function closePeriodo(id: string): Promise<LiquidationPeriod> {
     .select()
     .single();
   if (error) throw error;
+  invalidateCachedValue(PERIODOS_CACHE_KEY);
   return mapPeriod(data);
 }
 
@@ -67,6 +78,7 @@ export async function deletePeriodo(id: string): Promise<void> {
     .delete()
     .eq("id", id);
   if (error) throw error;
+  invalidateCachedValue(PERIODOS_CACHE_KEY);
 }
 
 function mapEntry(row: any, participantes: LiquidationParticipant[]): LiquidationEntry {
@@ -82,26 +94,37 @@ function mapEntry(row: any, participantes: LiquidationParticipant[]): Liquidatio
 }
 
 export async function getLiquidationEntries(): Promise<LiquidationEntry[]> {
-  const { data, error } = await supabase
-    .from("registros_actividades")
-    .select("*")
-    .order("fecha", { ascending: false });
-  if (error) throw error;
-
-  const entries: LiquidationEntry[] = [];
-  for (const row of data || []) {
-    const { data: parts } = await supabase
-      .from("actividad_participantes")
+  return getCachedValue(LIQUIDATION_ENTRIES_CACHE_KEY, LIQUIDATION_ENTRIES_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("registros_actividades")
       .select("*")
-      .eq("registro_actividad_id", row.id);
-    const participantes: LiquidationParticipant[] = (parts || []).map((p: any) => ({
-      tecnicoId: p.tecnico_id,
-      porcentaje: parseFloat(p.porcentaje) || 0,
-      valorCalculado: parseFloat(p.valor_calculado) || 0,
-    }));
-    entries.push(mapEntry(row, participantes));
-  }
-  return entries;
+      .order("fecha", { ascending: false });
+    if (error) throw error;
+
+    const registroIds = (data || []).map((row: any) => row.id).filter(Boolean);
+    const { data: parts, error: partsError } = registroIds.length > 0
+      ? await supabase
+        .from("actividad_participantes")
+        .select("registro_actividad_id, tecnico_id, porcentaje, valor_calculado")
+        .in("registro_actividad_id", registroIds)
+      : { data: [], error: null };
+    if (partsError) throw partsError;
+
+    const participantesByRegistro = new Map<string, LiquidationParticipant[]>();
+    for (const part of parts || []) {
+      const registroId = part.registro_actividad_id;
+      if (!registroId) continue;
+      const current = participantesByRegistro.get(registroId) || [];
+      current.push({
+        tecnicoId: part.tecnico_id,
+        porcentaje: parseFloat(part.porcentaje) || 0,
+        valorCalculado: parseFloat(part.valor_calculado) || 0,
+      });
+      participantesByRegistro.set(registroId, current);
+    }
+
+    return (data || []).map((row: any) => mapEntry(row, participantesByRegistro.get(row.id) || []));
+  });
 }
 
 export async function createLiquidationEntry(entry: Partial<LiquidationEntry> & { periodoId: string }): Promise<LiquidationEntry> {
@@ -143,5 +166,6 @@ export async function createLiquidationEntry(entry: Partial<LiquidationEntry> & 
     }
   }
 
+  invalidateCachedValue(LIQUIDATION_ENTRIES_CACHE_KEY);
   return mapEntry(data, participantes);
 }

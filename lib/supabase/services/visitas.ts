@@ -1,5 +1,9 @@
 import { supabase } from "../client";
 import { TechnicalVisit } from "@/lib/types";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+
+const VISITAS_CACHE_KEY = "visitas:list";
+const VISITAS_CACHE_TTL = 30_000;
 
 function mapRow(row: any, fotosAntes: string[] = [], fotosDespues: string[] = []): TechnicalVisit {
   return {
@@ -26,26 +30,38 @@ function mapRow(row: any, fotosAntes: string[] = [], fotosDespues: string[] = []
 }
 
 export async function getVisitasTecnicas(): Promise<TechnicalVisit[]> {
-  const { data, error } = await supabase
-    .from("visitas_tecnicas")
-    .select("*")
-    .order("fecha_inicio", { ascending: false });
-  if (error) throw error;
-
-  const visits: TechnicalVisit[] = [];
-  for (const row of data || []) {
-    const { data: fotos } = await supabase
-      .from("visita_tecnica_fotos")
+  return getCachedValue(VISITAS_CACHE_KEY, VISITAS_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("visitas_tecnicas")
       .select("*")
-      .eq("visita_tecnica_id", row.id)
-      .order("orden");
+      .order("fecha_inicio", { ascending: false });
+    if (error) throw error;
 
-    const fotosAntes = (fotos || []).filter((f: any) => f.tipo === "antes").map((f: any) => f.url);
-    const fotosDespues = (fotos || []).filter((f: any) => f.tipo === "despues").map((f: any) => f.url);
-    visits.push(mapRow(row, fotosAntes, fotosDespues));
-  }
+    const visitIds = (data || []).map((row: any) => row.id).filter(Boolean);
+    const { data: fotos, error: fotosError } = visitIds.length > 0
+      ? await supabase
+        .from("visita_tecnica_fotos")
+        .select("visita_tecnica_id, tipo, url, orden")
+        .in("visita_tecnica_id", visitIds)
+        .order("orden")
+      : { data: [], error: null };
+    if (fotosError) throw fotosError;
 
-  return visits;
+    const fotosByVisita = new Map<string, { antes: string[]; despues: string[] }>();
+    for (const foto of fotos || []) {
+      const visitaId = foto.visita_tecnica_id;
+      if (!visitaId) continue;
+      const current = fotosByVisita.get(visitaId) || { antes: [], despues: [] };
+      if (foto.tipo === "antes") current.antes.push(foto.url);
+      if (foto.tipo === "despues") current.despues.push(foto.url);
+      fotosByVisita.set(visitaId, current);
+    }
+
+    return (data || []).map((row: any) => {
+      const fotosVisita = fotosByVisita.get(row.id);
+      return mapRow(row, fotosVisita?.antes || [], fotosVisita?.despues || []);
+    });
+  });
 }
 
 export async function createVisitaTecnica(v: Partial<TechnicalVisit> & { liderId?: string; tipoVisita?: string; grupoId?: string; periodoId?: string; costoActividad?: number }): Promise<TechnicalVisit> {
@@ -119,6 +135,8 @@ export async function createVisitaTecnica(v: Partial<TechnicalVisit> & { liderId
     });
   }
 
+  invalidateCachedValue(VISITAS_CACHE_KEY);
+  invalidateCachedValue("reportes-actividad:list");
   return mapRow(data);
 }
 
@@ -136,17 +154,19 @@ export async function updateVisitaTecnica(id: string, v: Partial<TechnicalVisit>
     .single();
   if (error) throw error;
 
-  if (v.valorCobradoCliente !== undefined) {
+  if (v.descripcion !== undefined) {
     const fecha = data.fecha_inicio?.split("T")[0];
 
     await supabase
       .from("reportes_actividad")
-      .update({ costo_actividad: v.valorCobradoCliente })
+      .update({ descripcion: v.descripcion })
       .eq("tipo", "visita_tecnica")
       .eq("tecnico_id", data.tecnico_id)
       .eq("fecha", fecha);
   }
 
+  invalidateCachedValue(VISITAS_CACHE_KEY);
+  invalidateCachedValue("reportes-actividad:list");
   return mapRow(data);
 }
 
@@ -180,4 +200,7 @@ export async function deleteVisitaTecnica(id: string): Promise<void> {
       .eq("tecnico_id", visitaData.tecnico_id)
       .eq("fecha", fecha);
   }
+
+  invalidateCachedValue(VISITAS_CACHE_KEY);
+  invalidateCachedValue("reportes-actividad:list");
 }

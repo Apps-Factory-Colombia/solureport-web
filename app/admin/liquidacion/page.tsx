@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -33,7 +34,6 @@ import {
 import {
   DollarSign,
   Download,
-  Mail,
   Lock,
   Users,
   FileText,
@@ -46,14 +46,18 @@ import {
   CheckCircle2,
   Trash2,
   Loader2,
+  Search,
+  Eye,
+  ChevronDown,
+  Percent,
 } from "lucide-react";
-import { LiquidationPeriod, LiquidationEntry, Activity, User, WorkGroup, LeaderAccumulation, ActivityReport } from "@/lib/types";
-import { getPeriodos, getLiquidationEntries, closePeriodo } from "@/lib/supabase/services/liquidacion";
-import { getActividades } from "@/lib/supabase/services/actividades";
+import { LiquidationPeriod, User, WorkGroup, LeaderAccumulation, ActivityReport, ArrivalRecord } from "@/lib/types";
+import { getPeriodos, closePeriodo } from "@/lib/supabase/services/liquidacion";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getGrupos } from "@/lib/supabase/services/grupos";
 import { deleteReporteActividadAdmin, getAcumulacionesLider, getReportesActividad } from "@/lib/supabase/services/reportes-actividad";
+import { getLlegadas } from "@/lib/supabase/services/llegadas";
 import { cn } from "@/lib/utils";
 import { generateTablePDF, generateComprobantePDF } from "@/lib/utils/pdf-generator";
 import {
@@ -64,6 +68,7 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from "@/components/ui/pagination";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 
 import { CompanySettings } from "@/lib/types";
 
@@ -77,14 +82,70 @@ function formatCurrency(value: number) {
   }).format(value);
 }
 
+function normalizeSearchValue(value?: string | null) {
+  return (value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function getTipoLabel(tipo: ActivityReport["tipo"]) {
+  if (tipo === "mantenimiento_preventivo") return "Mant. Preventivo";
+  if (tipo === "visita_tecnica") return "Visita Técnica";
+  if (tipo === "recorrido") return "Recorrido";
+  if (tipo === "actividad_grupal") return "Actividad Grupal";
+  return tipo;
+}
+
+function getEstadoLabel(estado: ActivityReport["estadoAprobacionLider"]) {
+  if (estado === "aprobado") return "Aprobado";
+  if (estado === "rechazado") return "Rechazado";
+  return "Pendiente";
+}
+
+type TechLiquidationSummary = {
+  nombre: string;
+  actividades: number;
+  totalBruto: number;
+  totalNoRecorridos: number;
+  totalRecorridos: number;
+  descuentoPorcentaje: number;
+  descuentoValor: number;
+  total: number;
+};
+
+type GroupLiquidationSummary = {
+  nombre: string;
+  actividades: number;
+  totalBruto: number;
+  totalNoRecorridos: number;
+  totalRecorridos: number;
+  descuentoValor: number;
+  total: number;
+};
+
+function clampPercentage(value: number) {
+  return Math.max(0, Math.min(100, value));
+}
+
+function calculateDiscountValue(base: number, percentage: number) {
+  if (base <= 0 || percentage <= 0) return 0;
+  return Math.round(base * percentage / 100);
+}
+
+function buildStableOrderKey(periodId: string, entityId: string) {
+  return `${periodId}:${entityId}`;
+}
+
 export default function LiquidacionPage() {
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
-  const [entries, setEntries] = useState<LiquidationEntry[]>([]);
-  const [activities, setActivities] = useState<Activity[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [leaderAccumulations, setLeaderAccumulations] = useState<LeaderAccumulation[]>([]);
   const [actReports, setActReports] = useState<ActivityReport[]>([]);
+  const [arrivalRecords, setArrivalRecords] = useState<ArrivalRecord[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
@@ -92,16 +153,39 @@ export default function LiquidacionPage() {
   const [comprobanteOpen, setComprobanteOpen] = useState(false);
   const [selectedTechId, setSelectedTechId] = useState<string | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string>("todos");
+  const [technicianSearch, setTechnicianSearch] = useState("");
+  const [technicianTabSearch, setTechnicianTabSearch] = useState("");
+  const [technicianTabGroupId, setTechnicianTabGroupId] = useState<string>("todos");
+  const [groupTabSearch, setGroupTabSearch] = useState("");
+  const [comprobanteSearch, setComprobanteSearch] = useState("");
+  const [comprobanteGroupId, setComprobanteGroupId] = useState<string>("todos");
   const [reportToDelete, setReportToDelete] = useState<ActivityReport | null>(null);
+  const [selectedReport, setSelectedReport] = useState<ActivityReport | null>(null);
+  const [reportDetailOpen, setReportDetailOpen] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
+  const [openTechCards, setOpenTechCards] = useState<Record<string, boolean>>({});
+  const [openGroupCards, setOpenGroupCards] = useState<Record<string, boolean>>({});
+  const scrollRestorePositionRef = useRef<number | null>(null);
+  const reportOrderRef = useRef(new Map<string, number>());
+  const techOrderRef = useRef(new Map<string, number>());
+  const groupOrderRef = useRef(new Map<string, number>());
+  const nextReportOrderRef = useRef(0);
+  const nextTechOrderRef = useRef(0);
+  const nextGroupOrderRef = useRef(0);
 
   // Paginación para tabla detallada
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
+  const rememberScrollPosition = () => {
+    if (typeof window === "undefined") return;
+    scrollRestorePositionRef.current = window.scrollY;
+  };
+
   const handleClosePeriod = async () => {
     if (!selectedPeriod) return;
+    rememberScrollPosition();
     setClosing(true);
     try {
       await closePeriodo(selectedPeriod.id);
@@ -156,20 +240,36 @@ export default function LiquidacionPage() {
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      getPeriodos(), getLiquidationEntries(), getActividades(),
-      getUsuarios(), getGrupos(), getAcumulacionesLider(), getReportesActividad(), getConfiguracion(),
-    ]).then(([p, e, a, u, g, la, ar, s]) => {
-      setPeriods(p); setEntries(e); setActivities(a);
-      setUsers(u); setGroups(g); setLeaderAccumulations(la); setActReports(ar); setCompanySettings(s);
+      getPeriodos(), getUsuarios(), getGrupos(), getAcumulacionesLider(), getReportesActividad(), getConfiguracion(), getLlegadas(),
+    ]).then(([p, u, g, la, ar, s, l]) => {
+      setPeriods(p);
+      setUsers(u);
+      setGroups(g);
+      setLeaderAccumulations(la);
+      setActReports(ar);
+      setArrivalRecords(l);
+      setCompanySettings(s);
       if (p.length > 0) setSelectedPeriodId(p[0].id);
     }).catch((err) => console.error("Error cargando liquidación:", err))
       .finally(() => setLoading(false));
   }, []);
 
+  useEffect(() => {
+    if (scrollRestorePositionRef.current === null || typeof window === "undefined") return;
+
+    const targetPosition = scrollRestorePositionRef.current;
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: targetPosition, behavior: "auto" });
+      scrollRestorePositionRef.current = null;
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [periods, actReports, arrivalRecords]);
+
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [selectedPeriodId, selectedGroupId]);
+  }, [selectedPeriodId, selectedGroupId, technicianSearch]);
 
   if (loading) {
     return (
@@ -186,53 +286,224 @@ export default function LiquidacionPage() {
   }
 
   const selectedPeriod = periods.find((p) => p.id === selectedPeriodId);
-  const periodEntries = entries.filter(
-    (e) => e.periodoId === selectedPeriodId
-  );
+
+  const isDateWithinSelectedPeriod = (fecha: string) => {
+    if (!selectedPeriod) return false;
+    return fecha >= selectedPeriod.fechaInicio && fecha <= selectedPeriod.fechaFin;
+  };
 
   // Reportes de actividad del período (fuente principal de datos)
   const periodReports = actReports.filter(
     (r) => r.periodoId === selectedPeriodId
   );
 
+  const discountRecordsByUser = arrivalRecords.reduce<Map<string, number>>((acc, record) => {
+    if (!record.descuentoAplicado || !record.porcentajeDescuento || !isDateWithinSelectedPeriod(record.fecha)) {
+      return acc;
+    }
+
+    const current = acc.get(record.usuarioId) || 0;
+    acc.set(record.usuarioId, clampPercentage(current + record.porcentajeDescuento));
+    return acc;
+  }, new Map());
+
+  const buildTechSummary = (reports: ActivityReport[]) => {
+    const summary = new Map<string, TechLiquidationSummary>();
+
+    reports.forEach((report) => {
+      const tech = users.find((u) => u.id === report.tecnicoId);
+      if (!tech) return;
+
+      const existing = summary.get(report.tecnicoId) || {
+        nombre: `${tech.nombre} ${tech.apellido}`,
+        actividades: 0,
+        totalBruto: 0,
+        totalNoRecorridos: 0,
+        totalRecorridos: 0,
+        descuentoPorcentaje: 0,
+        descuentoValor: 0,
+        total: 0,
+      };
+
+      existing.actividades += 1;
+      existing.totalBruto += report.costoActividad;
+      if (report.tipo === "recorrido") {
+        existing.totalRecorridos += report.costoActividad;
+      } else {
+        existing.totalNoRecorridos += report.costoActividad;
+      }
+
+      summary.set(report.tecnicoId, existing);
+    });
+
+    summary.forEach((item, techId) => {
+      item.descuentoPorcentaje = discountRecordsByUser.get(techId) || 0;
+      item.descuentoValor = calculateDiscountValue(item.totalNoRecorridos, item.descuentoPorcentaje);
+      item.total = item.totalBruto - item.descuentoValor;
+    });
+
+    return summary;
+  };
+
+  const buildGroupSummary = (reports: ActivityReport[]) => {
+    const summary = new Map<string, GroupLiquidationSummary>();
+    const nonRecSubtotalByGroupAndUser = new Map<string, number>();
+
+    reports.forEach((report) => {
+      const group = groups.find((g) => g.id === report.grupoId);
+      if (!group) return;
+
+      const existing = summary.get(report.grupoId) || {
+        nombre: group.nombre,
+        actividades: 0,
+        totalBruto: 0,
+        totalNoRecorridos: 0,
+        totalRecorridos: 0,
+        descuentoValor: 0,
+        total: 0,
+      };
+
+      existing.actividades += 1;
+      existing.totalBruto += report.costoActividad;
+      if (report.tipo === "recorrido") {
+        existing.totalRecorridos += report.costoActividad;
+      } else {
+        existing.totalNoRecorridos += report.costoActividad;
+        const subtotalKey = `${report.grupoId}|${report.tecnicoId}`;
+        nonRecSubtotalByGroupAndUser.set(subtotalKey, (nonRecSubtotalByGroupAndUser.get(subtotalKey) || 0) + report.costoActividad);
+      }
+
+      summary.set(report.grupoId, existing);
+    });
+
+    nonRecSubtotalByGroupAndUser.forEach((base, key) => {
+      const [groupId, techId] = key.split("|");
+      const groupItem = summary.get(groupId);
+      if (!groupItem) return;
+      groupItem.descuentoValor += calculateDiscountValue(base, discountRecordsByUser.get(techId) || 0);
+    });
+
+    summary.forEach((item) => {
+      item.total = item.totalBruto - item.descuentoValor;
+    });
+
+    return summary;
+  };
+
   // Resumen por técnico basado en reportes_actividad
-  const techSummary = new Map<string, { nombre: string; actividades: number; total: number }>();
-  periodReports.forEach((r) => {
-    const tech = users.find((u) => u.id === r.tecnicoId);
-    if (!tech) return;
-    const existing = techSummary.get(r.tecnicoId) || {
-      nombre: `${tech.nombre} ${tech.apellido}`,
-      actividades: 0,
-      total: 0,
-    };
-    existing.actividades += 1;
-    existing.total += r.costoActividad;
-    techSummary.set(r.tecnicoId, existing);
-  });
+  const techSummary = buildTechSummary(periodReports);
 
   // Resumen por grupo basado en reportes_actividad
-  const groupSummary = new Map<string, { nombre: string; actividades: number; total: number }>();
-  periodReports.forEach((r) => {
-    const group = groups.find((g) => g.id === r.grupoId);
-    if (!group) return;
-    const existing = groupSummary.get(r.grupoId) || {
-      nombre: group.nombre,
-      actividades: 0,
-      total: 0,
-    };
-    existing.actividades += 1;
-    existing.total += r.costoActividad;
-    groupSummary.set(r.grupoId, existing);
-  });
+  const groupSummary = buildGroupSummary(periodReports);
 
   const totalPeriod = Array.from(techSummary.values()).reduce(
     (sum, t) => sum + t.total,
     0
   );
+  const totalPenaltyPeriod = Array.from(techSummary.values()).reduce((sum, t) => sum + t.descuentoValor, 0);
 
-  const filteredPeriodReports = periodReports.filter(
-    (r) => selectedGroupId === "todos" || r.grupoId === selectedGroupId
-  );
+  const usersById = new Map(users.map((user) => [user.id, user]));
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+
+  const applyStableReportOrder = (reports: ActivityReport[]) => {
+    reports.forEach((report) => {
+      const key = buildStableOrderKey(selectedPeriodId, report.id);
+      if (!reportOrderRef.current.has(key)) {
+        reportOrderRef.current.set(key, nextReportOrderRef.current++);
+      }
+    });
+
+    return [...reports].sort((a, b) => {
+      const aKey = buildStableOrderKey(selectedPeriodId, a.id);
+      const bKey = buildStableOrderKey(selectedPeriodId, b.id);
+      return (reportOrderRef.current.get(aKey) ?? 0) - (reportOrderRef.current.get(bKey) ?? 0);
+    });
+  };
+
+  const applyStableTechOrder = (entries: Array<[string, TechLiquidationSummary]>) => {
+    entries.forEach(([techId]) => {
+      const key = buildStableOrderKey(selectedPeriodId, techId);
+      if (!techOrderRef.current.has(key)) {
+        techOrderRef.current.set(key, nextTechOrderRef.current++);
+      }
+    });
+
+    return [...entries].sort((a, b) => {
+      const aKey = buildStableOrderKey(selectedPeriodId, a[0]);
+      const bKey = buildStableOrderKey(selectedPeriodId, b[0]);
+      return (techOrderRef.current.get(aKey) ?? 0) - (techOrderRef.current.get(bKey) ?? 0);
+    });
+  };
+
+  const applyStableGroupOrder = (entries: Array<[string, GroupLiquidationSummary]>) => {
+    entries.forEach(([groupId]) => {
+      const key = buildStableOrderKey(selectedPeriodId, groupId);
+      if (!groupOrderRef.current.has(key)) {
+        groupOrderRef.current.set(key, nextGroupOrderRef.current++);
+      }
+    });
+
+    return [...entries].sort((a, b) => {
+      const aKey = buildStableOrderKey(selectedPeriodId, a[0]);
+      const bKey = buildStableOrderKey(selectedPeriodId, b[0]);
+      return (groupOrderRef.current.get(aKey) ?? 0) - (groupOrderRef.current.get(bKey) ?? 0);
+    });
+  };
+
+  const techEntries = applyStableTechOrder(Array.from(techSummary.entries()));
+  const groupEntries = applyStableGroupOrder(Array.from(groupSummary.entries()));
+  const normalizedTechnicianTabSearch = normalizeSearchValue(technicianTabSearch);
+  const normalizedGroupTabSearch = normalizeSearchValue(groupTabSearch);
+  const normalizedComprobanteSearch = normalizeSearchValue(comprobanteSearch);
+
+  const filteredPeriodReports = applyStableReportOrder(periodReports.filter((r) => {
+    const tech = users.find((u) => u.id === r.tecnicoId);
+    const techFullName = tech ? `${tech.nombre} ${tech.apellido}`.toLowerCase() : "";
+    const matchGroup = selectedGroupId === "todos" || r.grupoId === selectedGroupId;
+    const matchTechnician =
+      !technicianSearch ||
+      techFullName.includes(technicianSearch.toLowerCase()) ||
+      tech?.nombre.toLowerCase().includes(technicianSearch.toLowerCase()) ||
+      tech?.apellido.toLowerCase().includes(technicianSearch.toLowerCase());
+
+    return matchGroup && matchTechnician;
+  }));
+
+  const filteredTechTabReports = periodReports.filter((report) => {
+    const tech = usersById.get(report.tecnicoId);
+    const techFullName = normalizeSearchValue(tech ? `${tech.nombre} ${tech.apellido}` : "");
+    const matchTechnician = !normalizedTechnicianTabSearch || techFullName.includes(normalizedTechnicianTabSearch);
+    const matchGroup = technicianTabGroupId === "todos" || report.grupoId === technicianTabGroupId;
+    return matchTechnician && matchGroup;
+  });
+
+  const filteredTechSummary = buildTechSummary(filteredTechTabReports);
+
+  const filteredTechEntries = applyStableTechOrder(Array.from(filteredTechSummary.entries()));
+
+  const filteredGroupReports = periodReports.filter((report) => {
+    const group = groupsById.get(report.grupoId);
+    const leader = group?.liderId ? usersById.get(group.liderId) : null;
+    const groupName = normalizeSearchValue(group?.nombre);
+    const leaderName = normalizeSearchValue(leader ? `${leader.nombre} ${leader.apellido}` : "");
+    return !normalizedGroupTabSearch || groupName.includes(normalizedGroupTabSearch) || leaderName.includes(normalizedGroupTabSearch);
+  });
+
+  const filteredGroupSummary = buildGroupSummary(filteredGroupReports);
+
+  const filteredGroupEntries = applyStableGroupOrder(Array.from(filteredGroupSummary.entries()));
+
+  const filteredComprobanteReports = periodReports.filter((report) => {
+    const tech = usersById.get(report.tecnicoId);
+    const techFullName = normalizeSearchValue(tech ? `${tech.nombre} ${tech.apellido}` : "");
+    const matchTechnician = !normalizedComprobanteSearch || techFullName.includes(normalizedComprobanteSearch);
+    const matchGroup = comprobanteGroupId === "todos" || report.grupoId === comprobanteGroupId;
+    return matchTechnician && matchGroup;
+  });
+
+  const filteredComprobanteSummary = buildTechSummary(filteredComprobanteReports);
+
+  const filteredComprobanteEntries = applyStableTechOrder(Array.from(filteredComprobanteSummary.entries()));
 
   // Paginación de resultados filtrados
   const totalPages = Math.ceil(filteredPeriodReports.length / itemsPerPage);
@@ -240,8 +511,28 @@ export default function LiquidacionPage() {
   const endIndex = startIndex + itemsPerPage;
   const currentReports = filteredPeriodReports.slice(startIndex, endIndex);
 
+  const openReportDetail = (report: ActivityReport) => {
+    setSelectedReport(report);
+    setReportDetailOpen(true);
+  };
+
+  const toggleTechCard = (techId: string) => {
+    setOpenTechCards((prev) => ({
+      ...prev,
+      [techId]: !prev[techId],
+    }));
+  };
+
+  const toggleGroupCard = (groupId: string) => {
+    setOpenGroupCards((prev) => ({
+      ...prev,
+      [groupId]: !prev[groupId],
+    }));
+  };
+
   const handleDeleteActivity = async () => {
     if (!reportToDelete) return;
+    rememberScrollPosition();
     setDeletingReportId(reportToDelete.id);
     try {
       await deleteReporteActividadAdmin(reportToDelete.id);
@@ -378,7 +669,7 @@ export default function LiquidacionPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
               {(() => {
                 const approvedReports = actReports.filter(
                   (r) => r.periodoId === selectedPeriodId && r.estadoAprobacionLider === "aprobado"
@@ -386,8 +677,8 @@ export default function LiquidacionPage() {
                 const pendingReports = actReports.filter(
                   (r) => r.periodoId === selectedPeriodId && r.estadoAprobacionLider === "pendiente"
                 );
-                const totalAprobado = approvedReports.reduce((s, r) => s + r.costoActividad, 0);
-                const totalPendiente = pendingReports.reduce((s, r) => s + r.costoActividad, 0);
+                const totalAprobado = Array.from(buildTechSummary(approvedReports).values()).reduce((s, item) => s + item.total, 0);
+                const totalPendiente = Array.from(buildTechSummary(pendingReports).values()).reduce((s, item) => s + item.total, 0);
                 const recorridos = actReports.filter(
                   (r) => r.periodoId === selectedPeriodId && r.tipo === "recorrido"
                 );
@@ -420,6 +711,14 @@ export default function LiquidacionPage() {
                       <p className="text-xs text-muted-foreground mt-1">
                         Recorridos: {formatCurrency(totalRecorridos)} ({recorridos.length})
                       </p>
+                    </div>
+                    <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Percent className="h-4 w-4 text-red-400" />
+                        <p className="text-xs font-medium text-red-400 uppercase tracking-wide">Descuento por Tardanza</p>
+                      </div>
+                      <p className="text-2xl font-bold text-red-400">-{formatCurrency(totalPenaltyPeriod)}</p>
+                      <p className="text-xs text-muted-foreground mt-1">Aplicado sobre actividades no recorrido del período</p>
                     </div>
                   </>
                 );
@@ -462,21 +761,32 @@ export default function LiquidacionPage() {
               <CardContent className="p-0">
                 <div className="px-4 py-3 border-b border-border/50 flex items-center justify-between gap-3 flex-wrap">
                   <p className="text-xs text-muted-foreground">
-                    Filtra por grupo y elimina actividades sin salir de Liquidación.
+                    Filtra por grupo o técnico y elimina actividades sin salir de Liquidación.
                   </p>
-                  <Select value={selectedGroupId} onValueChange={setSelectedGroupId}>
-                    <SelectTrigger className="w-56 bg-secondary/50 border-border/50">
-                      <SelectValue placeholder="Filtrar por grupo" />
-                    </SelectTrigger>
-                    <SelectContent className="bg-card border-border">
-                      <SelectItem value="todos">Todos los grupos</SelectItem>
-                      {groups.map((g) => (
-                        <SelectItem key={g.id} value={g.id}>
-                          {g.nombre}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto sm:justify-end">
+                    <div className="relative w-full sm:w-72">
+                      <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        placeholder="Buscar por técnico..."
+                        value={technicianSearch}
+                        onChange={(e) => setTechnicianSearch(e.target.value)}
+                        className="pl-10 bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                    <Select value={selectedGroupId} onValueChange={setSelectedGroupId}>
+                      <SelectTrigger className="w-full sm:w-56 bg-secondary/50 border-border/50">
+                        <SelectValue placeholder="Filtrar por grupo" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-card border-border">
+                        <SelectItem value="todos">Todos los grupos</SelectItem>
+                        {groups.map((g) => (
+                          <SelectItem key={g.id} value={g.id}>
+                            {g.nombre}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
                 <Table>
                   <TableHeader>
@@ -495,10 +805,7 @@ export default function LiquidacionPage() {
                     {currentReports.map((r) => {
                       const tech = users.find((u) => u.id === r.tecnicoId);
                       const group = groups.find((g) => g.id === r.grupoId);
-                      const tipoLabel = r.tipo === "mantenimiento_preventivo" ? "Mant. Preventivo"
-                        : r.tipo === "visita_tecnica" ? "Visita Técnica"
-                          : r.tipo === "recorrido" ? "Recorrido"
-                            : r.tipo === "actividad_grupal" ? "Act. Grupal" : r.tipo;
+                      const tipoLabel = getTipoLabel(r.tipo);
 
                       return (
                         <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30">
@@ -535,19 +842,29 @@ export default function LiquidacionPage() {
                             {formatCurrency(r.costoActividad)}
                           </TableCell>
                           <TableCell>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-red-400"
-                              disabled={deletingReportId === r.id}
-                              onClick={() => setReportToDelete(r)}
-                            >
-                              {deletingReportId === r.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                              ) : (
-                                <Trash2 className="h-4 w-4" />
-                              )}
-                            </Button>
+                            <div className="flex items-center justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-cyan-neon"
+                                onClick={() => openReportDetail(r)}
+                              >
+                                <Eye className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-red-400"
+                                disabled={deletingReportId === r.id}
+                                onClick={() => setReportToDelete(r)}
+                              >
+                                {deletingReportId === r.id ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Trash2 className="h-4 w-4" />
+                                )}
+                              </Button>
+                            </div>
                           </TableCell>
                         </TableRow>
                       );
@@ -598,72 +915,233 @@ export default function LiquidacionPage() {
           </TabsContent>
 
           <TabsContent value="por_tecnico">
-            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-border/50 hover:bg-transparent">
-                      <TableHead className="text-muted-foreground">Técnico</TableHead>
-                      <TableHead className="text-muted-foreground">Actividades</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Total</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {Array.from(techSummary.entries()).map(([id, data]) => (
-                      <TableRow key={id} className="border-border/50 hover:bg-secondary/30">
-                        <TableCell className="font-medium text-foreground">{data.nombre}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20 text-xs">
-                            {data.actividades}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-right font-semibold text-gold">
-                          {formatCurrency(data.total)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                    <TableRow className="border-border/50 bg-gold/5">
-                      <TableCell className="font-bold text-foreground">Total</TableCell>
-                      <TableCell></TableCell>
-                      <TableCell className="text-right font-bold text-gold text-lg">
-                        {formatCurrency(totalPeriod)}
-                      </TableCell>
-                    </TableRow>
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
+            <div className="space-y-4">
+              <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+                <CardContent className="p-4 flex items-center gap-3 flex-wrap">
+                  <div className="relative w-full md:flex-1 md:min-w-70">
+                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      placeholder="Buscar técnico..."
+                      value={technicianTabSearch}
+                      onChange={(e) => setTechnicianTabSearch(e.target.value)}
+                      className="pl-10 bg-secondary/50 border-border/50"
+                    />
+                  </div>
+                  <Select value={technicianTabGroupId} onValueChange={setTechnicianTabGroupId}>
+                    <SelectTrigger className="w-full md:w-64 bg-secondary/50 border-border/50">
+                      <SelectValue placeholder="Filtrar por grupo" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-card border-border">
+                      <SelectItem value="todos">Todos los grupos</SelectItem>
+                      {groups.map((g) => (
+                        <SelectItem key={g.id} value={g.id}>
+                          {g.nombre}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </CardContent>
+              </Card>
+
+              {filteredTechEntries.map(([techId, data]) => {
+                const tech = usersById.get(techId);
+                const techReports = filteredTechTabReports.filter((report) => report.tecnicoId === techId);
+                const isOpen = openTechCards[techId] ?? false;
+
+                return (
+                  <Card key={techId} className="border-border/50 bg-card/80 backdrop-blur-sm overflow-hidden">
+                    <Collapsible open={isOpen} onOpenChange={() => toggleTechCard(techId)}>
+                      <CardHeader className="py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3">
+                            <CollapsibleTrigger asChild>
+                              <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                                <ChevronDown className={cn("h-4 w-4 transition-transform duration-200", isOpen && "rotate-180")} />
+                                <span className="sr-only">Expandir técnico</span>
+                              </Button>
+                            </CollapsibleTrigger>
+                            <div>
+                              <CardTitle className="text-base text-foreground">{data.nombre}</CardTitle>
+                              <p className="text-xs text-muted-foreground">{tech?.email || "Sin correo"}</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-bold text-gold">{formatCurrency(data.total)}</p>
+                            <p className="text-[10px] text-muted-foreground">{data.actividades} actividades</p>
+                            {data.descuentoValor > 0 && (
+                              <p className="text-[10px] text-red-400">Tardanza: -{formatCurrency(data.descuentoValor)}</p>
+                            )}
+                          </div>
+                        </div>
+                      </CardHeader>
+                      <CollapsibleContent>
+                        <CardContent className="pt-0 border-t border-border/20">
+                          <Table>
+                            <TableHeader>
+                              <TableRow className="border-border/50 hover:bg-transparent">
+                                <TableHead>Tipo</TableHead>
+                                <TableHead>Descripción</TableHead>
+                                <TableHead>Grupo</TableHead>
+                                <TableHead>Fecha</TableHead>
+                                <TableHead>Estado</TableHead>
+                                <TableHead className="text-right">Valor</TableHead>
+                                <TableHead className="w-12"></TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {techReports.map((report) => (
+                                <TableRow key={report.id} className="border-border/50 hover:bg-secondary/30">
+                                  <TableCell className="text-sm text-foreground/80">{getTipoLabel(report.tipo)}</TableCell>
+                                  <TableCell className="text-sm text-foreground/80 max-w-64 truncate">{report.descripcion || "—"}</TableCell>
+                                  <TableCell className="text-sm text-foreground/80">{groupsById.get(report.grupoId)?.nombre || "—"}</TableCell>
+                                  <TableCell className="text-sm text-foreground/80">{report.fecha}</TableCell>
+                                  <TableCell>
+                                    <Badge variant="outline" className={cn(
+                                      "text-xs",
+                                      report.estadoAprobacionLider === "aprobado"
+                                        ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                        : report.estadoAprobacionLider === "rechazado"
+                                          ? "bg-red-500/10 text-red-400 border-red-500/20"
+                                          : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                    )}>
+                                      {getEstadoLabel(report.estadoAprobacionLider)}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell className="text-right font-semibold text-gold">{formatCurrency(report.costoActividad)}</TableCell>
+                                  <TableCell>
+                                    <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-cyan-neon" onClick={() => openReportDetail(report)}>
+                                      <Eye className="h-4 w-4" />
+                                    </Button>
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </CardContent>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </Card>
+                );
+              })}
+              {filteredTechEntries.length === 0 && (
+                <Card className="border-border/50 bg-card/80">
+                  <CardContent className="p-8 text-center text-sm text-muted-foreground">
+                    No hay técnicos que coincidan con el filtro actual.
+                  </CardContent>
+                </Card>
+              )}
+            </div>
           </TabsContent>
 
           <TabsContent value="por_grupo">
-            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-border/50 hover:bg-transparent">
-                      <TableHead className="text-muted-foreground">Grupo</TableHead>
-                      <TableHead className="text-muted-foreground">Actividades</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Total</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {Array.from(groupSummary.entries()).map(([id, data]) => (
-                      <TableRow key={id} className="border-border/50 hover:bg-secondary/30">
-                        <TableCell className="font-medium text-foreground">{data.nombre}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20 text-xs">
-                            {data.actividades}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-right font-semibold text-gold">
-                          {formatCurrency(data.total)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
+            <div className="space-y-4">
+              <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+                <CardContent className="p-4">
+                  <div className="relative w-full md:max-w-md">
+                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      placeholder="Buscar grupo o líder..."
+                      value={groupTabSearch}
+                      onChange={(e) => setGroupTabSearch(e.target.value)}
+                      className="pl-10 bg-secondary/50 border-border/50"
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+
+              {filteredGroupEntries.map(([groupId, data]) => {
+                const group = groupsById.get(groupId);
+                const leader = group ? usersById.get(group.liderId) : null;
+                const groupReports = filteredGroupReports.filter((report) => report.grupoId === groupId);
+                const isOpen = openGroupCards[groupId] ?? false;
+
+                return (
+                  <Card key={groupId} className="border-border/50 bg-card/80 backdrop-blur-sm overflow-hidden">
+                    <Collapsible open={isOpen} onOpenChange={() => toggleGroupCard(groupId)}>
+                      <CardHeader className="py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3">
+                            <CollapsibleTrigger asChild>
+                              <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                                <ChevronDown className={cn("h-4 w-4 transition-transform duration-200", isOpen && "rotate-180")} />
+                                <span className="sr-only">Expandir grupo</span>
+                              </Button>
+                            </CollapsibleTrigger>
+                            <div>
+                              <CardTitle className="text-base text-foreground">{data.nombre}</CardTitle>
+                              <p className="text-xs text-muted-foreground">Líder: {leader ? `${leader.nombre} ${leader.apellido}` : "Sin líder"}</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-bold text-gold">{formatCurrency(data.total)}</p>
+                            <p className="text-[10px] text-muted-foreground">{data.actividades} actividades</p>
+                            {data.descuentoValor > 0 && (
+                              <p className="text-[10px] text-red-400">Tardanza: -{formatCurrency(data.descuentoValor)}</p>
+                            )}
+                          </div>
+                        </div>
+                      </CardHeader>
+                      <CollapsibleContent>
+                        <CardContent className="pt-0 border-t border-border/20">
+                          <Table>
+                            <TableHeader>
+                              <TableRow className="border-border/50 hover:bg-transparent">
+                                <TableHead>Tipo</TableHead>
+                                <TableHead>Descripción</TableHead>
+                                <TableHead>Técnico</TableHead>
+                                <TableHead>Fecha</TableHead>
+                                <TableHead>Estado</TableHead>
+                                <TableHead className="text-right">Valor</TableHead>
+                                <TableHead className="w-12"></TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {groupReports.map((report) => {
+                                const tech = usersById.get(report.tecnicoId);
+
+                                return (
+                                  <TableRow key={report.id} className="border-border/50 hover:bg-secondary/30">
+                                    <TableCell className="text-sm text-foreground/80">{getTipoLabel(report.tipo)}</TableCell>
+                                    <TableCell className="text-sm text-foreground/80 max-w-64 truncate">{report.descripcion || "—"}</TableCell>
+                                    <TableCell className="text-sm text-foreground/80">{tech ? `${tech.nombre} ${tech.apellido}` : "—"}</TableCell>
+                                    <TableCell className="text-sm text-foreground/80">{report.fecha}</TableCell>
+                                    <TableCell>
+                                      <Badge variant="outline" className={cn(
+                                        "text-xs",
+                                        report.estadoAprobacionLider === "aprobado"
+                                          ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                          : report.estadoAprobacionLider === "rechazado"
+                                            ? "bg-red-500/10 text-red-400 border-red-500/20"
+                                            : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                      )}>
+                                        {getEstadoLabel(report.estadoAprobacionLider)}
+                                      </Badge>
+                                    </TableCell>
+                                    <TableCell className="text-right font-semibold text-gold">{formatCurrency(report.costoActividad)}</TableCell>
+                                    <TableCell>
+                                      <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-cyan-neon" onClick={() => openReportDetail(report)}>
+                                        <Eye className="h-4 w-4" />
+                                      </Button>
+                                    </TableCell>
+                                  </TableRow>
+                                );
+                              })}
+                            </TableBody>
+                          </Table>
+                        </CardContent>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </Card>
+                );
+              })}
+              {filteredGroupEntries.length === 0 && (
+                <Card className="border-border/50 bg-card/80">
+                  <CardContent className="p-8 text-center text-sm text-muted-foreground">
+                    No hay grupos que coincidan con el filtro actual.
+                  </CardContent>
+                </Card>
+              )}
+            </div>
           </TabsContent>
 
           <TabsContent value="comprobantes">
@@ -671,12 +1149,38 @@ export default function LiquidacionPage() {
               <p className="text-sm text-muted-foreground">
                 Genere comprobantes individuales de liquidación por cada técnico. Cada comprobante incluye firmas, separación de conceptos y referencia al contrato según Art. 128 CST.
               </p>
+              <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+                <CardContent className="p-4 flex items-center gap-3 flex-wrap">
+                  <div className="relative w-full md:flex-1 md:min-w-70">
+                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      placeholder="Buscar técnico para comprobante..."
+                      value={comprobanteSearch}
+                      onChange={(e) => setComprobanteSearch(e.target.value)}
+                      className="pl-10 bg-secondary/50 border-border/50"
+                    />
+                  </div>
+                  <Select value={comprobanteGroupId} onValueChange={setComprobanteGroupId}>
+                    <SelectTrigger className="w-full md:w-64 bg-secondary/50 border-border/50">
+                      <SelectValue placeholder="Filtrar por grupo" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-card border-border">
+                      <SelectItem value="todos">Todos los grupos</SelectItem>
+                      {groups.map((g) => (
+                        <SelectItem key={g.id} value={g.id}>
+                          {g.nombre}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </CardContent>
+              </Card>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {Array.from(techSummary.entries()).map(([techId, data]) => {
-                  const tech = users.find((u) => u.id === techId);
-                  const techReports = periodReports.filter((r) => r.tecnicoId === techId);
+                {filteredComprobanteEntries.map(([techId, data]) => {
+                  const techReports = filteredComprobanteReports.filter((r) => r.tecnicoId === techId);
                   const techRecorridos = techReports.filter((r) => r.tipo === "recorrido");
                   const rodamiento = techRecorridos.reduce((s, r) => s + r.costoActividad, 0);
+                  const auxilioNeto = data.totalNoRecorridos - data.descuentoValor;
 
                   return (
                     <Card
@@ -701,8 +1205,17 @@ export default function LiquidacionPage() {
                               <Sparkles className="h-3.5 w-3.5 text-cyan-neon" />
                               AUXILIO EXTRALEGAL
                             </span>
-                            <span className="font-semibold text-gold">{formatCurrency(data.total - rodamiento)}</span>
+                            <span className="font-semibold text-gold">{formatCurrency(auxilioNeto)}</span>
                           </div>
+                          {data.descuentoValor > 0 && (
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="flex items-center gap-1.5 text-muted-foreground">
+                                <Percent className="h-3.5 w-3.5 text-red-400" />
+                                DESCUENTO TARDANZA
+                              </span>
+                              <span className="font-semibold text-red-400">-{formatCurrency(data.descuentoValor)}</span>
+                            </div>
+                          )}
                           {rodamiento > 0 && (
                             <div className="flex items-center justify-between text-sm">
                               <span className="flex items-center gap-1.5 text-muted-foreground">
@@ -724,6 +1237,13 @@ export default function LiquidacionPage() {
                   );
                 })}
               </div>
+              {filteredComprobanteEntries.length === 0 && (
+                <Card className="border-border/50 bg-card/80">
+                  <CardContent className="p-8 text-center text-sm text-muted-foreground">
+                    No hay comprobantes que coincidan con el filtro actual.
+                  </CardContent>
+                </Card>
+              )}
             </div>
           </TabsContent>
         </Tabs>
@@ -872,16 +1392,20 @@ export default function LiquidacionPage() {
           </DialogHeader>
           {selectedTechId && (() => {
             const tech = users.find((u) => u.id === selectedTechId);
-            const techData = techSummary.get(selectedTechId);
+            const techData = filteredComprobanteSummary.get(selectedTechId) || techSummary.get(selectedTechId);
             if (!tech || !techData) return null;
 
-            const techReportsForComprobante = periodReports.filter((r) => r.tecnicoId === selectedTechId);
+            const techReportsForComprobante = periodReports.filter(
+              (r) => r.tecnicoId === selectedTechId && (comprobanteGroupId === "todos" || r.grupoId === comprobanteGroupId)
+            );
             const nonRecorridoReports = techReportsForComprobante.filter((r) => r.tipo !== "recorrido");
             const recorridoReports = techReportsForComprobante.filter((r) => r.tipo === "recorrido");
 
             const auxilioTotal = nonRecorridoReports.reduce((s, r) => s + r.costoActividad, 0);
             const rodamientoTotal = recorridoReports.reduce((s, r) => s + r.costoActividad, 0);
-            const grandTotal = auxilioTotal + rodamientoTotal;
+            const descuentoTardanza = techData.descuentoValor;
+            const auxilioNeto = auxilioTotal - descuentoTardanza;
+            const grandTotal = auxilioNeto + rodamientoTotal;
 
             return (
               <div className="space-y-6">
@@ -944,6 +1468,24 @@ export default function LiquidacionPage() {
                             {formatCurrency(auxilioTotal)}
                           </TableCell>
                         </TableRow>
+                        {descuentoTardanza > 0 && (
+                          <TableRow className="border-border/30 bg-red-500/5">
+                            <TableCell colSpan={4} className="text-xs font-bold text-red-400">
+                              Descuento por Tardanza ({techData.descuentoPorcentaje}%)
+                            </TableCell>
+                            <TableCell className="text-right font-bold text-red-400">
+                              -{formatCurrency(descuentoTardanza)}
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        <TableRow className="border-border/30 bg-cyan-neon/5">
+                          <TableCell colSpan={4} className="text-xs font-bold text-foreground">
+                            Auxilio Extralegal Neto
+                          </TableCell>
+                          <TableCell className="text-right font-bold text-gold">
+                            {formatCurrency(auxilioNeto)}
+                          </TableCell>
+                        </TableRow>
                       </TableBody>
                     </Table>
                   </div>
@@ -976,6 +1518,16 @@ export default function LiquidacionPage() {
                     <div className="flex justify-between text-sm">
                       <span className="text-muted-foreground">Auxilio Extralegal por Productividad</span>
                       <span className="font-medium text-foreground">{formatCurrency(auxilioTotal)}</span>
+                    </div>
+                    {descuentoTardanza > 0 && (
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Descuento por Tardanza</span>
+                        <span className="font-medium text-red-400">-{formatCurrency(descuentoTardanza)}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Auxilio Extralegal Neto</span>
+                      <span className="font-medium text-foreground">{formatCurrency(auxilioNeto)}</span>
                     </div>
                     {rodamientoTotal > 0 && (
                       <div className="flex justify-between text-sm">
@@ -1032,27 +1584,35 @@ export default function LiquidacionPage() {
                     className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
                     onClick={() => {
                       const tech = users.find((u) => u.id === selectedTechId);
-                      const techData = techSummary.get(selectedTechId!);
+                      const techData = filteredComprobanteSummary.get(selectedTechId!) || techSummary.get(selectedTechId!);
                       if (!tech || !techData) return;
-                      const pdfReports = periodReports.filter((r) => r.tecnicoId === selectedTechId);
+                      const pdfReports = periodReports.filter(
+                        (r) => r.tecnicoId === selectedTechId && (comprobanteGroupId === "todos" || r.grupoId === comprobanteGroupId)
+                      );
                       const pdfNonRecorrido = pdfReports.filter((r) => r.tipo !== "recorrido");
                       const pdfRecorrido = pdfReports.filter((r) => r.tipo === "recorrido");
                       const pdfAuxilio = pdfNonRecorrido.reduce((s, r) => s + r.costoActividad, 0);
                       const pdfRodamiento = pdfRecorrido.reduce((s, r) => s + r.costoActividad, 0);
+                      const pdfDescuentoTardanza = techData.descuentoValor;
                       generateComprobantePDF({
                         empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
                         periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} → ${selectedPeriod.fechaFin}` : "",
                         tecnico: `${tech.nombre} ${tech.apellido}`,
                         items: pdfNonRecorrido.map((r) => ({
-                          actividad: r.descripcion || r.tipo,
-                          edificio: "",
+                          actividad: r.descripcion || getTipoLabel(r.tipo),
                           fecha: r.fecha,
-                          porcentaje: 100,
+                          valorBase: r.costoActividad,
+                          porcentaje: pdfAuxilio > 0 ? Number(((r.costoActividad / pdfAuxilio) * 100).toFixed(2)) : 0,
+                        })),
+                        desplazamientos: pdfRecorrido.map((r) => ({
+                          descripcion: [r.puntoPartida, r.puntoLlegada].filter(Boolean).join(" -> ") || getTipoLabel(r.tipo),
+                          fecha: r.fecha,
                           valor: r.costoActividad,
                         })),
                         totalAuxilio: pdfAuxilio,
+                        totalDescuentoTardanza: pdfDescuentoTardanza,
                         totalRodamiento: pdfRodamiento,
-                        grandTotal: pdfAuxilio + pdfRodamiento,
+                        grandTotal: pdfAuxilio - pdfDescuentoTardanza + pdfRodamiento,
                       });
                     }}
                   >
@@ -1060,6 +1620,111 @@ export default function LiquidacionPage() {
                     Descargar PDF
                   </Button>
                 </div>
+              </div>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={reportDetailOpen}
+        onOpenChange={(open) => {
+          setReportDetailOpen(open);
+          if (!open) setSelectedReport(null);
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Detalle de actividad liquidada</DialogTitle>
+          </DialogHeader>
+          {selectedReport && (() => {
+            const tech = usersById.get(selectedReport.tecnicoId);
+            const leader = usersById.get(selectedReport.liderGrupoId);
+            const group = groupsById.get(selectedReport.grupoId);
+
+            return (
+              <div className="space-y-5">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground">Tipo</p>
+                    <p className="text-sm font-medium text-foreground">{getTipoLabel(selectedReport.tipo)}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground">Estado</p>
+                    <p className="text-sm font-medium text-foreground">{getEstadoLabel(selectedReport.estadoAprobacionLider)}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground">Técnico</p>
+                    <p className="text-sm font-medium text-foreground">{tech ? `${tech.nombre} ${tech.apellido}` : "—"}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground">Grupo</p>
+                    <p className="text-sm font-medium text-foreground">{group?.nombre || "—"}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground">Líder</p>
+                    <p className="text-sm font-medium text-foreground">{leader ? `${leader.nombre} ${leader.apellido}` : "—"}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground">Valor liquidado</p>
+                    <p className="text-sm font-medium text-gold">{formatCurrency(selectedReport.costoActividad)}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground">Fecha actividad</p>
+                    <p className="text-sm font-medium text-foreground">{selectedReport.fecha}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground">Fecha aprobación</p>
+                    <p className="text-sm font-medium text-foreground">{selectedReport.fechaAprobacionLider || "Pendiente"}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                  <p className="text-xs text-muted-foreground">Descripción</p>
+                  <p className="text-sm text-foreground">{selectedReport.descripcion || "—"}</p>
+                </div>
+
+                {selectedReport.especificacion && (
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                    <p className="text-xs text-muted-foreground">Especificación</p>
+                    <p className="text-sm text-foreground">{selectedReport.especificacion}</p>
+                  </div>
+                )}
+
+                {selectedReport.observaciones && (
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                    <p className="text-xs text-muted-foreground">Observaciones</p>
+                    <p className="text-sm text-foreground">{selectedReport.observaciones}</p>
+                  </div>
+                )}
+
+                {selectedReport.tipo === "recorrido" && (
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                      <p className="text-xs text-muted-foreground">Punto de partida</p>
+                      <p className="text-sm font-medium text-foreground">{selectedReport.puntoPartida || "—"}</p>
+                    </div>
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                      <p className="text-xs text-muted-foreground">Punto de llegada</p>
+                      <p className="text-sm font-medium text-foreground">{selectedReport.puntoLlegada || "—"}</p>
+                    </div>
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                      <p className="text-xs text-muted-foreground">Tipo de recorrido</p>
+                      <p className="text-sm font-medium text-foreground">{selectedReport.tipoRecorrido || "—"}</p>
+                    </div>
+                  </div>
+                )}
+
+                {selectedReport.datosReceptor && (
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                    <p className="text-xs text-muted-foreground">Datos del receptor</p>
+                    <p className="text-sm text-foreground">
+                      {selectedReport.datosReceptor.nombre || "—"}
+                      {selectedReport.datosReceptor.cedula ? ` · CC ${selectedReport.datosReceptor.cedula}` : ""}
+                      {selectedReport.datosReceptor.cargo ? ` · ${selectedReport.datosReceptor.cargo}` : ""}
+                    </p>
+                  </div>
+                )}
               </div>
             );
           })()}

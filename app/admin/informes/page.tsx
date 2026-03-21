@@ -41,6 +41,7 @@ import {
   MapPin,
   Package,
   Image,
+  Eye,
   PenLine,
   BookOpen,
   DollarSign,
@@ -71,6 +72,8 @@ export default function InformesPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [grupoFilter, setGrupoFilter] = useState<string>("todos");
+  const [selectedReport, setSelectedReport] = useState<ActivityReport | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [reportToDelete, setReportToDelete] = useState<ActivityReport | null>(null);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
 
@@ -118,15 +121,34 @@ export default function InformesPage() {
     [reports]
   );
 
+  const usersById = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
+  const clientsById = useMemo(() => new Map(clients.map((client) => [client.id, client])), [clients]);
+  const groupsById = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
+
+  const getTipoLabel = (tipo: ActivityReport["tipo"]) => {
+    if (tipo === "mantenimiento_preventivo") return "Mantenimiento Preventivo";
+    if (tipo === "visita_tecnica") return "Visita Técnica";
+    if (tipo === "recorrido") return "Recorrido";
+    return "Actividad Grupal";
+  };
+
+  const openReportDetail = (report: ActivityReport) => {
+    setSelectedReport(report);
+    setDetailOpen(true);
+  };
+
   const filterReports = (list: ActivityReport[]) =>
     list.filter((r) => {
       const tech = users.find((u) => u.id === r.tecnicoId);
       const client = r.clienteId ? clients.find((c) => c.id === r.clienteId) : null;
+      const normalizedSearch = search.toLowerCase();
       const matchSearch =
-        tech?.nombre.toLowerCase().includes(search.toLowerCase()) ||
-        tech?.apellido.toLowerCase().includes(search.toLowerCase()) ||
-        client?.edificio?.toLowerCase().includes(search.toLowerCase()) ||
-        r.descripcion.toLowerCase().includes(search.toLowerCase());
+        tech?.nombre.toLowerCase().includes(normalizedSearch) ||
+        tech?.apellido.toLowerCase().includes(normalizedSearch) ||
+        client?.edificio?.toLowerCase().includes(normalizedSearch) ||
+        client?.nombre?.toLowerCase().includes(normalizedSearch) ||
+        r.descripcion.toLowerCase().includes(normalizedSearch) ||
+        r.especificacion?.toLowerCase().includes(normalizedSearch);
       const matchGrupo = grupoFilter === "todos" || r.grupoId === grupoFilter;
       return matchSearch && matchGrupo;
     });
@@ -272,16 +294,21 @@ export default function InformesPage() {
                   </TableHeader>
                   <TableBody>
                     {filterReports(preventivos).map((r) => {
-                      const tech = users.find((u) => u.id === r.tecnicoId);
-                      const client = r.clienteId ? clients.find((c) => c.id === r.clienteId) : null;
-                      const leader = users.find((u) => u.id === r.liderGrupoId);
+                      const tech = usersById.get(r.tecnicoId);
+                      const client = r.clienteId ? clientsById.get(r.clienteId) : null;
+                      const leader = usersById.get(r.liderGrupoId);
                       return (
-                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30">
+                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
                           <TableCell className="text-sm font-medium text-foreground">
                             {tech?.nombre} {tech?.apellido}
                           </TableCell>
                           <TableCell>
                             <p className="text-sm text-foreground/80">{client?.edificio}</p>
+                            {r.especificacion && (
+                              <p className="text-xs text-muted-foreground truncate">
+                                Especificación: {r.especificacion}
+                              </p>
+                            )}
                           </TableCell>
                           <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
                           <TableCell>
@@ -339,14 +366,30 @@ export default function InformesPage() {
                             {formatCurrency(r.costoActividad)}
                           </TableCell>
                           <TableCell>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                              onClick={() => setReportToDelete(r)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openReportDetail(r);
+                                }}
+                              >
+                                <Eye className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setReportToDelete(r);
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
                           </TableCell>
                         </TableRow>
                       );
@@ -383,10 +426,10 @@ export default function InformesPage() {
                   </TableHeader>
                   <TableBody>
                     {filterReports(visitas).map((r) => {
-                      const tech = users.find((u) => u.id === r.tecnicoId);
-                      const client = r.clienteId ? clients.find((c) => c.id === r.clienteId) : null;
+                      const tech = usersById.get(r.tecnicoId);
+                      const client = r.clienteId ? clientsById.get(r.clienteId) : null;
                       return (
-                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30">
+                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
                           <TableCell className="text-sm font-medium text-foreground">
                             {tech?.nombre} {tech?.apellido}
                           </TableCell>
@@ -395,7 +438,14 @@ export default function InformesPage() {
                           </TableCell>
                           <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
                           <TableCell className="text-sm text-foreground/80 max-w-56 truncate">
-                            {r.descripcion}
+                            <div>
+                              <p className="truncate">{r.descripcion}</p>
+                              {r.especificacion && (
+                                <p className="text-xs text-muted-foreground truncate">
+                                  Especificación: {r.especificacion}
+                                </p>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell>
                             <div className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -424,14 +474,30 @@ export default function InformesPage() {
                             {formatCurrency(r.costoActividad)}
                           </TableCell>
                           <TableCell>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                              onClick={() => setReportToDelete(r)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openReportDetail(r);
+                                }}
+                              >
+                                <Eye className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setReportToDelete(r);
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
                           </TableCell>
                         </TableRow>
                       );
@@ -470,9 +536,9 @@ export default function InformesPage() {
                   </TableHeader>
                   <TableBody>
                     {filterReports(recorridos).map((r) => {
-                      const tech = users.find((u) => u.id === r.tecnicoId);
+                      const tech = usersById.get(r.tecnicoId);
                       return (
-                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30">
+                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
                           <TableCell className="text-sm font-medium text-foreground">
                             {tech?.nombre} {tech?.apellido}
                           </TableCell>
@@ -532,14 +598,30 @@ export default function InformesPage() {
                             {formatCurrency(r.costoActividad)}
                           </TableCell>
                           <TableCell>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                              onClick={() => setReportToDelete(r)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openReportDetail(r);
+                                }}
+                              >
+                                <Eye className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setReportToDelete(r);
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
                           </TableCell>
                         </TableRow>
                       );
@@ -576,18 +658,25 @@ export default function InformesPage() {
                   </TableHeader>
                   <TableBody>
                     {filterReports(grupales).map((r) => {
-                      const tech = users.find((u) => u.id === r.tecnicoId);
-                      const group = groups.find((g) => g.id === r.grupoId);
-                      const leader = users.find((u) => u.id === r.liderGrupoId);
+                      const tech = usersById.get(r.tecnicoId);
+                      const group = groupsById.get(r.grupoId);
+                      const leader = usersById.get(r.liderGrupoId);
                       return (
-                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30">
+                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
                           <TableCell className="text-sm font-medium text-foreground">
                             {tech?.nombre} {tech?.apellido}
                           </TableCell>
                           <TableCell className="text-sm text-foreground/80">{group?.nombre || "—"}</TableCell>
                           <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
                           <TableCell className="text-sm text-foreground/80 max-w-48 truncate">
-                            {r.descripcion}
+                            <div>
+                              <p className="truncate">{r.descripcion}</p>
+                              {r.especificacion && (
+                                <p className="text-xs text-muted-foreground truncate">
+                                  Especificación: {r.especificacion}
+                                </p>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell className="text-xs text-foreground/80">
                             {leader?.nombre} {leader?.apellido}
@@ -617,14 +706,30 @@ export default function InformesPage() {
                             {formatCurrency(r.costoActividad)}
                           </TableCell>
                           <TableCell>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                              onClick={() => setReportToDelete(r)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openReportDetail(r);
+                                }}
+                              >
+                                <Eye className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setReportToDelete(r);
+                                }}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
                           </TableCell>
                         </TableRow>
                       );
@@ -636,6 +741,177 @@ export default function InformesPage() {
           </TabsContent>
         </Tabs>
       </div>
+
+      <Dialog
+        open={detailOpen}
+        onOpenChange={(open) => {
+          setDetailOpen(open);
+          if (!open) setSelectedReport(null);
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Detalle del Informe Técnico</DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              Vista completa del reporte seleccionado para revisión administrativa.
+            </DialogDescription>
+          </DialogHeader>
+          {selectedReport && (() => {
+            const tech = usersById.get(selectedReport.tecnicoId);
+            const leader = usersById.get(selectedReport.liderGrupoId);
+            const client = selectedReport.clienteId ? clientsById.get(selectedReport.clienteId) : null;
+            const group = groupsById.get(selectedReport.grupoId);
+            const totalFotos = (selectedReport.fotosAntes?.length || 0) + (selectedReport.fotosDespues?.length || 0);
+
+            return (
+              <div className="space-y-5">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Tipo</p>
+                    <p className="text-sm font-medium text-foreground">{getTipoLabel(selectedReport.tipo)}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Técnico</p>
+                    <p className="text-sm font-medium text-foreground">{tech ? `${tech.nombre} ${tech.apellido}` : "—"}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Grupo</p>
+                    <p className="text-sm font-medium text-foreground">{group?.nombre || "—"}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Líder</p>
+                    <p className="text-sm font-medium text-foreground">{leader ? `${leader.nombre} ${leader.apellido}` : "—"}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Fecha</p>
+                    <p className="text-sm font-medium text-foreground">{selectedReport.fecha}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Costo técnico</p>
+                    <p className="text-sm font-medium text-gold">{formatCurrency(selectedReport.costoActividad)}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Estado aprobación</p>
+                    <p className="text-sm font-medium text-foreground">{selectedReport.estadoAprobacionLider}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Fecha aprobación</p>
+                    <p className="text-sm font-medium text-foreground">{selectedReport.fechaAprobacionLider || "Pendiente"}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Fotos</p>
+                    <p className="text-sm font-medium text-foreground">{totalFotos}</p>
+                  </div>
+                  {client && (
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 md:col-span-2 lg:col-span-3">
+                      <p className="text-xs text-muted-foreground">Cliente / Proyecto</p>
+                      <p className="text-sm font-medium text-foreground">{client.nombre} — {client.edificio}</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                  <p className="text-xs text-muted-foreground">Descripción</p>
+                  <p className="text-sm text-foreground">{selectedReport.descripcion || "—"}</p>
+                </div>
+
+                {selectedReport.especificacion && (
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                    <p className="text-xs text-muted-foreground">Especificación</p>
+                    <p className="text-sm text-foreground">{selectedReport.especificacion}</p>
+                  </div>
+                )}
+
+                {selectedReport.observaciones && (
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                    <p className="text-xs text-muted-foreground">Observaciones</p>
+                    <p className="text-sm text-foreground">{selectedReport.observaciones}</p>
+                  </div>
+                )}
+
+                {selectedReport.datosReceptor && (
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                    <p className="text-xs text-muted-foreground">Receptor</p>
+                    <p className="text-sm text-foreground">
+                      {selectedReport.datosReceptor.nombre}
+                      {selectedReport.datosReceptor.cedula ? ` · CC: ${selectedReport.datosReceptor.cedula}` : ""}
+                      {selectedReport.datosReceptor.cargo ? ` · ${selectedReport.datosReceptor.cargo}` : ""}
+                    </p>
+                  </div>
+                )}
+
+                {(selectedReport.tipo === "mantenimiento_preventivo" || selectedReport.tipo === "visita_tecnica") && (
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                      <p className="text-xs text-muted-foreground">Bitácora</p>
+                      <p className="text-sm font-medium text-foreground">{selectedReport.bitacora ? "Sí" : "No"}</p>
+                    </div>
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                      <p className="text-xs text-muted-foreground">Firma receptor</p>
+                      <p className="text-sm font-medium text-foreground">{selectedReport.firmaReceptor ? "Registrada" : "No registrada"}</p>
+                    </div>
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                      <p className="text-xs text-muted-foreground">Fotos evidencias</p>
+                      <p className="text-sm font-medium text-foreground">{totalFotos}</p>
+                    </div>
+                  </div>
+                )}
+
+                {selectedReport.tipo === "recorrido" && (
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                      <p className="text-xs text-muted-foreground">Punto de partida</p>
+                      <p className="text-sm font-medium text-foreground">{selectedReport.puntoPartida || "—"}</p>
+                    </div>
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                      <p className="text-xs text-muted-foreground">Punto de llegada</p>
+                      <p className="text-sm font-medium text-foreground">{selectedReport.puntoLlegada || "—"}</p>
+                    </div>
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                      <p className="text-xs text-muted-foreground">Tipo de recorrido</p>
+                      <p className="text-sm font-medium text-foreground">{selectedReport.tipoRecorrido || "—"}</p>
+                    </div>
+                  </div>
+                )}
+
+                {totalFotos > 0 && (
+                  <div className="space-y-3">
+                    <p className="text-xs font-semibold text-foreground/80 uppercase tracking-wide">Evidencia fotográfica</p>
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      {selectedReport.fotosAntes && selectedReport.fotosAntes.length > 0 && (
+                        <div className="space-y-2">
+                          <p className="text-xs text-muted-foreground">Antes ({selectedReport.fotosAntes.length})</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            {selectedReport.fotosAntes.map((url, index) => (
+                              <a key={`antes-${index}`} href={url} target="_blank" rel="noreferrer" className="aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/20">
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img src={url} alt={`Antes ${index + 1}`} className="h-full w-full object-cover" />
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {selectedReport.fotosDespues && selectedReport.fotosDespues.length > 0 && (
+                        <div className="space-y-2">
+                          <p className="text-xs text-muted-foreground">Después ({selectedReport.fotosDespues.length})</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            {selectedReport.fotosDespues.map((url, index) => (
+                              <a key={`despues-${index}`} href={url} target="_blank" rel="noreferrer" className="aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/20">
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img src={url} alt={`Después ${index + 1}`} className="h-full w-full object-cover" />
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={!!reportToDelete}
