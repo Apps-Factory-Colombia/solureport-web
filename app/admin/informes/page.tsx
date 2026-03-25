@@ -37,6 +37,7 @@ import {
   ClipboardCheck,
   Route,
   Download,
+  Mail,
   CheckCircle2,
   Clock,
   MapPin,
@@ -49,9 +50,10 @@ import {
   Trash2,
   Loader2,
   Users,
+  Send,
 } from "lucide-react";
 import { ActivityReport, User, Client, WorkGroup, CompanySettings } from "@/lib/types";
-import { deleteReporteActividadAdmin, getReportesActividad } from "@/lib/supabase/services/reportes-actividad";
+import { deleteReporteActividadAdmin, getReportesActividad, markReporteActividadEmailSent } from "@/lib/supabase/services/reportes-actividad";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
@@ -59,12 +61,26 @@ import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
 
+const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
+
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
     style: "currency",
     currency: "COP",
     minimumFractionDigits: 0,
   }).format(value);
+}
+
+function formatDateTime(value?: string) {
+  if (!value) return "Sin envío";
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+
+  return new Intl.DateTimeFormat("es-CO", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(parsed);
 }
 
 export default function InformesPage() {
@@ -80,6 +96,7 @@ export default function InformesPage() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [reportToDelete, setReportToDelete] = useState<ActivityReport | null>(null);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
+  const [sendingReportId, setSendingReportId] = useState<string | null>(null);
 
   const loadData = async () => {
     setLoading(true);
@@ -139,8 +156,47 @@ export default function InformesPage() {
   const buildMultilineText = (parts: Array<string | undefined | null>) =>
     parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
 
+  const getSafeFileSegment = (value: string) => {
+    return value
+      .trim()
+      .replace(/\s+/g, "_")
+      .replace(/[^a-zA-Z0-9_-]/g, "") || "reporte";
+  };
+
   const getEvidenceCount = (report: ActivityReport) => {
     return (report.fotosAntes?.length || 0) + (report.fotosDespues?.length || 0) + (report.fotoBitacora ? 1 : 0);
+  };
+
+  const applySentState = (targetReport: ActivityReport, sentAt: string) => {
+    setReports((current) => current.map((item) => {
+      if (targetReport.id.startsWith("reg-")) {
+        const parts = targetReport.id.split("-");
+        const registroId = parts.slice(1, -1).join("-");
+        return item.id.startsWith(`reg-${registroId}-`)
+          ? { ...item, correoEnviado: true, fechaUltimoEnvioCorreo: sentAt }
+          : item;
+      }
+
+      return item.id === targetReport.id
+        ? { ...item, correoEnviado: true, fechaUltimoEnvioCorreo: sentAt }
+        : item;
+    }));
+
+    setSelectedReport((current) => {
+      if (!current) return current;
+
+      if (targetReport.id.startsWith("reg-")) {
+        const parts = targetReport.id.split("-");
+        const registroId = parts.slice(1, -1).join("-");
+        return current.id.startsWith(`reg-${registroId}-`)
+          ? { ...current, correoEnviado: true, fechaUltimoEnvioCorreo: sentAt }
+          : current;
+      }
+
+      return current.id === targetReport.id
+        ? { ...current, correoEnviado: true, fechaUltimoEnvioCorreo: sentAt }
+        : current;
+    });
   };
 
   const getReportContext = (report: ActivityReport) => {
@@ -189,6 +245,10 @@ export default function InformesPage() {
       client,
       tech,
       group,
+      tipoLabel,
+      companyName,
+      tecnicoNombre,
+      edificio,
       pdfData: {
         titulo:
           report.tipo === "mantenimiento_preventivo"
@@ -225,6 +285,98 @@ export default function InformesPage() {
     };
   };
 
+  const getReportEmailContext = (report: ActivityReport) => {
+    const { client, group, pdfData, tipoLabel, companyName, tecnicoNombre, edificio } = getReportContext(report);
+    const operationalEmail = companySettings?.correoEmpresa || DEFAULT_NOTIFICATION_BCC;
+    const clienteNombre = client?.contacto || client?.nombre || "Cliente";
+    const fileBaseName = getSafeFileSegment(client?.edificio || group?.nombre || tipoLabel);
+    const resumen = report.descripcion || report.especificacion || report.observaciones || `Servicio de ${tipoLabel.toLowerCase()}`;
+
+    const detailLines = (() => {
+      if (report.tipo === "visita_tecnica") {
+        return buildMultilineText([
+          report.descripcion,
+          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        ]);
+      }
+
+      if (report.tipo === "recorrido") {
+        return buildMultilineText([
+          report.descripcion,
+          report.puntoPartida ? `Punto de partida: ${report.puntoPartida}` : undefined,
+          report.puntoLlegada ? `Punto de llegada: ${report.puntoLlegada}` : undefined,
+          report.tipoRecorrido ? `Tipo de recorrido: ${report.tipoRecorrido === "con_herramienta" ? "Con herramienta" : "Normal"}` : undefined,
+          report.fotoHerramienta ? "Incluye evidencia fotográfica de herramienta." : undefined,
+          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        ]);
+      }
+
+      if (report.tipo === "actividad_grupal") {
+        return buildMultilineText([
+          report.descripcion,
+          report.especificacion ? `Especificación: ${report.especificacion}` : undefined,
+          group?.nombre ? `Grupo: ${group.nombre}` : undefined,
+          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        ]);
+      }
+
+      return buildMultilineText([
+        report.descripcion,
+        report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+      ]);
+    })();
+
+    const template =
+      report.tipo === "mantenimiento_preventivo"
+        ? "maintenance-report"
+        : report.tipo === "visita_tecnica"
+          ? "technical-visit-report"
+          : "approval-report";
+
+    const templateData =
+      report.tipo === "mantenimiento_preventivo"
+        ? {
+          companyName,
+          clienteNombre,
+          edificio,
+          fecha: report.fecha,
+          tecnicoNombre,
+          observaciones: detailLines || resumen,
+        }
+        : report.tipo === "visita_tecnica"
+          ? {
+            companyName,
+            clienteNombre,
+            edificio,
+            fecha: report.fecha,
+            tecnicoNombre,
+            tipoVisita: "aprobada",
+            descripcion: report.descripcion,
+            observaciones: report.observaciones,
+          }
+          : {
+            companyName,
+            clienteNombre,
+            edificio,
+            fecha: report.fecha,
+            tecnicoNombre,
+            tipoInforme: tipoLabel,
+            resumen,
+            observaciones: detailLines !== resumen ? detailLines : undefined,
+          };
+
+    return {
+      client,
+      operationalEmail,
+      pdfData,
+      template,
+      templateData,
+      subject: `Reporte de ${tipoLabel.toLowerCase()} - ${edificio}`,
+      filename: `${getSafeFileSegment(tipoLabel)}_${fileBaseName}_${report.fecha}.pdf`,
+      ccRecipients: [client?.correoAliado, operationalEmail].filter(Boolean),
+    };
+  };
+
   const handleDownloadPDF = async (report: ActivityReport) => {
     const { pdfData } = getReportContext(report);
 
@@ -235,6 +387,129 @@ export default function InformesPage() {
       alert("Hubo un error al generar el PDF del informe.");
     }
   };
+
+  const handleSendEmail = async (report: ActivityReport) => {
+    const context = getReportEmailContext(report);
+
+    if (!context.client?.correo) {
+      alert("Este informe no tiene correo del cliente registrado.");
+      return;
+    }
+
+    setSendingReportId(report.id);
+
+    try {
+      const pdfBase64 = await generateReportePDF(context.pdfData, true) as string;
+      const base64Content = pdfBase64.split(",")[1];
+
+      const response = await fetch("/api/send-email", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          to: context.client.correo,
+          cc: context.ccRecipients,
+          subject: context.subject,
+          template: context.template,
+          data: context.templateData,
+          replyTo: context.operationalEmail,
+          pdfAttachment: {
+            filename: context.filename,
+            base64: base64Content,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.error || "No se pudo enviar el correo del informe.");
+      }
+
+      const sentAt = new Date().toISOString();
+      await markReporteActividadEmailSent(report.id, sentAt);
+      applySentState(report, sentAt);
+
+      alert("Correo enviado correctamente.");
+    } catch (err) {
+      console.error("Error enviando correo del informe:", err);
+      alert("Hubo un error al enviar el correo del informe.");
+    } finally {
+      setSendingReportId(null);
+    }
+  };
+
+  const renderActionButtons = (report: ActivityReport) => (
+    <div className="flex items-center gap-1">
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+        onClick={(event) => {
+          event.stopPropagation();
+          openReportDetail(report);
+        }}
+      >
+        <Eye className="h-4 w-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 text-muted-foreground hover:text-cyan-neon"
+        onClick={(event) => {
+          event.stopPropagation();
+          handleSendEmail(report);
+        }}
+        disabled={sendingReportId === report.id}
+      >
+        {sendingReportId === report.id ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : (
+          <Mail className="h-4 w-4" />
+        )}
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 text-muted-foreground hover:text-gold"
+        onClick={(event) => {
+          event.stopPropagation();
+          handleDownloadPDF(report);
+        }}
+      >
+        <Download className="h-4 w-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+        onClick={(event) => {
+          event.stopPropagation();
+          setReportToDelete(report);
+        }}
+      >
+        <Trash2 className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+
+  const renderEmailStatusBadge = (report: ActivityReport) => (
+    <Badge
+      variant="outline"
+      className={cn(
+        "text-[10px]",
+        report.correoEnviado
+          ? "bg-cyan-neon/10 text-cyan-neon border-cyan-neon/30"
+          : "bg-secondary text-muted-foreground border-border/50"
+      )}
+    >
+      {report.correoEnviado ? (
+        <><Send className="mr-0.5 h-3 w-3" />Enviado</>
+      ) : (
+        "Pendiente"
+      )}
+    </Badge>
+  );
 
   const openReportDetail = (report: ActivityReport) => {
     setSelectedReport(report);
@@ -392,8 +667,9 @@ export default function InformesPage() {
                       <TableHead className="text-muted-foreground">Fotos</TableHead>
                       <TableHead className="text-muted-foreground">Líder</TableHead>
                       <TableHead className="text-muted-foreground">Aprobación</TableHead>
+                      <TableHead className="text-muted-foreground">Correo</TableHead>
                       <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-24"></TableHead>
+                      <TableHead className="text-muted-foreground w-32"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -466,46 +742,11 @@ export default function InformesPage() {
                               )}
                             </Badge>
                           </TableCell>
+                          <TableCell>{renderEmailStatusBadge(r)}</TableCell>
                           <TableCell className="text-right font-semibold text-gold text-sm">
                             {formatCurrency(r.costoActividad)}
                           </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openReportDetail(r);
-                                }}
-                              >
-                                <Eye className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-gold"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleDownloadPDF(r);
-                                }}
-                              >
-                                <Download className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setReportToDelete(r);
-                                }}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </TableCell>
+                          <TableCell>{renderActionButtons(r)}</TableCell>
                         </TableRow>
                       );
                     })}
@@ -536,8 +777,9 @@ export default function InformesPage() {
                       <TableHead className="text-muted-foreground">Descripción</TableHead>
                       <TableHead className="text-muted-foreground">Fotos</TableHead>
                       <TableHead className="text-muted-foreground">Aprobación Líder</TableHead>
+                      <TableHead className="text-muted-foreground">Correo</TableHead>
                       <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-24"></TableHead>
+                      <TableHead className="text-muted-foreground w-32"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -586,46 +828,11 @@ export default function InformesPage() {
                               )}
                             </Badge>
                           </TableCell>
+                          <TableCell>{renderEmailStatusBadge(r)}</TableCell>
                           <TableCell className="text-right font-semibold text-gold text-sm">
                             {formatCurrency(r.costoActividad)}
                           </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openReportDetail(r);
-                                }}
-                              >
-                                <Eye className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-gold"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleDownloadPDF(r);
-                                }}
-                              >
-                                <Download className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setReportToDelete(r);
-                                }}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </TableCell>
+                          <TableCell>{renderActionButtons(r)}</TableCell>
                         </TableRow>
                       );
                     })}
@@ -657,8 +864,9 @@ export default function InformesPage() {
                       <TableHead className="text-muted-foreground">Modalidad</TableHead>
                       <TableHead className="text-muted-foreground">Herramienta</TableHead>
                       <TableHead className="text-muted-foreground">Aprobación</TableHead>
+                      <TableHead className="text-muted-foreground">Correo</TableHead>
                       <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-24"></TableHead>
+                      <TableHead className="text-muted-foreground w-32"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -721,46 +929,11 @@ export default function InformesPage() {
                               {r.estadoAprobacionLider === "aprobado" ? "Aprobado" : "Pendiente"}
                             </Badge>
                           </TableCell>
+                          <TableCell>{renderEmailStatusBadge(r)}</TableCell>
                           <TableCell className="text-right font-semibold text-gold text-sm">
                             {formatCurrency(r.costoActividad)}
                           </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openReportDetail(r);
-                                }}
-                              >
-                                <Eye className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-gold"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleDownloadPDF(r);
-                                }}
-                              >
-                                <Download className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setReportToDelete(r);
-                                }}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </TableCell>
+                          <TableCell>{renderActionButtons(r)}</TableCell>
                         </TableRow>
                       );
                     })}
@@ -790,8 +963,9 @@ export default function InformesPage() {
                       <TableHead className="text-muted-foreground">Descripción</TableHead>
                       <TableHead className="text-muted-foreground">Líder</TableHead>
                       <TableHead className="text-muted-foreground">Aprobación</TableHead>
+                      <TableHead className="text-muted-foreground">Correo</TableHead>
                       <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-24"></TableHead>
+                      <TableHead className="text-muted-foreground w-32"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -840,46 +1014,11 @@ export default function InformesPage() {
                               )}
                             </Badge>
                           </TableCell>
+                          <TableCell>{renderEmailStatusBadge(r)}</TableCell>
                           <TableCell className="text-right font-semibold text-gold text-sm">
                             {formatCurrency(r.costoActividad)}
                           </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openReportDetail(r);
-                                }}
-                              >
-                                <Eye className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-gold"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  handleDownloadPDF(r);
-                                }}
-                              >
-                                <Download className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setReportToDelete(r);
-                                }}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </TableCell>
+                          <TableCell>{renderActionButtons(r)}</TableCell>
                         </TableRow>
                       );
                     })}
@@ -950,6 +1089,14 @@ export default function InformesPage() {
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Fotos</p>
                     <p className="text-sm font-medium text-foreground">{totalFotos}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Correo</p>
+                    <div className="mt-1">{renderEmailStatusBadge(selectedReport)}</div>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Último envío</p>
+                    <p className="text-sm font-medium text-foreground">{formatDateTime(selectedReport.fechaUltimoEnvioCorreo)}</p>
                   </div>
                   {client && (
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 md:col-span-2 lg:col-span-3">
@@ -1084,6 +1231,19 @@ export default function InformesPage() {
                 )}
 
                 <div className="flex justify-end gap-2 border-t border-border/50 pt-2">
+                  <Button
+                    variant="outline"
+                    className="gap-2 border-border/50 text-foreground/80"
+                    onClick={() => handleSendEmail(selectedReport)}
+                    disabled={sendingReportId === selectedReport.id}
+                  >
+                    {sendingReportId === selectedReport.id ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Mail className="h-4 w-4" />
+                    )}
+                    Enviar correo
+                  </Button>
                   <Button
                     variant="outline"
                     className="gap-2 border-border/50 text-foreground/80"

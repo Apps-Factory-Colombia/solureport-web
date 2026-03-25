@@ -31,6 +31,8 @@ interface ReporteActividadRow {
   fecha_aprobacion_lider?: string | null;
   costo_actividad?: number | string | null;
   costo_administrable?: boolean | null;
+  enviado_correo?: boolean | null;
+  fecha_ultimo_envio_correo?: string | null;
   periodo_id: string;
   fecha_creacion?: string | null;
 }
@@ -44,6 +46,8 @@ interface RegistroActividadRow {
   cliente_id?: string | null;
   cliente_nombre?: string | null;
   especificacion?: string | null;
+  enviado_correo?: boolean | null;
+  fecha_ultimo_envio_correo?: string | null;
   periodo_id?: string | null;
   fecha_creacion?: string | null;
 }
@@ -153,6 +157,8 @@ function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues:
     fechaAprobacionLider: row.fecha_aprobacion_lider?.split("T")[0] || undefined,
     costoActividad: Number(row.costo_actividad ?? 0) || 0,
     costoAdministrable: row.costo_administrable || false,
+    correoEnviado: row.enviado_correo || false,
+    fechaUltimoEnvioCorreo: row.fecha_ultimo_envio_correo || undefined,
     periodoId: row.periodo_id,
     fechaCreacion: row.fecha_creacion?.split("T")[0] || "",
   };
@@ -212,6 +218,8 @@ function enrichLegacyActivityReport(
     datosReceptor: mirror.datosReceptor || report.datosReceptor,
     bitacora: mirror.bitacora ?? report.bitacora,
     fotoBitacora: mirror.fotoBitacora || report.fotoBitacora,
+    correoEnviado: mirror.correoEnviado || report.correoEnviado,
+    fechaUltimoEnvioCorreo: mirror.fechaUltimoEnvioCorreo || report.fechaUltimoEnvioCorreo,
     fechaCreacion: mirror.fechaCreacion || report.fechaCreacion,
   };
 }
@@ -406,6 +414,8 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
         fechaAprobacionLider: approval?.fecha_aprobacion?.split("T")[0] || undefined,
         costoActividad: Number(part.valor_calculado ?? 0) || 0,
         costoAdministrable: false,
+        correoEnviado: reg.enviado_correo || false,
+        fechaUltimoEnvioCorreo: reg.fecha_ultimo_envio_correo || undefined,
         periodoId,
         fechaCreacion: reg.fecha_creacion?.split("T")[0] || "",
       }, mirrors));
@@ -576,6 +586,36 @@ export async function updateEstadoAprobacion(id: string, estado: "aprobado" | "r
     })
     .eq("id", id);
   if (error) throw error;
+  invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+}
+
+export async function markReporteActividadEmailSent(id: string, sentAt: string = new Date().toISOString()): Promise<void> {
+  if (id.startsWith("reg-")) {
+    const parts = id.split("-");
+    const registroId = parts.slice(1, -1).join("-");
+
+    const { error } = await supabase
+      .from("registros_actividades")
+      .update({
+        enviado_correo: true,
+        fecha_ultimo_envio_correo: sentAt,
+      })
+      .eq("id", registroId);
+    if (error) throw error;
+
+    invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+    return;
+  }
+
+  const { error } = await supabase
+    .from("reportes_actividad")
+    .update({
+      enviado_correo: true,
+      fecha_ultimo_envio_correo: sentAt,
+    })
+    .eq("id", id);
+  if (error) throw error;
+
   invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
 }
 

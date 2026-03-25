@@ -248,6 +248,8 @@ export interface ActivityReport {
   fechaAprobacionLider?: string;
   costoActividad: number;
   costoAdministrable: boolean;
+  correoEnviado: boolean;
+  fechaUltimoEnvioCorreo?: string;
   periodoId: string;
   fechaCreacion: string;
 }
