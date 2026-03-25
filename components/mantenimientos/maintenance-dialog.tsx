@@ -46,17 +46,49 @@ export function MaintenanceDialog({
   });
   const [technicians, setTechnicians] = useState<User[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
+  const [technicianQuery, setTechnicianQuery] = useState("");
+  const [isTechnicianListOpen, setIsTechnicianListOpen] = useState(false);
 
   useEffect(() => {
     if (open) {
       Promise.all([getUsuarios(), getClientes()])
         .then(([users, cls]) => {
-          setTechnicians(users.filter((u) => u.rol === "tecnico" && u.estado === "activo"));
+          setTechnicians(
+            users.filter(
+              (u) =>
+                u.estado === "activo" &&
+                (u.rol === "tecnico" || u.rol === "lider" || u.esLider)
+            )
+          );
           setClients(cls.filter((c) => c.estado === "activo"));
         })
         .catch((err) => console.error("Error cargando datos:", err));
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      setTechnicianQuery("");
+      setIsTechnicianListOpen(false);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const selectedTechnician = technicians.find(
+      (user) => user.id === formData.tecnicoId
+    );
+
+    if (!selectedTechnician) {
+      if (!formData.tecnicoId) {
+        setTechnicianQuery("");
+      }
+      return;
+    }
+
+    setTechnicianQuery(
+      `${selectedTechnician.nombre} ${selectedTechnician.apellido}`
+    );
+  }, [technicians, formData.tecnicoId]);
 
   useEffect(() => {
     if (maintenance) {
@@ -101,6 +133,17 @@ export function MaintenanceDialog({
     onOpenChange(false);
   };
 
+  const filteredTechnicians = technicians.filter((user) => {
+    const fullName = `${user.nombre} ${user.apellido}`.toLowerCase();
+    return fullName.includes(technicianQuery.trim().toLowerCase());
+  });
+
+  const handleTechnicianSelect = (user: User) => {
+    setFormData({ ...formData, tecnicoId: user.id });
+    setTechnicianQuery(`${user.nombre} ${user.apellido}`);
+    setIsTechnicianListOpen(false);
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="bg-card border-border sm:max-w-md">
@@ -132,24 +175,46 @@ export function MaintenanceDialog({
           </div>
 
           <div className="space-y-2">
-            <Label className="text-foreground/80">Técnico Asignado</Label>
-            <Select
-              value={formData.tecnicoId}
-              onValueChange={(v) =>
-                setFormData({ ...formData, tecnicoId: v })
-              }
-            >
-              <SelectTrigger className="bg-secondary/50 border-border/50">
-                <SelectValue placeholder="Seleccionar técnico" />
-              </SelectTrigger>
-              <SelectContent className="bg-card border-border">
-                {technicians.map((t) => (
-                  <SelectItem key={t.id} value={t.id}>
-                    {t.nombre} {t.apellido}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Label className="text-foreground/80">Líder o Técnico Asignado</Label>
+            <div className="relative">
+              <Input
+                value={technicianQuery}
+                onFocus={() => setIsTechnicianListOpen(true)}
+                onChange={(e) => {
+                  setTechnicianQuery(e.target.value);
+                  setIsTechnicianListOpen(true);
+                  setFormData({ ...formData, tecnicoId: "" });
+                }}
+                onBlur={() => {
+                  window.setTimeout(() => {
+                    setIsTechnicianListOpen(false);
+                  }, 120);
+                }}
+                placeholder="Buscar y seleccionar líder o técnico"
+                className="bg-secondary/50 border-border/50"
+              />
+              {isTechnicianListOpen && (
+                <div className="absolute z-50 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-card shadow-lg">
+                  {filteredTechnicians.length > 0 ? (
+                    filteredTechnicians.map((user) => (
+                      <button
+                        key={user.id}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => handleTechnicianSelect(user)}
+                        className="flex w-full items-center px-3 py-2 text-left text-sm text-foreground hover:bg-secondary/60"
+                      >
+                        {user.nombre} {user.apellido}
+                      </button>
+                    ))
+                  ) : (
+                    <div className="px-3 py-2 text-sm text-muted-foreground">
+                      No se encontraron líderes o técnicos.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -206,7 +271,7 @@ export function MaintenanceDialog({
                 setFormData({ ...formData, observaciones: e.target.value })
               }
               placeholder="Observaciones del mantenimiento..."
-              className="bg-secondary/50 border-border/50 min-h-[80px]"
+              className="bg-secondary/50 border-border/50 min-h-20"
             />
           </div>
 

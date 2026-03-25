@@ -4,6 +4,7 @@ import { render } from "@react-email/render";
 import MaintenanceReportEmail from "@/components/emails/MaintenanceReportEmail";
 import LiquidationClosedEmail from "@/components/emails/LiquidationClosedEmail";
 import TechnicalVisitEmail from "@/components/emails/TechnicalVisitEmail";
+import ApprovalReportEmail from "@/components/emails/ApprovalReportEmail";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 const resendFromEmail = "notificaciones@solucionesyautomatizaciones.com";
@@ -80,6 +81,21 @@ export async function POST(request: NextRequest) {
           tecnicoNombre: templateData?.tecnicoNombre,
           tipoVisita: templateData?.tipoVisita,
           descripcion: templateData?.descripcion,
+          observaciones: templateData?.observaciones,
+        })
+      );
+    }
+
+    if (!html && template === "approval-report") {
+      html = await render(
+        ApprovalReportEmail({
+          companyName: templateData?.companyName,
+          clienteNombre: templateData?.clienteNombre,
+          edificio: templateData?.edificio,
+          fecha: templateData?.fecha,
+          tecnicoNombre: templateData?.tecnicoNombre,
+          tipoInforme: templateData?.tipoInforme,
+          resumen: templateData?.resumen,
           observaciones: templateData?.observaciones,
         })
       );

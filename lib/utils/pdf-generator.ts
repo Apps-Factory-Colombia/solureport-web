@@ -9,9 +9,12 @@ interface PDFReportData {
   tecnico?: string;
   cliente?: string;
   edificio?: string;
+  direccionCliente?: string;
+  correoCliente?: string;
   observaciones?: string;
   fotosAntes?: string[];
   fotosDespues?: string[];
+  fotoBitacora?: string;
   firmaUrl?: string;
   receptor?: { nombre: string; cedula: string; cargo: string };
 }
@@ -39,6 +42,17 @@ async function getBase64ImageFromUrl(imageUrl: string): Promise<string | null> {
     console.error("Error loading image:", imageUrl, error);
     return null;
   }
+}
+
+function getPdfImageFormat(base64DataUrl: string): "PNG" | "JPEG" {
+  const match = base64DataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,/);
+  const mimeSubtype = match?.[1]?.toLowerCase() || "jpeg";
+
+  if (mimeSubtype === "png") {
+    return "PNG";
+  }
+
+  return "JPEG";
 }
 
 export async function generateReportePDF(data: PDFReportData, asBase64: boolean = false): Promise<string | void> {
@@ -84,32 +98,43 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
   if (data.tecnico) infoItems.push(["Técnico:", data.tecnico]);
   if (data.cliente) infoItems.push(["Cliente:", data.cliente]);
   if (data.edificio) infoItems.push(["Edificio:", data.edificio]);
+  if (data.direccionCliente) infoItems.push(["Dirección:", data.direccionCliente]);
+  if (data.correoCliente) infoItems.push(["Correo:", data.correoCliente]);
 
-  // Cuadrícula para información (2 columnas)
-  const col1X = 14;
-  const col2X = pageWidth / 2;
+  const gridStartX = 14;
+  const gridWidth = pageWidth - 28;
+  const columnGap = 10;
+  const columnWidth = (gridWidth - columnGap) / 2;
+  const labelWidth = 22;
+  const lineHeight = 5;
   let currentY = y;
 
-  infoItems.forEach((item, index) => {
-    const isLeft = index % 2 === 0;
-    const xPos = isLeft ? col1X : col2X;
+  for (let index = 0; index < infoItems.length; index += 2) {
+    const rowItems = infoItems.slice(index, index + 2);
+    const rowHeight = Math.max(
+      ...rowItems.map((item) => {
+        const valueLines = doc.splitTextToSize(item[1], columnWidth - labelWidth - 2);
+        return Math.max(1, valueLines.length) * lineHeight;
+      })
+    );
 
-    if (!isLeft && index > 0) {
-      // Misma línea
-    } else if (index > 0) {
-      currentY += 8;
-    }
+    rowItems.forEach((item, columnIndex) => {
+      const xPos = gridStartX + columnIndex * (columnWidth + columnGap);
+      const valueLines = doc.splitTextToSize(item[1], columnWidth - labelWidth - 2);
 
-    doc.setFont("helvetica", "bold");
-    doc.setTextColor(100);
-    doc.text(item[0], xPos, currentY);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(100);
+      doc.text(item[0], xPos, currentY);
 
-    doc.setFont("helvetica", "normal");
-    doc.setTextColor(30);
-    doc.text(item[1], xPos + 20, currentY);
-  });
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(30);
+      doc.text(valueLines, xPos + labelWidth, currentY);
+    });
 
-  y = currentY + 12;
+    currentY += rowHeight + 3;
+  }
+
+  y = currentY + 6;
 
   // Observaciones
   if (data.observaciones) {
@@ -158,8 +183,7 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
 
       if (base64) {
         const x = 14 + col * (imgWidth + margin);
-        // Intentar adivinar tipo por la URL, por defecto JPEG
-        const imgType = url.toLowerCase().includes(".png") ? "PNG" : "JPEG";
+        const imgType = getPdfImageFormat(base64);
 
         try {
           doc.addImage(base64, imgType, x, y, imgWidth, imgHeight);
@@ -178,6 +202,7 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
 
   await renderImageGrid(`Registro Fotográfico - Antes (${data.fotosAntes?.length || 0})`, data.fotosAntes || []);
   await renderImageGrid(`Registro Fotográfico - Después (${data.fotosDespues?.length || 0})`, data.fotosDespues || []);
+  await renderImageGrid("Foto de Bitácora", data.fotoBitacora ? [data.fotoBitacora] : []);
 
   // Receptor & Firma
   checkPageBreak(60);
@@ -204,32 +229,53 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
   }
 
   // Firmas
-  y += 20;
-  checkPageBreak(40);
+  y += 18;
+  checkPageBreak(58);
 
-  const firmaWidth = 60;
-  const firmaHeight = 25;
+  const firmaWidth = 62;
+  const firmaHeight = 30;
+  const firmaLineY = y + 18;
+  const leftSignatureX = 14;
+  const rightSignatureX = pageWidth - 14 - firmaWidth;
+  const tecnicoNombre = data.tecnico || "No registrado";
+  const receptorNombre = data.receptor?.nombre || "No registrado";
+  const tecnicoLines = doc.splitTextToSize(tecnicoNombre, firmaWidth);
+  const receptorLines = doc.splitTextToSize(receptorNombre, firmaWidth);
 
   if (data.firmaUrl) {
     try {
       const base64Firma = await getBase64ImageFromUrl(data.firmaUrl);
       if (base64Firma) {
-        doc.addImage(base64Firma, "PNG", pageWidth - 14 - firmaWidth, y - firmaHeight, firmaWidth, firmaHeight);
+        doc.addImage(
+          base64Firma,
+          getPdfImageFormat(base64Firma),
+          rightSignatureX,
+          firmaLineY - firmaHeight - 2,
+          firmaWidth,
+          firmaHeight
+        );
       }
     } catch (err) {
       console.error("Error cargando firma:", err);
     }
   }
 
-  doc.setDrawColor(100);
-  doc.line(14, y, 14 + firmaWidth, y);
-  doc.line(pageWidth - 14 - firmaWidth, y, pageWidth - 14, y);
-  y += 5;
+  doc.setFont("times", "italic");
+  doc.setFontSize(13);
+  doc.setTextColor(40);
+  doc.text(tecnicoLines, leftSignatureX, firmaLineY - 6);
+  doc.text(receptorLines, rightSignatureX, firmaLineY - 6);
 
+  doc.setDrawColor(100);
+  doc.line(leftSignatureX, firmaLineY, leftSignatureX + firmaWidth, firmaLineY);
+  doc.line(rightSignatureX, firmaLineY, rightSignatureX + firmaWidth, firmaLineY);
+
+  doc.setFont("helvetica", "normal");
   doc.setFontSize(9);
   doc.setTextColor(100);
-  doc.text("Firma Técnico", 14, y);
-  doc.text("Firma Receptor", pageWidth - 14 - firmaWidth, y);
+  doc.text("Firma Técnico", leftSignatureX, firmaLineY + 6);
+  doc.text("Firma Receptor", rightSignatureX, firmaLineY + 6);
+  y = firmaLineY + 12;
 
   // Footer
   const pageCount = doc.getNumberOfPages();

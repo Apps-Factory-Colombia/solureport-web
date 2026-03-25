@@ -5,6 +5,269 @@ import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache
 const VISITAS_CACHE_KEY = "visitas:list";
 const VISITAS_CACHE_TTL = 30_000;
 
+function toDateOnly(value?: string | null): string {
+  if (!value) return "";
+  return value.split("T")[0] || "";
+}
+
+async function syncVisitLiquidationValues(params: {
+  visitId: string;
+  tecnicoId?: string | null;
+  fecha: string;
+  periodoId?: string | null;
+  valorCobradoCliente: number;
+}) {
+  if (!params.tecnicoId || !params.fecha) return;
+
+  let liquidationQuery = supabase
+    .from("items_liquidacion")
+    .select("id, porcentaje")
+    .or(
+      params.periodoId
+        ? `referencia_id.eq.${params.visitId},and(tecnico_id.eq.${params.tecnicoId},periodo_id.eq.${params.periodoId},fecha.eq.${params.fecha},tipo.eq.visita_tecnica)`
+        : `referencia_id.eq.${params.visitId},and(tecnico_id.eq.${params.tecnicoId},fecha.eq.${params.fecha},tipo.eq.visita_tecnica)`
+    );
+
+  const { data: liquidationItems, error: liquidationLookupError } = await liquidationQuery;
+  if (liquidationLookupError) throw liquidationLookupError;
+
+  await Promise.all(
+    (liquidationItems || []).map(async (item: { id: string; porcentaje: number | string }) => {
+      const porcentaje = Number(item.porcentaje ?? 0) || 0;
+      const valorGanado = (params.valorCobradoCliente * porcentaje) / 100;
+
+      const { error: liquidationUpdateError } = await supabase
+        .from("items_liquidacion")
+        .update({
+          valor_base: params.valorCobradoCliente,
+          valor_ganado: valorGanado,
+        })
+        .eq("id", item.id);
+
+      if (liquidationUpdateError) throw liquidationUpdateError;
+    })
+  );
+
+  invalidateCachedValue("liquidacion:entries");
+}
+
+async function resolveVisitContext(params: {
+  tecnicoId?: string | null;
+  liderId?: string | null;
+  clienteId?: string | null;
+  fecha?: string;
+}) {
+  let grupoId: string | null = null;
+  let liderId = params.liderId || null;
+  let edificio: string | null = null;
+  let periodoId: string | null = null;
+
+  if (params.tecnicoId) {
+    const { data: tecnico } = await supabase
+      .from("usuarios")
+      .select("grupo_id")
+      .eq("id", params.tecnicoId)
+      .maybeSingle();
+    grupoId = tecnico?.grupo_id || null;
+
+    if (grupoId && !liderId) {
+      const { data: grupo } = await supabase
+        .from("grupos_trabajo")
+        .select("lider_id")
+        .eq("id", grupoId)
+        .maybeSingle();
+      liderId = grupo?.lider_id || null;
+    }
+  }
+
+  if (params.clienteId) {
+    const { data: cliente } = await supabase
+      .from("clientes")
+      .select("edificio")
+      .eq("id", params.clienteId)
+      .maybeSingle();
+    edificio = cliente?.edificio || null;
+  }
+
+  if (params.fecha) {
+    const { data: periodo } = await supabase
+      .from("periodos_liquidacion")
+      .select("id")
+      .eq("estado", "abierto")
+      .lte("fecha_inicio", params.fecha)
+      .gte("fecha_fin", params.fecha)
+      .order("fecha_inicio", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (periodo?.id) {
+      periodoId = periodo.id;
+    } else {
+      const { data: periodoReciente } = await supabase
+        .from("periodos_liquidacion")
+        .select("id")
+        .eq("estado", "abierto")
+        .order("fecha_inicio", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      periodoId = periodoReciente?.id || null;
+    }
+  }
+
+  return { grupoId, liderId, edificio, periodoId };
+}
+
+async function findMirrorReportId(params: {
+  tecnicoId?: string | null;
+  clienteId?: string | null;
+  fecha: string;
+  descripcion?: string | null;
+}) {
+  if (!params.tecnicoId || !params.fecha) return null;
+
+  let query = supabase
+    .from("reportes_actividad")
+    .select("id")
+    .eq("tipo", "visita_tecnica")
+    .eq("tecnico_id", params.tecnicoId)
+    .eq("fecha", params.fecha)
+    .order("fecha_creacion", { ascending: false })
+    .limit(1);
+
+  if (params.clienteId) {
+    query = query.eq("cliente_id", params.clienteId);
+  } else {
+    query = query.is("cliente_id", null);
+  }
+
+  if (params.descripcion) {
+    query = query.eq("descripcion", params.descripcion);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  if (data && data.length > 0) {
+    return data[0];
+  }
+
+  if (params.descripcion) {
+    return findMirrorReportId({ ...params, descripcion: null });
+  }
+
+  return null;
+}
+
+async function upsertMirrorAndApprovalForVisit(params: {
+  visitId: string;
+  tecnicoId?: string | null;
+  clienteId?: string | null;
+  descripcion?: string | null;
+  observaciones?: string | null;
+  fecha: string;
+  valorCobradoCliente: number;
+  liderId?: string | null;
+  previousDescripcion?: string | null;
+}) {
+  if (!params.tecnicoId || !params.fecha) return;
+
+  const { grupoId, liderId, edificio, periodoId } = await resolveVisitContext({
+    tecnicoId: params.tecnicoId,
+    liderId: params.liderId,
+    clienteId: params.clienteId,
+    fecha: params.fecha,
+  });
+
+  const reportMatch = await findMirrorReportId({
+    tecnicoId: params.tecnicoId,
+    clienteId: params.clienteId,
+    fecha: params.fecha,
+    descripcion: params.previousDescripcion || params.descripcion,
+  });
+
+  if (reportMatch?.id) {
+    const { error: reportUpdateError } = await supabase
+      .from("reportes_actividad")
+      .update({
+        lider_grupo_id: liderId,
+        grupo_id: grupoId,
+        cliente_id: params.clienteId || null,
+        fecha: params.fecha,
+        descripcion: params.descripcion || "",
+        observaciones: params.observaciones || null,
+        costo_actividad: params.valorCobradoCliente,
+        costo_administrable: true,
+        periodo_id: periodoId,
+      })
+      .eq("id", reportMatch.id);
+    if (reportUpdateError) throw reportUpdateError;
+  } else if (periodoId) {
+    const { error: reportInsertError } = await supabase
+      .from("reportes_actividad")
+      .insert({
+        tipo: "visita_tecnica",
+        tecnico_id: params.tecnicoId,
+        lider_grupo_id: liderId,
+        grupo_id: grupoId,
+        cliente_id: params.clienteId || null,
+        fecha: params.fecha,
+        descripcion: params.descripcion || "",
+        observaciones: params.observaciones || null,
+        estado_aprobacion_lider: "pendiente",
+        costo_actividad: params.valorCobradoCliente,
+        costo_administrable: true,
+        periodo_id: periodoId,
+      });
+    if (reportInsertError) throw reportInsertError;
+  }
+
+  const { data: approvalItems, error: approvalLookupError } = await supabase
+    .from("items_aprobacion")
+    .select("id")
+    .eq("tipo", "visita_tecnica")
+    .eq("referencia_id", params.visitId)
+    .order("fecha", { ascending: false });
+  if (approvalLookupError) throw approvalLookupError;
+
+  const approvalPayload = {
+    tipo: "visita_tecnica",
+    referencia_id: params.visitId,
+    lider_id: liderId,
+    tecnico_id: params.tecnicoId,
+    descripcion: params.descripcion || "",
+    edificio,
+    fecha: params.fecha,
+    valor: params.valorCobradoCliente,
+  };
+
+  const approvalItemIds = (approvalItems || []).map((item: { id: string }) => item.id);
+
+  if (approvalItemIds.length > 0) {
+    const { error: approvalUpdateError } = await supabase
+      .from("items_aprobacion")
+      .update(approvalPayload)
+      .in("id", approvalItemIds);
+    if (approvalUpdateError) throw approvalUpdateError;
+  } else {
+    const { error: approvalInsertError } = await supabase
+      .from("items_aprobacion")
+      .insert({
+        ...approvalPayload,
+        estado: "pendiente",
+        fecha_aprobacion: null,
+      });
+    if (approvalInsertError) throw approvalInsertError;
+  }
+
+  await syncVisitLiquidationValues({
+    visitId: params.visitId,
+    tecnicoId: params.tecnicoId,
+    fecha: params.fecha,
+    periodoId,
+    valorCobradoCliente: params.valorCobradoCliente,
+  });
+}
+
 function mapRow(row: any, fotosAntes: string[] = [], fotosDespues: string[] = []): TechnicalVisit {
   return {
     id: row.id,
@@ -27,6 +290,35 @@ function mapRow(row: any, fotosAntes: string[] = [], fotosDespues: string[] = []
     fotosDespues: fotosDespues.length > 0 ? fotosDespues : undefined,
     fechaCreacion: row.fecha_creacion?.split("T")[0] || "",
   };
+}
+
+async function getVisitPhotos(visitaId: string): Promise<{ fotosAntes: string[]; fotosDespues: string[] }> {
+  if (!visitaId) {
+    return { fotosAntes: [], fotosDespues: [] };
+  }
+
+  const { data, error } = await supabase
+    .from("visita_tecnica_fotos")
+    .select("tipo, url, orden")
+    .eq("visita_tecnica_id", visitaId)
+    .order("orden");
+  if (error) throw error;
+
+  const fotosAntes = (data || [])
+    .filter((foto: any) => foto.tipo === "antes")
+    .map((foto: any) => foto.url)
+    .filter(Boolean);
+  const fotosDespues = (data || [])
+    .filter((foto: any) => foto.tipo === "despues")
+    .map((foto: any) => foto.url)
+    .filter(Boolean);
+
+  return { fotosAntes, fotosDespues };
+}
+
+async function mapVisitWithMedia(row: any): Promise<TechnicalVisit> {
+  const { fotosAntes, fotosDespues } = await getVisitPhotos(row.id);
+  return mapRow(row, fotosAntes, fotosDespues);
 }
 
 export async function getVisitasTecnicas(): Promise<TechnicalVisit[]> {
@@ -65,6 +357,8 @@ export async function getVisitasTecnicas(): Promise<TechnicalVisit[]> {
 }
 
 export async function createVisitaTecnica(v: Partial<TechnicalVisit> & { liderId?: string; tipoVisita?: string; grupoId?: string; periodoId?: string; costoActividad?: number }): Promise<TechnicalVisit> {
+  const fechaVisita = v.fecha || new Date().toISOString().split("T")[0];
+  const valorCobradoCliente = Number(v.valorCobradoCliente ?? v.costoActividad ?? 0) || 0;
   const { data, error } = await supabase
     .from("visitas_tecnicas")
     .insert({
@@ -75,76 +369,41 @@ export async function createVisitaTecnica(v: Partial<TechnicalVisit> & { liderId
       tipo_visita: v.tipoVisita || "imprevisto",
       estado: v.estado || "pendiente",
       fecha_inicio: v.fecha ? new Date(v.fecha).toISOString() : new Date().toISOString(),
-      valor_cobrado_cliente: v.valorCobradoCliente || 0,
+      valor_cobrado_cliente: valorCobradoCliente,
     })
     .select()
     .single();
   if (error) throw error;
 
-  // Buscar grupo y período activo del técnico si no se proporcionan
-  let grupoId = v.grupoId;
-  let periodoId = v.periodoId;
-
-  if (!grupoId && v.tecnicoId) {
-    const { data: tecnico } = await supabase
-      .from("usuarios")
-      .select("grupo_id")
-      .eq("id", v.tecnicoId)
-      .single();
-    grupoId = tecnico?.grupo_id || undefined;
-  }
-
-  if (!periodoId) {
-    const fechaVisita = v.fecha || new Date().toISOString().split("T")[0];
-    const { data: periodo } = await supabase
-      .from("periodos_liquidacion")
-      .select("id")
-      .eq("estado", "abierto")
-      .lte("fecha_inicio", fechaVisita)
-      .gte("fecha_fin", fechaVisita)
-      .maybeSingle();
-    periodoId = periodo?.id || undefined;
-
-    if (!periodoId) {
-      const { data: periodoReciente } = await supabase
-        .from("periodos_liquidacion")
-        .select("id")
-        .eq("estado", "abierto")
-        .order("fecha_inicio", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      periodoId = periodoReciente?.id || undefined;
-    }
-  }
-
-  // Crear espejo en reportes_actividad para que aparezca en Aprobaciones
-  if (periodoId) {
-    await supabase.from("reportes_actividad").insert({
-      tipo: "visita_tecnica",
-      tecnico_id: v.tecnicoId,
-      lider_grupo_id: v.liderId || null,
-      grupo_id: grupoId || null,
-      cliente_id: v.clienteId || null,
-      fecha: v.fecha || new Date().toISOString().split("T")[0],
-      descripcion: v.descripcion || "",
-      observaciones: v.observaciones || null,
-      estado_aprobacion_lider: "pendiente",
-      costo_actividad: v.costoActividad || 0,
-      costo_administrable: true,
-      periodo_id: periodoId,
-    });
-  }
+  await upsertMirrorAndApprovalForVisit({
+    visitId: data.id,
+    tecnicoId: data.tecnico_id,
+    clienteId: data.cliente_id,
+    descripcion: data.descripcion,
+    observaciones: data.observaciones,
+    fecha: fechaVisita,
+    valorCobradoCliente,
+    liderId: data.lider_id || v.liderId,
+  });
 
   invalidateCachedValue(VISITAS_CACHE_KEY);
   invalidateCachedValue("reportes-actividad:list");
-  return mapRow(data);
+  return mapVisitWithMedia(data);
 }
 
 export async function updateVisitaTecnica(id: string, v: Partial<TechnicalVisit>): Promise<TechnicalVisit> {
+  const { data: previousVisit, error: previousVisitError } = await supabase
+    .from("visitas_tecnicas")
+    .select("id, tecnico_id, lider_id, cliente_id, fecha_inicio, descripcion, observaciones, valor_cobrado_cliente")
+    .eq("id", id)
+    .single();
+  if (previousVisitError) throw previousVisitError;
+
   const updateData: any = {};
   if (v.estado !== undefined) updateData.estado = v.estado;
   if (v.valorCobradoCliente !== undefined) updateData.valor_cobrado_cliente = v.valorCobradoCliente;
   if (v.descripcion !== undefined) updateData.descripcion = v.descripcion;
+  if (v.observaciones !== undefined) updateData.observaciones = v.observaciones;
 
   const { data, error } = await supabase
     .from("visitas_tecnicas")
@@ -154,20 +413,21 @@ export async function updateVisitaTecnica(id: string, v: Partial<TechnicalVisit>
     .single();
   if (error) throw error;
 
-  if (v.descripcion !== undefined) {
-    const fecha = data.fecha_inicio?.split("T")[0];
-
-    await supabase
-      .from("reportes_actividad")
-      .update({ descripcion: v.descripcion })
-      .eq("tipo", "visita_tecnica")
-      .eq("tecnico_id", data.tecnico_id)
-      .eq("fecha", fecha);
-  }
+  await upsertMirrorAndApprovalForVisit({
+    visitId: data.id,
+    tecnicoId: data.tecnico_id,
+    clienteId: data.cliente_id,
+    descripcion: data.descripcion,
+    observaciones: data.observaciones,
+    fecha: toDateOnly(data.fecha_inicio),
+    valorCobradoCliente: Number(data.valor_cobrado_cliente ?? 0) || 0,
+    liderId: data.lider_id,
+    previousDescripcion: previousVisit.descripcion,
+  });
 
   invalidateCachedValue(VISITAS_CACHE_KEY);
   invalidateCachedValue("reportes-actividad:list");
-  return mapRow(data);
+  return mapVisitWithMedia(data);
 }
 
 export async function deleteVisitaTecnica(id: string): Promise<void> {

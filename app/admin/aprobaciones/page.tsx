@@ -52,8 +52,11 @@ import { getReportesActividad, updateCostoActividadAdmin, updateEstadoAprobacion
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
+import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { cn } from "@/lib/utils";
+import { generateReportePDF } from "@/lib/utils/pdf-generator";
+import { CompanySettings } from "@/lib/types";
 import {
   Pagination,
   PaginationContent,
@@ -63,6 +66,8 @@ import {
   PaginationNext,
   PaginationPrevious,
 } from "@/components/ui/pagination";
+
+const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
@@ -131,6 +136,7 @@ export default function AprobacionesPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
+  const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [search, setSearch] = useState("");
   const [tecnicoFilter, setTecnicoFilter] = useState("");
   const [dateFilter, setDateFilter] = useState("");
@@ -153,8 +159,8 @@ export default function AprobacionesPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [r, u, c, g] = await Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos()]);
-      setReports(r); setUsers(u); setClients(c); setGroups(g);
+      const [r, u, c, g, s] = await Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion()]);
+      setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s);
     } catch (err) {
       console.error("Error cargando aprobaciones:", err);
     } finally {
@@ -193,6 +199,190 @@ export default function AprobacionesPage() {
     },
     [costDraft, inlineCostDrafts, selectedReport]
   );
+
+  const buildMultilineText = useCallback((parts: Array<string | undefined | null>) => {
+    return parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
+  }, []);
+
+  const getSafeFileSegment = useCallback((value: string) => {
+    return value
+      .trim()
+      .replace(/\s+/g, "_")
+      .replace(/[^a-zA-Z0-9_-]/g, "") || "reporte";
+  }, []);
+
+  const getReportEmailContext = useCallback((report: ActivityReport) => {
+    const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+    const tech = usersById.get(report.tecnicoId);
+    const group = groupsById.get(report.grupoId);
+    const tipo = getTipoConfig(String(report.tipo));
+    const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
+    const operationalEmail = companySettings?.correoEmpresa || DEFAULT_NOTIFICATION_BCC;
+    const tecnicoNombre = tech ? `${tech.nombre} ${tech.apellido}`.trim() : "No disponible";
+    const clienteNombre = client?.contacto || client?.nombre || "Cliente";
+    const edificio = client?.edificio || group?.nombre || tipo.label;
+    const fileBaseName = getSafeFileSegment(client?.edificio || group?.nombre || tipo.label);
+    const resumen = report.descripcion || report.especificacion || report.observaciones || `Servicio de ${tipo.label.toLowerCase()}`;
+
+    const detailLines = (() => {
+      if (report.tipo === "visita_tecnica") {
+        return buildMultilineText([
+          report.descripcion,
+          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        ]);
+      }
+
+      if (report.tipo === "recorrido") {
+        return buildMultilineText([
+          report.descripcion,
+          report.puntoPartida ? `Punto de partida: ${report.puntoPartida}` : undefined,
+          report.puntoLlegada ? `Punto de llegada: ${report.puntoLlegada}` : undefined,
+          report.tipoRecorrido ? `Tipo de recorrido: ${report.tipoRecorrido === "con_herramienta" ? "Con herramienta" : "Normal"}` : undefined,
+          report.fotoHerramienta ? "Incluye evidencia fotográfica de herramienta." : undefined,
+          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        ]);
+      }
+
+      if (report.tipo === "actividad_grupal") {
+        return buildMultilineText([
+          report.descripcion,
+          report.especificacion ? `Especificación: ${report.especificacion}` : undefined,
+          group?.nombre ? `Grupo: ${group.nombre}` : undefined,
+          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        ]);
+      }
+
+      return buildMultilineText([
+        report.descripcion,
+        report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+      ]);
+    })();
+
+    const pdfData = {
+      titulo:
+        report.tipo === "mantenimiento_preventivo"
+          ? "REPORTE DE MANTENIMIENTO PREVENTIVO"
+          : report.tipo === "visita_tecnica"
+            ? "REPORTE DE VISITA TÉCNICA"
+            : report.tipo === "recorrido"
+              ? "REPORTE DE RECORRIDO"
+              : "REPORTE DE ACTIVIDAD GRUPAL",
+      subtitulo:
+        report.tipo === "visita_tecnica"
+          ? "Actividad aprobada en módulo de aprobaciones"
+          : report.tipo === "recorrido"
+            ? report.tipoRecorrido === "con_herramienta"
+              ? "Recorrido con herramienta"
+              : "Recorrido normal"
+            : group?.nombre
+              ? `Grupo: ${group.nombre}`
+              : undefined,
+      empresa: companyName,
+      fecha: report.fecha,
+      tecnico: tecnicoNombre,
+      cliente: client?.nombre || "—",
+      edificio,
+      direccionCliente: client?.direccion || "—",
+      correoCliente: client?.correo || "—",
+      observaciones: detailLines || resumen,
+      fotosAntes: report.fotosAntes,
+      fotosDespues: report.fotosDespues,
+      firmaUrl: report.firmaReceptor,
+      receptor: report.datosReceptor,
+    };
+
+    const template =
+      report.tipo === "mantenimiento_preventivo"
+        ? "maintenance-report"
+        : report.tipo === "visita_tecnica"
+          ? "technical-visit-report"
+          : "approval-report";
+
+    const templateData =
+      report.tipo === "mantenimiento_preventivo"
+        ? {
+          companyName,
+          clienteNombre,
+          edificio,
+          fecha: report.fecha,
+          tecnicoNombre,
+          observaciones: detailLines || resumen,
+        }
+        : report.tipo === "visita_tecnica"
+          ? {
+            companyName,
+            clienteNombre,
+            edificio,
+            fecha: report.fecha,
+            tecnicoNombre,
+            tipoVisita: "aprobada",
+            descripcion: report.descripcion,
+            observaciones: report.observaciones,
+          }
+          : {
+            companyName,
+            clienteNombre,
+            edificio,
+            fecha: report.fecha,
+            tecnicoNombre,
+            tipoInforme: tipo.label,
+            resumen,
+            observaciones: detailLines !== resumen ? detailLines : undefined,
+          };
+
+    return {
+      client,
+      tech,
+      tipo,
+      companyName,
+      operationalEmail,
+      tecnicoNombre,
+      clienteNombre,
+      edificio,
+      pdfData,
+      template,
+      templateData,
+      subject: `Reporte de ${tipo.label.toLowerCase()} - ${edificio}`,
+      filename: `${getSafeFileSegment(tipo.label)}_${fileBaseName}_${report.fecha}.pdf`,
+      ccRecipients: [client?.correoAliado, operationalEmail].filter(Boolean),
+    };
+  }, [buildMultilineText, clientsById, companySettings, getSafeFileSegment, groupsById, usersById]);
+
+  const sendApprovalEmail = useCallback(async (report: ActivityReport) => {
+    const context = getReportEmailContext(report);
+
+    if (!context.client?.correo) {
+      console.warn("Aprobación sin correo de cliente, se omite envío automático:", report.id);
+      return;
+    }
+
+    const pdfBase64 = await generateReportePDF(context.pdfData, true) as string;
+    const base64Content = pdfBase64.split(",")[1];
+
+    const response = await fetch("/api/send-email", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        to: context.client.correo,
+        cc: context.ccRecipients,
+        subject: context.subject,
+        template: context.template,
+        data: context.templateData,
+        replyTo: context.operationalEmail,
+        pdfAttachment: {
+          filename: context.filename,
+          base64: base64Content,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.error || "No se pudo enviar el correo de aprobación.");
+    }
+  }, [getReportEmailContext]);
 
   const persistCost = useCallback(async (report: ActivityReport, nextCost: number) => {
     await updateCostoActividadAdmin(report.id, nextCost);
@@ -241,6 +431,11 @@ export default function AprobacionesPage() {
         report = { ...report, costoActividad: nextCost };
       }
       await updateEstadoAprobacion(report.id, "aprobado");
+      try {
+        await sendApprovalEmail(report);
+      } catch (emailErr) {
+        console.error("Error enviando correo de aprobación:", emailErr);
+      }
       const tipo = getTipoConfig(String(report.tipo));
       await createNotificacion({
         usuarioId: report.tecnicoId,

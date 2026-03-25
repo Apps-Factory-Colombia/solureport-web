@@ -41,16 +41,24 @@ export function GroupDialog({
   const [nombre, setNombre] = useState("");
   const [liderId, setLiderId] = useState("");
   const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
+  const [memberSearch, setMemberSearch] = useState("");
+
+  const totalMembers = Array.from(
+    new Set(liderId ? [liderId, ...selectedMembers] : selectedMembers)
+  );
+  const hasValidMemberCount = totalMembers.length >= 1;
 
   useEffect(() => {
     if (group) {
       setNombre(group.nombre);
       setLiderId(group.liderId);
       setSelectedMembers(group.miembros);
+      setMemberSearch("");
     } else {
       setNombre("");
       setLiderId("");
       setSelectedMembers([]);
+      setMemberSearch("");
     }
   }, [group, open]);
 
@@ -58,25 +66,19 @@ export function GroupDialog({
     setSelectedMembers((prev) =>
       prev.includes(userId)
         ? prev.filter((id) => id !== userId)
-        : prev.length < 5
-          ? [...prev, userId]
-          : prev
+        : [...prev, userId]
     );
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (selectedMembers.length < 2 || selectedMembers.length > 5) return;
-
-    const finalMembers = selectedMembers.includes(liderId)
-      ? selectedMembers
-      : [liderId, ...selectedMembers];
+    if (!liderId || !hasValidMemberCount) return;
 
     onSave({
       id: group?.id || `g${Date.now()}`,
       nombre,
       liderId,
-      miembros: finalMembers,
+      miembros: totalMembers,
       estado: "activo",
       fechaCreacion:
         group?.fechaCreacion || new Date().toISOString().split("T")[0],
@@ -93,6 +95,11 @@ export function GroupDialog({
   const memberOptions = activeUsers.filter(
     (u) => u.rol === "tecnico" || u.rol === "lider" || u.esLider
   );
+
+  const filteredMemberOptions = memberOptions.filter((user) => {
+    const fullName = `${user.nombre} ${user.apellido}`.toLowerCase();
+    return fullName.includes(memberSearch.trim().toLowerCase());
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -132,11 +139,17 @@ export function GroupDialog({
 
           <div className="space-y-2">
             <Label className="text-foreground/80">
-              Miembros ({selectedMembers.length}/5)
+              Miembros ({totalMembers.length})
             </Label>
             <p className="text-xs text-muted-foreground">
-              Mínimo 2, máximo 5 miembros por grupo
+              Mínimo 1 miembro por grupo. El líder cuenta como miembro.
             </p>
+            <Input
+              value={memberSearch}
+              onChange={(e) => setMemberSearch(e.target.value)}
+              placeholder="Buscar miembro por nombre"
+              className="bg-secondary/50 border-border/50"
+            />
             <div className="flex flex-wrap gap-2 mb-2">
               {selectedMembers.map((memberId) => {
                 const member = memberOptions.find((t) => t.id === memberId);
@@ -158,28 +171,30 @@ export function GroupDialog({
               })}
             </div>
             <div className="max-h-40 overflow-y-auto space-y-2 rounded-lg border border-border/50 bg-secondary/30 p-3">
-              {memberOptions.map((tech) => (
-                <div
-                  key={tech.id}
-                  className="flex items-center gap-2"
-                >
-                  <Checkbox
-                    id={`member-${tech.id}`}
-                    checked={selectedMembers.includes(tech.id)}
-                    onCheckedChange={() => handleToggleMember(tech.id)}
-                    disabled={
-                      !selectedMembers.includes(tech.id) &&
-                      selectedMembers.length >= 5
-                    }
-                  />
-                  <label
-                    htmlFor={`member-${tech.id}`}
-                    className="text-sm text-foreground/80 cursor-pointer"
+              {filteredMemberOptions.length > 0 ? (
+                filteredMemberOptions.map((tech) => (
+                  <div
+                    key={tech.id}
+                    className="flex items-center gap-2"
                   >
-                    {tech.nombre} {tech.apellido}
-                  </label>
-                </div>
-              ))}
+                    <Checkbox
+                      id={`member-${tech.id}`}
+                      checked={selectedMembers.includes(tech.id)}
+                      onCheckedChange={() => handleToggleMember(tech.id)}
+                    />
+                    <label
+                      htmlFor={`member-${tech.id}`}
+                      className="text-sm text-foreground/80 cursor-pointer"
+                    >
+                      {tech.nombre} {tech.apellido}
+                    </label>
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No se encontraron miembros con esa búsqueda.
+                </p>
+              )}
             </div>
           </div>
 
@@ -194,7 +209,7 @@ export function GroupDialog({
             </Button>
             <Button
               type="submit"
-              disabled={selectedMembers.length < 2 || !liderId || !nombre}
+              disabled={!hasValidMemberCount || !liderId || !nombre}
               className="bg-gold hover:bg-gold-dark text-background font-semibold"
             >
               {group ? "Guardar Cambios" : "Crear Grupo"}

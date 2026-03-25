@@ -36,6 +36,7 @@ import {
   Wrench,
   ClipboardCheck,
   Route,
+  Download,
   CheckCircle2,
   Clock,
   MapPin,
@@ -49,12 +50,14 @@ import {
   Loader2,
   Users,
 } from "lucide-react";
-import { ActivityReport, User, Client, WorkGroup } from "@/lib/types";
+import { ActivityReport, User, Client, WorkGroup, CompanySettings } from "@/lib/types";
 import { deleteReporteActividadAdmin, getReportesActividad } from "@/lib/supabase/services/reportes-actividad";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
+import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { cn } from "@/lib/utils";
+import { generateReportePDF } from "@/lib/utils/pdf-generator";
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
@@ -69,6 +72,7 @@ export default function InformesPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
+  const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [grupoFilter, setGrupoFilter] = useState<string>("todos");
@@ -79,8 +83,8 @@ export default function InformesPage() {
 
   const loadData = async () => {
     setLoading(true);
-    Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos()])
-      .then(([r, u, c, g]) => { setReports(r); setUsers(u); setClients(c); setGroups(g); })
+    Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion()])
+      .then(([r, u, c, g, s]) => { setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); })
       .catch((err) => console.error("Error cargando informes:", err))
       .finally(() => setLoading(false));
   };
@@ -130,6 +134,106 @@ export default function InformesPage() {
     if (tipo === "visita_tecnica") return "Visita Técnica";
     if (tipo === "recorrido") return "Recorrido";
     return "Actividad Grupal";
+  };
+
+  const buildMultilineText = (parts: Array<string | undefined | null>) =>
+    parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
+
+  const getEvidenceCount = (report: ActivityReport) => {
+    return (report.fotosAntes?.length || 0) + (report.fotosDespues?.length || 0) + (report.fotoBitacora ? 1 : 0);
+  };
+
+  const getReportContext = (report: ActivityReport) => {
+    const tech = usersById.get(report.tecnicoId);
+    const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+    const group = groupsById.get(report.grupoId);
+    const tecnicoNombre = tech ? `${tech.nombre} ${tech.apellido}`.trim() : "—";
+    const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
+    const tipoLabel = getTipoLabel(report.tipo);
+    const edificio = client?.edificio || group?.nombre || tipoLabel;
+
+    const observaciones = (() => {
+      if (report.tipo === "visita_tecnica") {
+        return buildMultilineText([
+          report.descripcion,
+          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        ]);
+      }
+
+      if (report.tipo === "recorrido") {
+        return buildMultilineText([
+          report.descripcion,
+          report.puntoPartida ? `Punto de partida: ${report.puntoPartida}` : undefined,
+          report.puntoLlegada ? `Punto de llegada: ${report.puntoLlegada}` : undefined,
+          report.tipoRecorrido ? `Tipo de recorrido: ${report.tipoRecorrido === "con_herramienta" ? "Con herramienta" : "Normal"}` : undefined,
+          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        ]);
+      }
+
+      if (report.tipo === "actividad_grupal") {
+        return buildMultilineText([
+          report.descripcion,
+          report.especificacion ? `Especificación: ${report.especificacion}` : undefined,
+          group?.nombre ? `Grupo: ${group.nombre}` : undefined,
+          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        ]);
+      }
+
+      return buildMultilineText([
+        report.descripcion,
+        report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+      ]);
+    })();
+
+    return {
+      client,
+      tech,
+      group,
+      pdfData: {
+        titulo:
+          report.tipo === "mantenimiento_preventivo"
+            ? "REPORTE DE MANTENIMIENTO PREVENTIVO"
+            : report.tipo === "visita_tecnica"
+              ? "REPORTE DE VISITA TÉCNICA"
+              : report.tipo === "recorrido"
+                ? "REPORTE DE RECORRIDO"
+                : "REPORTE DE ACTIVIDAD GRUPAL",
+        subtitulo:
+          report.tipo === "visita_tecnica"
+            ? "Informe técnico consolidado"
+            : report.tipo === "recorrido"
+              ? report.tipoRecorrido === "con_herramienta"
+                ? "Recorrido con herramienta"
+                : "Recorrido normal"
+              : group?.nombre
+                ? `Grupo: ${group.nombre}`
+                : undefined,
+        empresa: companyName,
+        fecha: report.fecha,
+        tecnico: tecnicoNombre,
+        cliente: client?.nombre || "—",
+        edificio,
+        direccionCliente: client?.direccion || "—",
+        correoCliente: client?.correo || "—",
+        observaciones: observaciones || report.descripcion || "Sin detalle registrado.",
+        fotosAntes: report.fotosAntes,
+        fotosDespues: report.fotosDespues,
+        fotoBitacora: report.fotoBitacora,
+        firmaUrl: report.firmaReceptor,
+        receptor: report.datosReceptor,
+      },
+    };
+  };
+
+  const handleDownloadPDF = async (report: ActivityReport) => {
+    const { pdfData } = getReportContext(report);
+
+    try {
+      await generateReportePDF(pdfData);
+    } catch (err) {
+      console.error("Error generando PDF del informe técnico:", err);
+      alert("Hubo un error al generar el PDF del informe.");
+    }
   };
 
   const openReportDetail = (report: ActivityReport) => {
@@ -289,7 +393,7 @@ export default function InformesPage() {
                       <TableHead className="text-muted-foreground">Líder</TableHead>
                       <TableHead className="text-muted-foreground">Aprobación</TableHead>
                       <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-12"></TableHead>
+                      <TableHead className="text-muted-foreground w-24"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -339,7 +443,7 @@ export default function InformesPage() {
                           <TableCell>
                             <div className="flex items-center gap-1 text-xs text-muted-foreground">
                               <Image className="h-3 w-3" />
-                              {(r.fotosAntes?.length || 0) + (r.fotosDespues?.length || 0)}
+                              {getEvidenceCount(r)}
                             </div>
                           </TableCell>
                           <TableCell className="text-xs text-foreground/80">
@@ -377,6 +481,17 @@ export default function InformesPage() {
                                 }}
                               >
                                 <Eye className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-gold"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleDownloadPDF(r);
+                                }}
+                              >
+                                <Download className="h-4 w-4" />
                               </Button>
                               <Button
                                 variant="ghost"
@@ -422,6 +537,7 @@ export default function InformesPage() {
                       <TableHead className="text-muted-foreground">Fotos</TableHead>
                       <TableHead className="text-muted-foreground">Aprobación Líder</TableHead>
                       <TableHead className="text-muted-foreground text-right">Costo</TableHead>
+                      <TableHead className="text-muted-foreground w-24"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -450,7 +566,7 @@ export default function InformesPage() {
                           <TableCell>
                             <div className="flex items-center gap-1 text-xs text-muted-foreground">
                               <Image className="h-3 w-3" />
-                              {(r.fotosAntes?.length || 0) + (r.fotosDespues?.length || 0)}
+                              {getEvidenceCount(r)}
                             </div>
                           </TableCell>
                           <TableCell>
@@ -485,6 +601,17 @@ export default function InformesPage() {
                                 }}
                               >
                                 <Eye className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-gold"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleDownloadPDF(r);
+                                }}
+                              >
+                                <Download className="h-4 w-4" />
                               </Button>
                               <Button
                                 variant="ghost"
@@ -531,7 +658,7 @@ export default function InformesPage() {
                       <TableHead className="text-muted-foreground">Herramienta</TableHead>
                       <TableHead className="text-muted-foreground">Aprobación</TableHead>
                       <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-12"></TableHead>
+                      <TableHead className="text-muted-foreground w-24"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -613,6 +740,17 @@ export default function InformesPage() {
                               <Button
                                 variant="ghost"
                                 size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-gold"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleDownloadPDF(r);
+                                }}
+                              >
+                                <Download className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
                                 className="h-8 w-8 text-muted-foreground hover:text-destructive"
                                 onClick={(event) => {
                                   event.stopPropagation();
@@ -653,7 +791,7 @@ export default function InformesPage() {
                       <TableHead className="text-muted-foreground">Líder</TableHead>
                       <TableHead className="text-muted-foreground">Aprobación</TableHead>
                       <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-12"></TableHead>
+                      <TableHead className="text-muted-foreground w-24"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -721,6 +859,17 @@ export default function InformesPage() {
                               <Button
                                 variant="ghost"
                                 size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-gold"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleDownloadPDF(r);
+                                }}
+                              >
+                                <Download className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
                                 className="h-8 w-8 text-muted-foreground hover:text-destructive"
                                 onClick={(event) => {
                                   event.stopPropagation();
@@ -761,7 +910,7 @@ export default function InformesPage() {
             const leader = usersById.get(selectedReport.liderGrupoId);
             const client = selectedReport.clienteId ? clientsById.get(selectedReport.clienteId) : null;
             const group = groupsById.get(selectedReport.grupoId);
-            const totalFotos = (selectedReport.fotosAntes?.length || 0) + (selectedReport.fotosDespues?.length || 0);
+            const totalFotos = getEvidenceCount(selectedReport);
 
             return (
               <div className="space-y-5">
@@ -807,6 +956,18 @@ export default function InformesPage() {
                       <p className="text-xs text-muted-foreground">Cliente / Proyecto</p>
                       <p className="text-sm font-medium text-foreground">{client.nombre} — {client.edificio}</p>
                     </div>
+                  )}
+                  {client && (
+                    <>
+                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 md:col-span-2 lg:col-span-3">
+                        <p className="text-xs text-muted-foreground">Dirección</p>
+                        <p className="text-sm font-medium text-foreground">{client.direccion || "Sin dirección registrada"}</p>
+                      </div>
+                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 md:col-span-2 lg:col-span-3">
+                        <p className="text-xs text-muted-foreground">Correo del cliente</p>
+                        <p className="text-sm font-medium text-foreground break-all">{client.correo || "Sin correo registrado"}</p>
+                      </div>
+                    </>
                   )}
                 </div>
 
@@ -904,9 +1065,34 @@ export default function InformesPage() {
                           </div>
                         </div>
                       )}
+                      {selectedReport.fotoBitacora && (
+                        <div className="space-y-2 md:col-span-2">
+                          <p className="text-xs text-muted-foreground">Foto de bitácora</p>
+                          <a
+                            href={selectedReport.fotoBitacora}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/20"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={selectedReport.fotoBitacora} alt="Foto de bitácora" className="h-full w-full object-cover" />
+                          </a>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
+
+                <div className="flex justify-end gap-2 border-t border-border/50 pt-2">
+                  <Button
+                    variant="outline"
+                    className="gap-2 border-border/50 text-foreground/80"
+                    onClick={() => handleDownloadPDF(selectedReport)}
+                  >
+                    <Download className="h-4 w-4" />
+                    Descargar PDF
+                  </Button>
+                </div>
               </div>
             );
           })()}

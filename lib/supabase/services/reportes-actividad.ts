@@ -114,6 +114,11 @@ interface ParticipanteRelacionRow {
   tecnico_id: string;
 }
 
+interface LegacyActivityMirrorMaps {
+  strict: Map<string, ActivityReport>;
+  fallback: Map<string, ActivityReport>;
+}
+
 function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues: string[]): ActivityReport {
   const normalizedTipo: ActivityReport["tipo"] =
     row.tipo === "actividad"
@@ -153,7 +158,191 @@ function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues:
   };
 }
 
-async function getRegistrosComoReports(): Promise<ActivityReport[]> {
+function addOneDay(date: string): string {
+  const nextDate = new Date(`${date}T00:00:00`);
+  nextDate.setDate(nextDate.getDate() + 1);
+  return nextDate.toISOString().split("T")[0];
+}
+
+function buildLegacyActivityMirrorKey(params: {
+  tecnicoId: string;
+  fecha: string;
+  grupoId?: string | null;
+  clienteId?: string | null;
+}) {
+  return [params.tecnicoId, params.fecha, params.grupoId || "", params.clienteId || ""].join("|");
+}
+
+function buildLegacyActivityFallbackKey(params: {
+  tecnicoId: string;
+  fecha: string;
+  grupoId?: string | null;
+}) {
+  return [params.tecnicoId, params.fecha, params.grupoId || ""].join("|");
+}
+
+function enrichLegacyActivityReport(
+  report: ActivityReport,
+  mirrors?: LegacyActivityMirrorMaps
+): ActivityReport {
+  if (!mirrors) return report;
+
+  const strictKey = buildLegacyActivityMirrorKey({
+    tecnicoId: report.tecnicoId,
+    fecha: report.fecha,
+    grupoId: report.grupoId,
+    clienteId: report.clienteId,
+  });
+  const fallbackKey = buildLegacyActivityFallbackKey({
+    tecnicoId: report.tecnicoId,
+    fecha: report.fecha,
+    grupoId: report.grupoId,
+  });
+
+  const mirror = mirrors.strict.get(strictKey) || mirrors.fallback.get(fallbackKey);
+
+  if (!mirror) return report;
+
+  return {
+    ...report,
+    observaciones: mirror.observaciones || report.observaciones,
+    fotosAntes: mirror.fotosAntes || report.fotosAntes,
+    fotosDespues: mirror.fotosDespues || report.fotosDespues,
+    firmaReceptor: mirror.firmaReceptor || report.firmaReceptor,
+    datosReceptor: mirror.datosReceptor || report.datosReceptor,
+    bitacora: mirror.bitacora ?? report.bitacora,
+    fotoBitacora: mirror.fotoBitacora || report.fotoBitacora,
+    fechaCreacion: mirror.fechaCreacion || report.fechaCreacion,
+  };
+}
+
+async function syncVisitLiquidationFromReport(params: {
+  reportId: string;
+  tecnicoId: string;
+  fecha: string;
+  periodoId?: string | null;
+  costoActividad: number;
+  visitIds?: string[];
+}) {
+  const orFilters = [
+    `referencia_id.eq.${params.reportId}`,
+    ...(params.visitIds || []).map((visitId) => `referencia_id.eq.${visitId}`),
+    params.periodoId
+      ? `and(tecnico_id.eq.${params.tecnicoId},periodo_id.eq.${params.periodoId},fecha.eq.${params.fecha},tipo.eq.visita_tecnica)`
+      : `and(tecnico_id.eq.${params.tecnicoId},fecha.eq.${params.fecha},tipo.eq.visita_tecnica)`,
+  ];
+
+  const { data: liquidationItems, error: liquidationLookupError } = await supabase
+    .from("items_liquidacion")
+    .select("id, porcentaje")
+    .or(orFilters.join(","));
+  if (liquidationLookupError) throw liquidationLookupError;
+
+  await Promise.all(
+    (liquidationItems || []).map(async (item: { id: string; porcentaje: number | string }) => {
+      const porcentaje = Number(item.porcentaje ?? 0) || 0;
+      const valorGanado = (params.costoActividad * porcentaje) / 100;
+
+      const { error: liquidationUpdateError } = await supabase
+        .from("items_liquidacion")
+        .update({
+          valor_base: params.costoActividad,
+          valor_ganado: valorGanado,
+        })
+        .eq("id", item.id);
+      if (liquidationUpdateError) throw liquidationUpdateError;
+    })
+  );
+
+  invalidateCachedValue("liquidacion:entries");
+}
+
+async function syncVisitCostFromApprovalReport(reportId: string, costoActividad: number): Promise<void> {
+  const { data: report, error: reportError } = await supabase
+    .from("reportes_actividad")
+    .select("id, tipo, tecnico_id, cliente_id, fecha, descripcion, periodo_id")
+    .eq("id", reportId)
+    .single();
+  if (reportError) throw reportError;
+
+  if (report?.tipo !== "visita_tecnica") return;
+
+  const startDate = report.fecha;
+  const endDate = addOneDay(report.fecha);
+
+  let visitQuery = supabase
+    .from("visitas_tecnicas")
+    .select("id, descripcion")
+    .eq("tecnico_id", report.tecnico_id)
+    .gte("fecha_inicio", startDate)
+    .lt("fecha_inicio", endDate);
+
+  if (report.cliente_id) {
+    visitQuery = visitQuery.eq("cliente_id", report.cliente_id);
+  } else {
+    visitQuery = visitQuery.is("cliente_id", null);
+  }
+
+  const { data: candidateVisits, error: visitsLookupError } = await visitQuery;
+  if (visitsLookupError) throw visitsLookupError;
+
+  let visitIds = (candidateVisits || []).map((visit: { id: string }) => visit.id);
+
+  if (visitIds.length > 1 && report.descripcion) {
+    const exactMatches = (candidateVisits || [])
+      .filter((visit: { id: string; descripcion?: string | null }) => visit.descripcion === report.descripcion)
+      .map((visit: { id: string }) => visit.id);
+
+    if (exactMatches.length > 0) {
+      visitIds = exactMatches;
+    }
+  }
+
+  if (visitIds.length > 0) {
+    const { error: visitsUpdateError } = await supabase
+      .from("visitas_tecnicas")
+      .update({ valor_cobrado_cliente: costoActividad })
+      .in("id", visitIds);
+    if (visitsUpdateError) throw visitsUpdateError;
+
+    const { error: approvalUpdateError } = await supabase
+      .from("items_aprobacion")
+      .update({ valor: costoActividad })
+      .eq("tipo", "visita_tecnica")
+      .in("referencia_id", visitIds);
+    if (approvalUpdateError) throw approvalUpdateError;
+
+    await syncVisitLiquidationFromReport({
+      reportId,
+      tecnicoId: report.tecnico_id,
+      fecha: report.fecha,
+      periodoId: report.periodo_id,
+      costoActividad,
+      visitIds,
+    });
+  } else {
+    const { error: approvalUpdateError } = await supabase
+      .from("items_aprobacion")
+      .update({ valor: costoActividad })
+      .eq("tipo", "visita_tecnica")
+      .eq("tecnico_id", report.tecnico_id)
+      .eq("fecha", report.fecha);
+    if (approvalUpdateError) throw approvalUpdateError;
+
+    await syncVisitLiquidationFromReport({
+      reportId,
+      tecnicoId: report.tecnico_id,
+      fecha: report.fecha,
+      periodoId: report.periodo_id,
+      costoActividad,
+      visitIds: [],
+    });
+  }
+
+  invalidateCachedValue("visitas:list");
+}
+
+async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Promise<ActivityReport[]> {
   const [{ data: registros }, { data: allParticipantes }, { data: actividades }, { data: periodos }, { data: approvalItems }] = await Promise.all([
     supabase.from("registros_actividades").select("*").order("fecha", { ascending: false }),
     supabase.from("actividad_participantes").select("*"),
@@ -203,7 +392,7 @@ async function getRegistrosComoReports(): Promise<ActivityReport[]> {
           : approval?.estado === "rechazada" ? "rechazado"
             : "pendiente";
 
-      reports.push({
+      reports.push(enrichLegacyActivityReport({
         id: `reg-${reg.id}-${part.tecnico_id}`,
         tipo: "actividad_grupal",
         tecnicoId: part.tecnico_id,
@@ -219,7 +408,7 @@ async function getRegistrosComoReports(): Promise<ActivityReport[]> {
         costoAdministrable: false,
         periodoId,
         fechaCreacion: reg.fecha_creacion?.split("T")[0] || "",
-      });
+      }, mirrors));
     }
   }
   return reports;
@@ -254,15 +443,44 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     }
 
     const reports: ActivityReport[] = [];
+    const legacyActivityMirrors: LegacyActivityMirrorMaps = {
+      strict: new Map<string, ActivityReport>(),
+      fallback: new Map<string, ActivityReport>(),
+    };
+
     for (const row of data || []) {
       const fotos = fotosByReporte.get(row.id) || [];
       const fotosAntes = fotos.filter((f) => f.tipo === "antes").map((f) => f.url);
       const fotosDespues = fotos.filter((f) => f.tipo === "despues").map((f) => f.url);
-      reports.push(mapReport(row, fotosAntes, fotosDespues));
+      const mappedReport = mapReport(row, fotosAntes, fotosDespues);
+
+      if (mappedReport.tipo === "actividad_grupal") {
+        const strictKey = buildLegacyActivityMirrorKey({
+          tecnicoId: mappedReport.tecnicoId,
+          fecha: mappedReport.fecha,
+          grupoId: mappedReport.grupoId,
+          clienteId: mappedReport.clienteId,
+        });
+        const fallbackKey = buildLegacyActivityFallbackKey({
+          tecnicoId: mappedReport.tecnicoId,
+          fecha: mappedReport.fecha,
+          grupoId: mappedReport.grupoId,
+        });
+
+        if (!legacyActivityMirrors.strict.has(strictKey)) {
+          legacyActivityMirrors.strict.set(strictKey, mappedReport);
+        }
+
+        if (!legacyActivityMirrors.fallback.has(fallbackKey)) {
+          legacyActivityMirrors.fallback.set(fallbackKey, mappedReport);
+        }
+      }
+
+      reports.push(mappedReport);
     }
 
     try {
-      const registroReports = await getRegistrosComoReports();
+      const registroReports = await getRegistrosComoReports(legacyActivityMirrors);
       const existingKeys = new Set(
         reports.map((r) => `${r.tecnicoId}|${r.fecha}|${r.clienteId || ""}`)
       );
@@ -303,6 +521,9 @@ export async function updateCostoActividadAdmin(id: string, costoActividad: numb
     .update({ costo_actividad: costoActividad })
     .eq("id", id);
   if (error) throw error;
+
+  await syncVisitCostFromApprovalReport(id, costoActividad);
+
   invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
 }
 

@@ -281,8 +281,10 @@ export default function MantenimientosPage() {
     return maintenances.filter((m) => m.estado === "programado");
   }, [maintenances]);
 
-  const technicians = users.filter(
-    (u) => u.rol === "tecnico" && u.estado === "activo"
+  const assignableUsers = users.filter(
+    (u) =>
+      u.estado === "activo" &&
+      (u.rol === "tecnico" || u.rol === "lider" || u.esLider)
   );
 
   const handleSchedule = async () => {
@@ -481,7 +483,7 @@ export default function MantenimientosPage() {
                   Mantenimientos por Realizar (Próximos 3 días)
                 </CardTitle>
                 <p className="text-sm text-muted-foreground">
-                  Estos mantenimientos se cargan automáticamente 3 días antes de su fecha. Asigne técnico, fecha y hora para programarlos.
+                  Estos mantenimientos se cargan automáticamente 3 días antes de su fecha. Asigne líder o técnico, fecha y hora para programarlos.
                 </p>
               </CardHeader>
               <CardContent>
@@ -781,7 +783,7 @@ export default function MantenimientosPage() {
           <DialogHeader>
             <DialogTitle className="text-foreground">Programar Mantenimiento</DialogTitle>
             <div id="schedule-dialog-desc" className="sr-only">
-              Formulario para asignar técnico, fecha y hora a un mantenimiento pendiente.
+              Formulario para asignar líder o técnico, fecha y hora a un mantenimiento pendiente.
             </div>
           </DialogHeader>
           {schedulingMaint && (() => {
@@ -793,13 +795,13 @@ export default function MantenimientosPage() {
                   <p className="text-xs text-muted-foreground">{client?.nombre}</p>
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-foreground/80">Técnico Asignado</Label>
+                  <Label className="text-foreground/80">Líder o Técnico Asignado</Label>
                   <Select value={scheduleTecnico} onValueChange={setScheduleTecnico}>
                     <SelectTrigger className="bg-secondary/50 border-border/50">
-                      <SelectValue placeholder="Seleccionar técnico" />
+                      <SelectValue placeholder="Seleccionar líder o técnico" />
                     </SelectTrigger>
                     <SelectContent className="bg-card border-border">
-                      {technicians.map((t) => (
+                      {assignableUsers.map((t) => (
                         <SelectItem key={t.id} value={t.id}>
                           {t.nombre} {t.apellido}
                         </SelectItem>
@@ -828,7 +830,7 @@ export default function MantenimientosPage() {
                   </div>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Al programar, se notificará automáticamente al aplicativo del técnico asignado.
+                  Al programar, se notificará automáticamente al aplicativo del líder o técnico asignado.
                 </p>
               </div>
             );

@@ -14,10 +14,8 @@ import {
   LogOut,
   ChevronLeft,
   ScrollText,
-  Wrench,
   Clock,
   ClipboardCheck,
-  Route,
   Star,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -55,11 +53,6 @@ const menuItems = [
     icon: CalendarClock,
   },
   {
-    title: "Visitas Técnicas",
-    href: "/admin/visitas",
-    icon: Wrench,
-  },
-  {
     title: "Aprobaciones",
     href: "/admin/aprobaciones",
     icon: ClipboardCheck,
@@ -67,11 +60,6 @@ const menuItems = [
   {
     title: "Informes Técnicos",
     href: "/admin/informes",
-    icon: FileText,
-  },
-  {
-    title: "Reportes",
-    href: "/admin/reportes",
     icon: FileText,
   },
   {
