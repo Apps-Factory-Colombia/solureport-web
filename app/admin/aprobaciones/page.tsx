@@ -150,6 +150,10 @@ function getTipoConfig(tipo: string) {
   return tipoConfig[tipo] || defaultTipoConfig;
 }
 
+function canSendApprovalReportEmail(report: ActivityReport) {
+  return report.tipo === "mantenimiento_preventivo" || report.tipo === "visita_tecnica";
+}
+
 const estadoAprobacionConfig = {
   pendiente: { label: "Pendiente", color: "bg-amber-500/10 text-amber-400 border-amber-500/20", icon: Clock },
   aprobado: { label: "Aprobado", color: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20", icon: CheckCircle2 },
@@ -419,6 +423,10 @@ export default function AprobacionesPage() {
   }, [buildMultilineText, clientsById, companySettings, getSafeFileSegment, groupsById, usersById]);
 
   const sendApprovalEmail = useCallback(async (report: ActivityReport) => {
+    if (!canSendApprovalReportEmail(report)) {
+      return;
+    }
+
     const context = getReportEmailContext(report);
 
     if (!context.client?.correo) {

@@ -214,6 +214,10 @@ function formatMonthKey(monthKey: string) {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+function canSendReportEmail(report: ActivityReport) {
+  return report.tipo === "mantenimiento_preventivo" || report.tipo === "visita_tecnica";
+}
+
 function sortReportsByNewestCreation(reports: ActivityReport[]) {
   return [...reports].sort((left, right) => {
     const creationCompare = (right.fechaCreacion || "").localeCompare(left.fechaCreacion || "");
@@ -731,6 +735,11 @@ export default function InformesPage() {
   };
 
   const handleSendEmail = async (report: ActivityReport) => {
+    if (!canSendReportEmail(report)) {
+      alert("Solo se envían correos para mantenimientos preventivos y visitas técnicas.");
+      return;
+    }
+
     const context = getReportEmailContext(report);
 
     if (!context.client?.correo) {
@@ -794,22 +803,24 @@ export default function InformesPage() {
       >
         <Eye className="h-4 w-4" />
       </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-8 w-8 text-muted-foreground hover:text-cyan-neon"
-        onClick={(event) => {
-          event.stopPropagation();
-          handleSendEmail(report);
-        }}
-        disabled={sendingReportId === report.id}
-      >
-        {sendingReportId === report.id ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <Mail className="h-4 w-4" />
-        )}
-      </Button>
+      {canSendReportEmail(report) && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-muted-foreground hover:text-cyan-neon"
+          onClick={(event) => {
+            event.stopPropagation();
+            handleSendEmail(report);
+          }}
+          disabled={sendingReportId === report.id}
+        >
+          {sendingReportId === report.id ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Mail className="h-4 w-4" />
+          )}
+        </Button>
+      )}
       <Button
         variant="ghost"
         size="icon"
@@ -840,12 +851,16 @@ export default function InformesPage() {
       variant="outline"
       className={cn(
         "text-[10px]",
-        report.correoEnviado
-          ? "bg-cyan-neon/10 text-cyan-neon border-cyan-neon/30"
-          : "bg-secondary text-muted-foreground border-border/50"
+        !canSendReportEmail(report)
+          ? "bg-secondary text-muted-foreground border-border/50"
+          : report.correoEnviado
+            ? "bg-cyan-neon/10 text-cyan-neon border-cyan-neon/30"
+            : "bg-secondary text-muted-foreground border-border/50"
       )}
     >
-      {report.correoEnviado ? (
+      {!canSendReportEmail(report) ? (
+        "No aplica"
+      ) : report.correoEnviado ? (
         <><Send className="mr-0.5 h-3 w-3" />Enviado</>
       ) : (
         "Pendiente"
@@ -2506,19 +2521,21 @@ export default function InformesPage() {
                 )}
 
                 <div className="flex justify-end gap-2 border-t border-border/50 pt-2">
-                  <Button
-                    variant="outline"
-                    className="gap-2 border-border/50 text-foreground/80"
-                    onClick={() => handleSendEmail(selectedReport)}
-                    disabled={sendingReportId === selectedReport.id}
-                  >
-                    {sendingReportId === selectedReport.id ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Mail className="h-4 w-4" />
-                    )}
-                    Enviar correo
-                  </Button>
+                  {canSendReportEmail(selectedReport) && (
+                    <Button
+                      variant="outline"
+                      className="gap-2 border-border/50 text-foreground/80"
+                      onClick={() => handleSendEmail(selectedReport)}
+                      disabled={sendingReportId === selectedReport.id}
+                    >
+                      {sendingReportId === selectedReport.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Mail className="h-4 w-4" />
+                      )}
+                      Enviar correo
+                    </Button>
+                  )}
                   <Button
                     variant="outline"
                     className="gap-2 border-border/50 text-foreground/80"
