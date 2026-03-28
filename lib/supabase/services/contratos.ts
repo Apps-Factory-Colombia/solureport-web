@@ -1,5 +1,15 @@
 import { supabase } from "../client";
 import { MaintenanceContract, MantenimientoContrato } from "@/lib/types";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+import { invalidateMantenimientosCache } from "./mantenimientos";
+
+const CONTRATOS_CACHE_KEY = "contratos:list";
+const CONTRATOS_CACHE_TTL = 60_000;
+
+function invalidateContratosCache() {
+  invalidateCachedValue(CONTRATOS_CACHE_KEY);
+  invalidateMantenimientosCache();
+}
 
 function mapMantenimiento(row: any): MantenimientoContrato {
   return {
@@ -30,22 +40,35 @@ function mapRow(row: any, mantenimientos: MantenimientoContrato[]): MaintenanceC
 }
 
 export async function getContratos(): Promise<MaintenanceContract[]> {
-  const { data, error } = await supabase
-    .from("contratos_mantenimiento")
-    .select("*")
-    .order("anio", { ascending: false });
-  if (error) throw error;
-
-  const contracts: MaintenanceContract[] = [];
-  for (const row of data || []) {
-    const { data: mants } = await supabase
-      .from("contrato_mantenimientos")
+  return getCachedValue(CONTRATOS_CACHE_KEY, CONTRATOS_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("contratos_mantenimiento")
       .select("*")
-      .eq("contrato_id", row.id)
-      .order("mes");
-    contracts.push(mapRow(row, (mants || []).map(mapMantenimiento)));
-  }
-  return contracts;
+      .order("anio", { ascending: false });
+    if (error) throw error;
+
+    const contractRows = data || [];
+    const contractIds = contractRows.map((row: any) => row.id).filter(Boolean);
+
+    const { data: maintenances, error: maintenancesError } = contractIds.length > 0
+      ? await supabase
+        .from("contrato_mantenimientos")
+        .select("*")
+        .in("contrato_id", contractIds)
+        .order("mes")
+      : { data: [], error: null };
+
+    if (maintenancesError) throw maintenancesError;
+
+    const maintenancesByContractId = (maintenances || []).reduce<Map<string, MantenimientoContrato[]>>((acc, row: any) => {
+      const current = acc.get(row.contrato_id) || [];
+      current.push(mapMantenimiento(row));
+      acc.set(row.contrato_id, current);
+      return acc;
+    }, new Map());
+
+    return contractRows.map((row: any) => mapRow(row, maintenancesByContractId.get(row.id) || []));
+  });
 }
 
 export async function createContrato(c: Partial<MaintenanceContract>): Promise<MaintenanceContract> {
@@ -65,12 +88,12 @@ export async function createContrato(c: Partial<MaintenanceContract>): Promise<M
     .single();
   if (error) throw error;
 
-  const mantenimientos: MantenimientoContrato[] = [];
+  let mantenimientos: MantenimientoContrato[] = [];
   if (c.mantenimientosRealizados && c.mantenimientosRealizados.length > 0) {
-    for (const m of c.mantenimientosRealizados) {
-      const { data: mData } = await supabase
-        .from("contrato_mantenimientos")
-        .insert({
+    const { data: insertedMaintenances, error: insertMaintenancesError } = await supabase
+      .from("contrato_mantenimientos")
+      .insert(
+        c.mantenimientosRealizados.map((m) => ({
           contrato_id: data.id,
           mes: m.mes,
           fecha_programada: m.fechaProgramada,
@@ -78,13 +101,15 @@ export async function createContrato(c: Partial<MaintenanceContract>): Promise<M
           tecnico_id: m.tecnicoId || null,
           estado: m.estado || "pendiente",
           valor_recaudado: m.valorRecaudado || 0,
-        })
-        .select()
-        .single();
-      if (mData) mantenimientos.push(mapMantenimiento(mData));
-    }
+        }))
+      )
+      .select();
+
+    if (insertMaintenancesError) throw insertMaintenancesError;
+    mantenimientos = (insertedMaintenances || []).map(mapMantenimiento);
   }
 
+  invalidateContratosCache();
   return mapRow(data, mantenimientos);
 }
 
@@ -148,6 +173,7 @@ export async function updateContrato(id: string, c: Partial<MaintenanceContract>
     .select("*")
     .eq("contrato_id", id)
     .order("mes");
+  invalidateContratosCache();
   return mapRow(data, (mants || []).map(mapMantenimiento));
 }
 
@@ -169,6 +195,7 @@ export async function updateMantenimientoContrato(
     .select()
     .single();
   if (error) throw error;
+  invalidateContratosCache();
   return mapMantenimiento(data);
 }
 
@@ -176,4 +203,5 @@ export async function deleteContrato(id: string): Promise<void> {
   await supabase.from("contrato_mantenimientos").delete().eq("contrato_id", id);
   const { error } = await supabase.from("contratos_mantenimiento").delete().eq("id", id);
   if (error) throw error;
+  invalidateContratosCache();
 }

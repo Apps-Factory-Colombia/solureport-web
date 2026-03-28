@@ -50,6 +50,7 @@ import {
   FileWarning,
   Percent,
   ImageIcon,
+  MapPin,
 } from "lucide-react";
 import { ArrivalRecord, User, CompanySettings } from "@/lib/types";
 import { getLlegadas, updateLlegada } from "@/lib/supabase/services/llegadas";
@@ -57,6 +58,18 @@ import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { cn } from "@/lib/utils";
+
+function formatLocationTimestamp(value?: string) {
+  if (!value) return null;
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+
+  return new Intl.DateTimeFormat("es-CO", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(parsed);
+}
 
 export default function LlegadasPage() {
   const [records, setRecords] = useState<ArrivalRecord[]>([]);
@@ -72,7 +85,7 @@ export default function LlegadasPage() {
   const [messageText, setMessageText] = useState("");
   const [discountOpen, setDiscountOpen] = useState(false);
   const [discountPercent, setDiscountPercent] = useState("5");
-  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [arrivalDetailRecord, setArrivalDetailRecord] = useState<ArrivalRecord | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
@@ -277,7 +290,7 @@ export default function LlegadasPage() {
                   <TableHead className="text-muted-foreground">Entrada</TableHead>
                   <TableHead className="text-muted-foreground">Salida</TableHead>
                   <TableHead className="text-muted-foreground">Retraso</TableHead>
-                  <TableHead className="text-muted-foreground">Evidencia</TableHead>
+                  <TableHead className="text-muted-foreground">Llegada</TableHead>
                   <TableHead className="text-muted-foreground">Mensaje</TableHead>
                   <TableHead className="text-muted-foreground">Descuento</TableHead>
                   <TableHead className="text-muted-foreground w-28">Acciones</TableHead>
@@ -286,6 +299,12 @@ export default function LlegadasPage() {
               <TableBody>
                 {currentRecords.map((record) => {
                   const user = users.find((u) => u.id === record.usuarioId);
+                  const hasArrivalDetail = Boolean(
+                    record.fotoLlegadaUrl ||
+                    record.ubicacionLlegadaDireccion ||
+                    record.ubicacionLlegadaPrecisionMetros !== undefined ||
+                    record.ubicacionLlegadaTimestamp
+                  );
 
                   return (
                     <TableRow
@@ -345,21 +364,65 @@ export default function LlegadasPage() {
                         )}
                       </TableCell>
                       <TableCell>
-                        {record.fotoObraUrl ? (
-                          <button
-                            type="button"
-                            onClick={() => setImagePreviewUrl(record.fotoObraUrl || null)}
-                            className="group relative h-12 w-12 overflow-hidden rounded-md border border-border/50 bg-secondary/40"
-                          >
-                            <img
-                              src={record.fotoObraUrl}
-                              alt={`Evidencia de asistencia de ${user?.nombre || "empleado"}`}
-                              className="h-full w-full object-cover transition-transform group-hover:scale-105"
-                            />
-                          </button>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        )}
+                        <div className="max-w-60 space-y-2.5">
+                          <div className="rounded-lg border border-border/50 bg-secondary/20 p-2">
+                            <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                              Foto
+                            </p>
+                            {record.fotoLlegadaUrl ? (
+                              <button
+                                type="button"
+                                onClick={() => setArrivalDetailRecord(record)}
+                                className="group relative h-14 w-14 overflow-hidden rounded-md border border-border/50 bg-secondary/40"
+                                title="Ver detalle de llegada"
+                              >
+                                <img
+                                  src={record.fotoLlegadaUrl}
+                                  alt={`Foto de llegada de ${user?.nombre || "empleado"}`}
+                                  className="h-full w-full object-cover transition-transform group-hover:scale-105"
+                                />
+                              </button>
+                            ) : (
+                              <p className="text-xs text-muted-foreground">Sin foto</p>
+                            )}
+                          </div>
+
+                          <div className="rounded-lg border border-border/50 bg-secondary/20 p-2">
+                            <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                              Ubicacion
+                            </p>
+                            {record.ubicacionLlegadaDireccion ? (
+                              <div className="space-y-1.5 text-xs text-muted-foreground">
+                                <div className="flex items-start gap-1.5">
+                                  <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gold" />
+                                  <span className="line-clamp-3 text-foreground/80">
+                                    {record.ubicacionLlegadaDireccion}
+                                  </span>
+                                </div>
+                                {record.ubicacionLlegadaPrecisionMetros !== undefined && (
+                                  <p>Precision: {record.ubicacionLlegadaPrecisionMetros.toFixed(1)} m</p>
+                                )}
+                                {formatLocationTimestamp(record.ubicacionLlegadaTimestamp) && (
+                                  <p>Capturada: {formatLocationTimestamp(record.ubicacionLlegadaTimestamp)}</p>
+                                )}
+                              </div>
+                            ) : (
+                              <p className="text-xs text-muted-foreground">Sin ubicacion</p>
+                            )}
+                          </div>
+
+                          {hasArrivalDetail && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-8 w-full border-border/50 bg-background/40 text-xs"
+                              onClick={() => setArrivalDetailRecord(record)}
+                            >
+                              Ver detalle
+                            </Button>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell>
                         <Badge
@@ -532,7 +595,7 @@ export default function LlegadasPage() {
                   <Textarea
                     value={messageText}
                     onChange={(e) => setMessageText(e.target.value)}
-                    className="bg-secondary/50 border-border/50 min-h-[100px]"
+                    className="bg-secondary/50 border-border/50 min-h-25"
                   />
                 </div>
               </div>
@@ -611,21 +674,60 @@ export default function LlegadasPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(imagePreviewUrl)} onOpenChange={(open) => !open && setImagePreviewUrl(null)}>
+      <Dialog open={Boolean(arrivalDetailRecord)} onOpenChange={(open) => !open && setArrivalDetailRecord(null)}>
         <DialogContent className="bg-card border-border sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-foreground">
               <ImageIcon className="h-5 w-5 text-gold" />
-              Evidencia de asistencia
+              Detalle de llegada
             </DialogTitle>
           </DialogHeader>
-          {imagePreviewUrl && (
-            <div className="overflow-hidden rounded-lg border border-border/50 bg-secondary/20">
-              <img
-                src={imagePreviewUrl}
-                alt="Evidencia de asistencia"
-                className="max-h-[70vh] w-full object-contain"
-              />
+          {arrivalDetailRecord && (
+            <div className="grid gap-4 md:grid-cols-[minmax(0,1.4fr)_minmax(280px,1fr)]">
+              <div className="overflow-hidden rounded-lg border border-border/50 bg-secondary/20">
+                {arrivalDetailRecord.fotoLlegadaUrl ? (
+                  <img
+                    src={arrivalDetailRecord.fotoLlegadaUrl}
+                    alt="Foto de llegada"
+                    className="max-h-[70vh] w-full object-contain"
+                  />
+                ) : (
+                  <div className="flex min-h-72 items-center justify-center p-6 text-sm text-muted-foreground">
+                    Sin foto de llegada
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-4 rounded-lg border border-border/50 bg-secondary/20 p-4">
+                <div className="space-y-1">
+                  <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Direccion
+                  </p>
+                  <p className="text-sm text-foreground/85">
+                    {arrivalDetailRecord.ubicacionLlegadaDireccion || "Sin ubicacion"}
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Precision
+                  </p>
+                  <p className="text-sm text-foreground/85">
+                    {arrivalDetailRecord.ubicacionLlegadaPrecisionMetros !== undefined
+                      ? `${arrivalDetailRecord.ubicacionLlegadaPrecisionMetros.toFixed(1)} m`
+                      : "Sin precision"}
+                  </p>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Fecha de captura
+                  </p>
+                  <p className="text-sm text-foreground/85">
+                    {formatLocationTimestamp(arrivalDetailRecord.ubicacionLlegadaTimestamp) || "Sin fecha de captura"}
+                  </p>
+                </div>
+              </div>
             </div>
           )}
         </DialogContent>

@@ -15,6 +15,39 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const USER_STORAGE_KEY = "solureport_user_id";
+const USER_SNAPSHOT_STORAGE_KEY = "solureport_user_snapshot";
+
+function clearStoredSession() {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(USER_STORAGE_KEY);
+  localStorage.removeItem(USER_SNAPSHOT_STORAGE_KEY);
+}
+
+function persistStoredSession(user: User) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(USER_STORAGE_KEY, user.id);
+  localStorage.setItem(USER_SNAPSHOT_STORAGE_KEY, JSON.stringify(user));
+}
+
+function getStoredUserSnapshot(): User | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const rawSnapshot = localStorage.getItem(USER_SNAPSHOT_STORAGE_KEY);
+    if (!rawSnapshot) return null;
+
+    const parsed = JSON.parse(rawSnapshot) as User;
+    if (!parsed?.id) {
+      clearStoredSession();
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    clearStoredSession();
+    return null;
+  }
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -22,21 +55,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const savedUserId = typeof window !== "undefined" ? localStorage.getItem(USER_STORAGE_KEY) : null;
+    const storedUser = getStoredUserSnapshot();
+
+    if (!savedUserId) {
+      queueMicrotask(() => {
+        if (storedUser?.estado === "activo") {
+          setUser(storedUser);
+        }
+        setLoading(false);
+      });
+      return;
+    }
+
+    if (storedUser?.estado === "activo") {
+      queueMicrotask(() => {
+        setUser(storedUser);
+        setLoading(false);
+      });
+    }
+
     if (savedUserId) {
       getUsuarioById(savedUserId)
         .then((u) => {
           if (u && u.estado === "activo") {
             setUser(u);
+            persistStoredSession(u);
           } else {
-            localStorage.removeItem(USER_STORAGE_KEY);
+            setUser(null);
+            clearStoredSession();
           }
         })
         .catch(() => {
-          localStorage.removeItem(USER_STORAGE_KEY);
+          setUser(null);
+          clearStoredSession();
         })
         .finally(() => setLoading(false));
-    } else {
-      setLoading(false);
     }
   }, []);
 
@@ -45,7 +98,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const loggedUser = await loginUsuario(email, password);
       if (loggedUser) {
         setUser(loggedUser);
-        localStorage.setItem(USER_STORAGE_KEY, loggedUser.id);
+        persistStoredSession(loggedUser);
         return true;
       }
       return false;
@@ -56,7 +109,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     setUser(null);
-    localStorage.removeItem(USER_STORAGE_KEY);
+    clearStoredSession();
   }, []);
 
   return (

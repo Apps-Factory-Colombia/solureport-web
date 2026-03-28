@@ -1,10 +1,15 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/context/auth-context";
 import { AdminSidebar } from "@/components/layout/admin-sidebar";
 import { cn } from "@/lib/utils";
+import {
+  prefetchAdminRoutes,
+  warmAdminCoreData,
+  warmAdminRouteData,
+} from "@/lib/admin/prefetch";
 
 export default function AdminLayout({
   children,
@@ -14,12 +19,21 @@ export default function AdminLayout({
   const [collapsed, setCollapsed] = useState(false);
   const { isAuthenticated, loading } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     if (!loading && !isAuthenticated) {
-      router.push("/login");
+      router.replace("/login");
     }
   }, [isAuthenticated, loading, router]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    prefetchAdminRoutes(router);
+    warmAdminCoreData();
+    warmAdminRouteData(pathname);
+  }, [isAuthenticated, pathname, router]);
 
   if (loading || !isAuthenticated) {
     return (

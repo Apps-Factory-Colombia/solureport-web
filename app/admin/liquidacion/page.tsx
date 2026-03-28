@@ -139,6 +139,19 @@ function buildStableOrderKey(periodId: string, entityId: string) {
   return `${periodId}:${entityId}`;
 }
 
+function waitForNextPaint() {
+  return new Promise<void>((resolve) => {
+    if (typeof window === "undefined") {
+      resolve();
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  });
+}
+
 export default function LiquidacionPage() {
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -164,6 +177,7 @@ export default function LiquidacionPage() {
   const [reportDetailOpen, setReportDetailOpen] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
+  const [exportingComprobante, setExportingComprobante] = useState(false);
   const [openTechCards, setOpenTechCards] = useState<Record<string, boolean>>({});
   const [openGroupCards, setOpenGroupCards] = useState<Record<string, boolean>>({});
   const scrollRestorePositionRef = useRef<number | null>(null);
@@ -544,6 +558,56 @@ export default function LiquidacionPage() {
       alert("No se pudo eliminar la actividad. Intenta nuevamente.");
     } finally {
       setDeletingReportId(null);
+    }
+  };
+
+  const handleDownloadComprobante = async () => {
+    if (!selectedTechId) return;
+
+    const tech = users.find((u) => u.id === selectedTechId);
+    const techData = filteredComprobanteSummary.get(selectedTechId) || techSummary.get(selectedTechId);
+
+    if (!tech || !techData) return;
+
+    setExportingComprobante(true);
+
+    try {
+      await waitForNextPaint();
+
+      const pdfReports = periodReports.filter(
+        (r) => r.tecnicoId === selectedTechId && (comprobanteGroupId === "todos" || r.grupoId === comprobanteGroupId)
+      );
+      const pdfNonRecorrido = pdfReports.filter((r) => r.tipo !== "recorrido");
+      const pdfRecorrido = pdfReports.filter((r) => r.tipo === "recorrido");
+      const pdfAuxilio = pdfNonRecorrido.reduce((sum, report) => sum + report.costoActividad, 0);
+      const pdfRodamiento = pdfRecorrido.reduce((sum, report) => sum + report.costoActividad, 0);
+      const pdfDescuentoTardanza = techData.descuentoValor;
+
+      generateComprobantePDF({
+        empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
+        periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} → ${selectedPeriod.fechaFin}` : "",
+        tecnico: `${tech.nombre} ${tech.apellido}`,
+        items: pdfNonRecorrido.map((report) => ({
+          actividad: report.descripcion || getTipoLabel(report.tipo),
+          fecha: report.fecha,
+          valorBase: report.costoActividad,
+          porcentaje: pdfAuxilio > 0 ? Number(((report.costoActividad / pdfAuxilio) * 100).toFixed(2)) : 0,
+        })),
+        desplazamientos: pdfRecorrido.map((report) => ({
+          descripcion: [report.puntoPartida, report.puntoLlegada].filter(Boolean).join(" -> ") || getTipoLabel(report.tipo),
+          fecha: report.fecha,
+          valor: report.costoActividad,
+        })),
+        totalAuxilio: pdfAuxilio,
+        totalDescuentoTardanza: pdfDescuentoTardanza,
+        totalRodamiento: pdfRodamiento,
+        grandTotal: pdfAuxilio - pdfDescuentoTardanza + pdfRodamiento,
+      });
+    } catch (err) {
+      console.error("Error generando comprobante PDF:", err);
+      alert("No se pudo generar el comprobante PDF. Intenta nuevamente.");
+    } finally {
+      setExportingComprobante(false);
     }
   };
 
@@ -1577,47 +1641,21 @@ export default function LiquidacionPage() {
                     variant="outline"
                     className="gap-2 border-border/50 text-foreground/80"
                     onClick={() => setComprobanteOpen(false)}
+                    disabled={exportingComprobante}
                   >
                     Cerrar
                   </Button>
                   <Button
                     className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
-                    onClick={() => {
-                      const tech = users.find((u) => u.id === selectedTechId);
-                      const techData = filteredComprobanteSummary.get(selectedTechId!) || techSummary.get(selectedTechId!);
-                      if (!tech || !techData) return;
-                      const pdfReports = periodReports.filter(
-                        (r) => r.tecnicoId === selectedTechId && (comprobanteGroupId === "todos" || r.grupoId === comprobanteGroupId)
-                      );
-                      const pdfNonRecorrido = pdfReports.filter((r) => r.tipo !== "recorrido");
-                      const pdfRecorrido = pdfReports.filter((r) => r.tipo === "recorrido");
-                      const pdfAuxilio = pdfNonRecorrido.reduce((s, r) => s + r.costoActividad, 0);
-                      const pdfRodamiento = pdfRecorrido.reduce((s, r) => s + r.costoActividad, 0);
-                      const pdfDescuentoTardanza = techData.descuentoValor;
-                      generateComprobantePDF({
-                        empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
-                        periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} → ${selectedPeriod.fechaFin}` : "",
-                        tecnico: `${tech.nombre} ${tech.apellido}`,
-                        items: pdfNonRecorrido.map((r) => ({
-                          actividad: r.descripcion || getTipoLabel(r.tipo),
-                          fecha: r.fecha,
-                          valorBase: r.costoActividad,
-                          porcentaje: pdfAuxilio > 0 ? Number(((r.costoActividad / pdfAuxilio) * 100).toFixed(2)) : 0,
-                        })),
-                        desplazamientos: pdfRecorrido.map((r) => ({
-                          descripcion: [r.puntoPartida, r.puntoLlegada].filter(Boolean).join(" -> ") || getTipoLabel(r.tipo),
-                          fecha: r.fecha,
-                          valor: r.costoActividad,
-                        })),
-                        totalAuxilio: pdfAuxilio,
-                        totalDescuentoTardanza: pdfDescuentoTardanza,
-                        totalRodamiento: pdfRodamiento,
-                        grandTotal: pdfAuxilio - pdfDescuentoTardanza + pdfRodamiento,
-                      });
-                    }}
+                    onClick={handleDownloadComprobante}
+                    disabled={exportingComprobante}
                   >
-                    <Download className="h-4 w-4" />
-                    Descargar PDF
+                    {exportingComprobante ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Download className="h-4 w-4" />
+                    )}
+                    {exportingComprobante ? "Exportando..." : "Descargar PDF"}
                   </Button>
                 </div>
               </div>

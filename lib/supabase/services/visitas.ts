@@ -1,6 +1,7 @@
 import { supabase } from "../client";
 import { TechnicalVisit } from "@/lib/types";
 import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+import { getConfiguracion } from "./configuracion";
 
 const VISITAS_CACHE_KEY = "visitas:list";
 const VISITAS_CACHE_TTL = 30_000;
@@ -165,7 +166,10 @@ async function upsertMirrorAndApprovalForVisit(params: {
   descripcion?: string | null;
   observaciones?: string | null;
   fecha: string;
+  costoVisitaTecnicaDefault?: number;
   valorCobradoCliente: number;
+  valorModificado?: boolean;
+  motivoModificacionValor?: string | null;
   liderId?: string | null;
   previousDescripcion?: string | null;
 }) {
@@ -195,6 +199,9 @@ async function upsertMirrorAndApprovalForVisit(params: {
         fecha: params.fecha,
         descripcion: params.descripcion || "",
         observaciones: params.observaciones || null,
+        costo_actividad_default: Number(params.costoVisitaTecnicaDefault ?? 0) || 0,
+        valor_modificado: params.valorModificado ?? false,
+        motivo_modificacion_valor: params.motivoModificacionValor || null,
         costo_actividad: params.valorCobradoCliente,
         costo_administrable: true,
         periodo_id: periodoId,
@@ -214,6 +221,9 @@ async function upsertMirrorAndApprovalForVisit(params: {
         descripcion: params.descripcion || "",
         observaciones: params.observaciones || null,
         estado_aprobacion_lider: "pendiente",
+        costo_actividad_default: Number(params.costoVisitaTecnicaDefault ?? 0) || 0,
+        valor_modificado: params.valorModificado ?? false,
+        motivo_modificacion_valor: params.motivoModificacionValor || null,
         costo_actividad: params.valorCobradoCliente,
         costo_administrable: true,
         periodo_id: periodoId,
@@ -269,6 +279,7 @@ async function upsertMirrorAndApprovalForVisit(params: {
 }
 
 function mapRow(row: any, fotosAntes: string[] = [], fotosDespues: string[] = []): TechnicalVisit {
+  const costoCliente = Number(row.costo_cliente ?? 0) || 0;
   return {
     id: row.id,
     clienteId: row.cliente_id,
@@ -284,6 +295,10 @@ function mapRow(row: any, fotosAntes: string[] = [], fotosDespues: string[] = []
     firmaReceptorUrl: row.firma_receptor_url || undefined,
     tieneBitacora: row.tiene_bitacora || false,
     fotoBitacoraUrl: row.foto_bitacora_url || undefined,
+    costoVisitaTecnicaDefault: parseFloat(row.costo_visita_tecnica_default) || 0,
+    costoCliente,
+    valorModificado: row.valor_modificado || false,
+    motivoModificacionValor: row.motivo_modificacion_valor || undefined,
     valorCobradoCliente: parseFloat(row.valor_cobrado_cliente) || 0,
     estado: row.estado || "pendiente",
     fotosAntes: fotosAntes.length > 0 ? fotosAntes : undefined,
@@ -358,7 +373,10 @@ export async function getVisitasTecnicas(): Promise<TechnicalVisit[]> {
 
 export async function createVisitaTecnica(v: Partial<TechnicalVisit> & { liderId?: string; tipoVisita?: string; grupoId?: string; periodoId?: string; costoActividad?: number }): Promise<TechnicalVisit> {
   const fechaVisita = v.fecha || new Date().toISOString().split("T")[0];
-  const valorCobradoCliente = Number(v.valorCobradoCliente ?? v.costoActividad ?? 0) || 0;
+  const configuracion = await getConfiguracion();
+  const costoVisitaTecnicaDefault = Number(v.costoVisitaTecnicaDefault ?? configuracion.costoVisitaTecnicaDefault ?? 0) || 0;
+  const valorCobradoCliente = Number(v.valorCobradoCliente ?? v.costoActividad ?? costoVisitaTecnicaDefault) || 0;
+  const valorModificado = v.valorModificado ?? valorCobradoCliente !== costoVisitaTecnicaDefault;
   const { data, error } = await supabase
     .from("visitas_tecnicas")
     .insert({
@@ -369,6 +387,9 @@ export async function createVisitaTecnica(v: Partial<TechnicalVisit> & { liderId
       tipo_visita: v.tipoVisita || "imprevisto",
       estado: v.estado || "pendiente",
       fecha_inicio: v.fecha ? new Date(v.fecha).toISOString() : new Date().toISOString(),
+      costo_visita_tecnica_default: costoVisitaTecnicaDefault,
+      valor_modificado: valorModificado,
+      motivo_modificacion_valor: v.motivoModificacionValor || null,
       valor_cobrado_cliente: valorCobradoCliente,
     })
     .select()
@@ -382,7 +403,10 @@ export async function createVisitaTecnica(v: Partial<TechnicalVisit> & { liderId
     descripcion: data.descripcion,
     observaciones: data.observaciones,
     fecha: fechaVisita,
+    costoVisitaTecnicaDefault,
     valorCobradoCliente,
+    valorModificado,
+    motivoModificacionValor: v.motivoModificacionValor,
     liderId: data.lider_id || v.liderId,
   });
 
@@ -404,6 +428,9 @@ export async function updateVisitaTecnica(id: string, v: Partial<TechnicalVisit>
   if (v.valorCobradoCliente !== undefined) updateData.valor_cobrado_cliente = v.valorCobradoCliente;
   if (v.descripcion !== undefined) updateData.descripcion = v.descripcion;
   if (v.observaciones !== undefined) updateData.observaciones = v.observaciones;
+  if (v.costoVisitaTecnicaDefault !== undefined) updateData.costo_visita_tecnica_default = v.costoVisitaTecnicaDefault;
+  if (v.valorModificado !== undefined) updateData.valor_modificado = v.valorModificado;
+  if (v.motivoModificacionValor !== undefined) updateData.motivo_modificacion_valor = v.motivoModificacionValor;
 
   const { data, error } = await supabase
     .from("visitas_tecnicas")
@@ -420,7 +447,10 @@ export async function updateVisitaTecnica(id: string, v: Partial<TechnicalVisit>
     descripcion: data.descripcion,
     observaciones: data.observaciones,
     fecha: toDateOnly(data.fecha_inicio),
+    costoVisitaTecnicaDefault: Number(data.costo_visita_tecnica_default ?? 0) || 0,
     valorCobradoCliente: Number(data.valor_cobrado_cliente ?? 0) || 0,
+    valorModificado: data.valor_modificado ?? false,
+    motivoModificacionValor: data.motivo_modificacion_valor || null,
     liderId: data.lider_id,
     previousDescripcion: previousVisit.descripcion,
   });

@@ -149,6 +149,7 @@ export interface CompanySettings {
   porcentajeExtraLider: number;
   extraLiderActivo: boolean;
   costoRevisionLider: number;
+  costoVisitaTecnicaDefault: number;
   costoRecorridoNormal: number;
   costoRecorridoHerramienta: number;
 }
@@ -192,6 +193,10 @@ export interface TechnicalVisit {
   firmaReceptorUrl?: string;
   tieneBitacora?: boolean;
   fotoBitacoraUrl?: string;
+  costoVisitaTecnicaDefault?: number;
+  costoCliente?: number;
+  valorModificado?: boolean;
+  motivoModificacionValor?: string;
   valorCobradoCliente: number;
   estado: string;
   fotosAntes?: string[];
@@ -211,7 +216,10 @@ export interface ArrivalRecord {
   estadoSalida?: "normal" | "salida_anticipada" | "no_reportado";
   tarde: boolean;
   minutosRetraso: number;
-  fotoObraUrl?: string;
+  fotoLlegadaUrl?: string;
+  ubicacionLlegadaPrecisionMetros?: number;
+  ubicacionLlegadaTimestamp?: string;
+  ubicacionLlegadaDireccion?: string;
   mensajeEnviado?: string;
   tipoMensaje?: "pedagogico" | "citacion_descargos";
   descuentoAplicado: boolean;
@@ -226,6 +234,7 @@ export type TipoRecorrido = "normal" | "con_herramienta";
 export interface ActivityReport {
   id: string;
   tipo: TipoInforme;
+  visitaTecnicaId?: string;
   tecnicoId: string;
   liderGrupoId: string;
   grupoId: string;
@@ -246,6 +255,10 @@ export interface ActivityReport {
   fotoHerramienta?: string;
   estadoAprobacionLider: EstadoAprobacion;
   fechaAprobacionLider?: string;
+  costoCliente?: number;
+  costoActividadDefault?: number;
+  valorModificado?: boolean;
+  motivoModificacionValor?: string;
   costoActividad: number;
   costoAdministrable: boolean;
   correoEnviado: boolean;

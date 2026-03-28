@@ -15,6 +15,7 @@ interface ConfiguracionEmpresaRow {
   porcentaje_extra_lider?: number | string | null;
   extra_lider_activo?: boolean | null;
   costo_revision_lider?: number | string | null;
+  costo_visita_tecnica_default?: number | string | null;
   costo_recorrido_normal?: number | string | null;
   costo_recorrido_herramienta?: number | string | null;
 }
@@ -30,6 +31,7 @@ function mapRow(row: ConfiguracionEmpresaRow): CompanySettings {
     porcentajeExtraLider: Number(row.porcentaje_extra_lider ?? 10) || 10,
     extraLiderActivo: row.extra_lider_activo ?? true,
     costoRevisionLider: Number(row.costo_revision_lider ?? 15000) || 15000,
+    costoVisitaTecnicaDefault: Number(row.costo_visita_tecnica_default ?? 0) || 0,
     costoRecorridoNormal: Number(row.costo_recorrido_normal ?? 25000) || 25000,
     costoRecorridoHerramienta: Number(row.costo_recorrido_herramienta ?? 40000) || 40000,
   };
@@ -53,6 +55,7 @@ export async function getConfiguracion(): Promise<CompanySettings> {
         porcentajeExtraLider: 10,
         extraLiderActivo: true,
         costoRevisionLider: 15000,
+        costoVisitaTecnicaDefault: 0,
         costoRecorridoNormal: 25000,
         costoRecorridoHerramienta: 40000,
       };
@@ -77,6 +80,7 @@ export async function updateConfiguracion(settings: Partial<CompanySettings>): P
   if (settings.porcentajeExtraLider !== undefined) updateData.porcentaje_extra_lider = settings.porcentajeExtraLider;
   if (settings.extraLiderActivo !== undefined) updateData.extra_lider_activo = settings.extraLiderActivo;
   if (settings.costoRevisionLider !== undefined) updateData.costo_revision_lider = settings.costoRevisionLider;
+  if (settings.costoVisitaTecnicaDefault !== undefined) updateData.costo_visita_tecnica_default = settings.costoVisitaTecnicaDefault;
   if (settings.costoRecorridoNormal !== undefined) updateData.costo_recorrido_normal = settings.costoRecorridoNormal;
   if (settings.costoRecorridoHerramienta !== undefined) updateData.costo_recorrido_herramienta = settings.costoRecorridoHerramienta;
 

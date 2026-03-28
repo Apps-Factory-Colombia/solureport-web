@@ -1,12 +1,15 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -24,6 +27,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
 import {
   Select,
   SelectContent,
@@ -51,17 +62,92 @@ import {
   Loader2,
   Users,
   Send,
+  Save,
+  ChevronDown,
 } from "lucide-react";
-import { ActivityReport, User, Client, WorkGroup, CompanySettings } from "@/lib/types";
-import { deleteReporteActividadAdmin, getReportesActividad, markReporteActividadEmailSent } from "@/lib/supabase/services/reportes-actividad";
+import { ActivityReport, User, Client, WorkGroup, CompanySettings, MaintenanceContract } from "@/lib/types";
+import { deleteReporteActividadAdmin, getReportesActividad, markReporteActividadEmailSent, updateCostoActividadAdmin, updateCostoClienteVisitaAdmin } from "@/lib/supabase/services/reportes-actividad";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
+import { getContratos } from "@/lib/supabase/services/contratos";
 import { cn } from "@/lib/utils";
-import { generateReportePDF } from "@/lib/utils/pdf-generator";
+import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
 
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
+const TABLE_PAGE_SIZE = 10;
+
+type ReportTableKey = "preventivos" | "visitas" | "recorridos" | "grupales";
+type PreventiveExportEntry = {
+  report: ActivityReport;
+  contract?: MaintenanceContract;
+  maintenanceDate: string;
+  maintenanceValue: number;
+  annualContractValue: number;
+  clientName: string;
+  buildingName: string;
+  technicianName: string;
+  detail: string;
+  contractKey: string;
+  monthKey: string;
+};
+
+const monthLabelFormatter = new Intl.DateTimeFormat("es-CO", { month: "long", year: "numeric" });
+
+function getTodayDateString() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset() * 60_000;
+  return new Date(now.getTime() - offset).toISOString().split("T")[0] || "";
+}
+
+function shiftDateString(baseDate: string, amount: number, unit: "days" | "months") {
+  const date = new Date(`${baseDate}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return baseDate;
+
+  if (unit === "days") {
+    date.setDate(date.getDate() + amount);
+  } else {
+    date.setMonth(date.getMonth() + amount);
+  }
+
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().split("T")[0] || baseDate;
+}
+
+function normalizeRange(start: string, end: string) {
+  if (!start && !end) return { start: "", end: "" };
+  if (!start) return { start: end, end };
+  if (!end) return { start, end: start };
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+function formatRangeLabel(start: string, end: string) {
+  if (!start && !end) return "Sin rango";
+
+  const formatter = new Intl.DateTimeFormat("es-CO", { dateStyle: "medium" });
+  const normalized = normalizeRange(start, end);
+  const startDate = normalized.start ? new Date(`${normalized.start}T00:00:00`) : null;
+  const endDate = normalized.end ? new Date(`${normalized.end}T00:00:00`) : null;
+
+  if (!startDate || Number.isNaN(startDate.getTime()) || !endDate || Number.isNaN(endDate.getTime())) {
+    return `${normalized.start || "-"} al ${normalized.end || "-"}`;
+  }
+
+  if (normalized.start === normalized.end) {
+    return formatter.format(startDate);
+  }
+
+  return `${formatter.format(startDate)} al ${formatter.format(endDate)}`;
+}
+
+function isWithinDateRange(fecha: string, start: string, end: string) {
+  const normalized = normalizeRange(start, end);
+  if (!normalized.start && !normalized.end) return true;
+  if (normalized.start && fecha < normalized.start) return false;
+  if (normalized.end && fecha > normalized.end) return false;
+  return true;
+}
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
@@ -69,6 +155,28 @@ function formatCurrency(value: number) {
     currency: "COP",
     minimumFractionDigits: 0,
   }).format(value);
+}
+
+function parseClientCostInput(value: string): number | null {
+  if (!value.trim()) return 0;
+
+  const parsed = Number(value);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    throw new Error("El costo cliente debe ser un numero igual o mayor a cero.");
+  }
+
+  return parsed;
+}
+
+function parseTechnicalCostInput(value: string): number {
+  if (!value.trim()) return 0;
+
+  const parsed = Number(value);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    throw new Error("El costo tecnico debe ser un numero igual o mayor a cero.");
+  }
+
+  return parsed;
 }
 
 function formatDateTime(value?: string) {
@@ -83,25 +191,112 @@ function formatDateTime(value?: string) {
   }).format(parsed);
 }
 
+function paginateReports(reports: ActivityReport[], page: number) {
+  const totalPages = Math.max(1, Math.ceil(reports.length / TABLE_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(page, 1), totalPages);
+  const startIndex = (currentPage - 1) * TABLE_PAGE_SIZE;
+
+  return {
+    currentPage,
+    totalPages,
+    items: reports.slice(startIndex, startIndex + TABLE_PAGE_SIZE),
+  };
+}
+
+function getMonthKey(fecha: string) {
+  return fecha.slice(0, 7);
+}
+
+function formatMonthKey(monthKey: string) {
+  const date = new Date(`${monthKey}-01T00:00:00`);
+  if (Number.isNaN(date.getTime())) return monthKey;
+  const label = monthLabelFormatter.format(date);
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function sortReportsByNewestCreation(reports: ActivityReport[]) {
+  return [...reports].sort((left, right) => {
+    const creationCompare = (right.fechaCreacion || "").localeCompare(left.fechaCreacion || "");
+    if (creationCompare !== 0) return creationCompare;
+
+    const dateCompare = (right.fecha || "").localeCompare(left.fecha || "");
+    if (dateCompare !== 0) return dateCompare;
+
+    return right.id.localeCompare(left.id);
+  });
+}
+
+function getYearRangeFromDates(start: string, end: string) {
+  const normalized = normalizeRange(start, end);
+  const referenceStart = normalized.start || normalized.end;
+  const referenceEnd = normalized.end || normalized.start;
+
+  if (!referenceStart || !referenceEnd) return null;
+
+  const startYear = Number(referenceStart.slice(0, 4));
+  const endYear = Number(referenceEnd.slice(0, 4));
+
+  if (Number.isNaN(startYear) || Number.isNaN(endYear)) return null;
+
+  const years = new Set<number>();
+  const minYear = Math.min(startYear, endYear);
+  const maxYear = Math.max(startYear, endYear);
+
+  for (let year = minYear; year <= maxYear; year += 1) {
+    years.add(year);
+  }
+
+  return years;
+}
+
 export default function InformesPage() {
+  const today = useMemo(() => getTodayDateString(), []);
   const [reports, setReports] = useState<ActivityReport[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
+  const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [viewRangeStart, setViewRangeStart] = useState("");
+  const [viewRangeEnd, setViewRangeEnd] = useState("");
   const [grupoFilter, setGrupoFilter] = useState<string>("todos");
   const [selectedReport, setSelectedReport] = useState<ActivityReport | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [reportToDelete, setReportToDelete] = useState<ActivityReport | null>(null);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [sendingReportId, setSendingReportId] = useState<string | null>(null);
+  const [editableTechnicalCost, setEditableTechnicalCost] = useState("");
+  const [savingTechnicalCost, setSavingTechnicalCost] = useState(false);
+  const [editableClientCost, setEditableClientCost] = useState("");
+  const [savingClientCost, setSavingClientCost] = useState(false);
+  const [inlineTechnicalCostDrafts, setInlineTechnicalCostDrafts] = useState<Record<string, string>>({});
+  const [savingInlineTechnicalCostId, setSavingInlineTechnicalCostId] = useState<string | null>(null);
+  const [inlineClientCostDrafts, setInlineClientCostDrafts] = useState<Record<string, string>>({});
+  const [savingInlineClientCostId, setSavingInlineClientCostId] = useState<string | null>(null);
+  const [exportRangeStart, setExportRangeStart] = useState(() => shiftDateString(getTodayDateString(), -14, "days"));
+  const [exportRangeEnd, setExportRangeEnd] = useState(() => getTodayDateString());
+  const [exportPanelOpen, setExportPanelOpen] = useState(false);
+  const [exportReportType, setExportReportType] = useState<ActivityReport["tipo"]>("visita_tecnica");
+  const [preventiveExportClientId, setPreventiveExportClientId] = useState<string>("todos");
+  const [preventiveExportClientSearch, setPreventiveExportClientSearch] = useState("");
+  const [preventiveClientSelectorOpen, setPreventiveClientSelectorOpen] = useState(false);
+  const [exportingPreventiveMonthlySummary, setExportingPreventiveMonthlySummary] = useState(false);
+  const [exportingPreventiveAnnualSummary, setExportingPreventiveAnnualSummary] = useState(false);
+  const [exportingTechnicalSummary, setExportingTechnicalSummary] = useState(false);
+  const [exportingClientSummary, setExportingClientSummary] = useState(false);
+  const [tablePages, setTablePages] = useState<Record<ReportTableKey, number>>({
+    preventivos: 1,
+    visitas: 1,
+    recorridos: 1,
+    grupales: 1,
+  });
 
   const loadData = async () => {
     setLoading(true);
-    Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion()])
-      .then(([r, u, c, g, s]) => { setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); })
+    Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion(), getContratos()])
+      .then(([r, u, c, g, s, ct]) => { setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setContracts(ct); })
       .catch((err) => console.error("Error cargando informes:", err))
       .finally(() => setLoading(false));
   };
@@ -109,6 +304,15 @@ export default function InformesPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    setEditableTechnicalCost(selectedReport ? String(selectedReport.costoActividad ?? 0) : "");
+    setEditableClientCost(
+      selectedReport?.tipo === "visita_tecnica"
+        ? String(selectedReport.costoCliente ?? 0)
+        : ""
+    );
+  }, [selectedReport]);
 
   const handleDeleteReport = async () => {
     if (!reportToDelete) return;
@@ -125,32 +329,170 @@ export default function InformesPage() {
     }
   };
 
+  const viewScopedReports = useMemo(
+    () => reports.filter((report) => isWithinDateRange(report.fecha, viewRangeStart, viewRangeEnd)),
+    [reports, viewRangeEnd, viewRangeStart]
+  );
+
   const preventivos = useMemo(
-    () => reports.filter((r) => r.tipo === "mantenimiento_preventivo"),
-    [reports]
+    () => viewScopedReports.filter((r) => r.tipo === "mantenimiento_preventivo"),
+    [viewScopedReports]
   );
   const visitas = useMemo(
-    () => reports.filter((r) => r.tipo === "visita_tecnica"),
-    [reports]
+    () => viewScopedReports.filter((r) => r.tipo === "visita_tecnica"),
+    [viewScopedReports]
   );
   const recorridos = useMemo(
-    () => reports.filter((r) => r.tipo === "recorrido"),
-    [reports]
+    () => viewScopedReports.filter((r) => r.tipo === "recorrido"),
+    [viewScopedReports]
   );
   const grupales = useMemo(
-    () => reports.filter((r) => r.tipo === "actividad_grupal"),
-    [reports]
+    () => viewScopedReports.filter((r) => r.tipo === "actividad_grupal"),
+    [viewScopedReports]
   );
 
   const usersById = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
   const clientsById = useMemo(() => new Map(clients.map((client) => [client.id, client])), [clients]);
   const groupsById = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
+  const getInlineTechnicalCostValue = useCallback(
+    (report: ActivityReport) => inlineTechnicalCostDrafts[report.id] ?? String(report.costoActividad ?? 0),
+    [inlineTechnicalCostDrafts]
+  );
+
+  const getInlineClientCostValue = useCallback(
+    (report: ActivityReport) => inlineClientCostDrafts[report.id] ?? String(report.costoCliente ?? 0),
+    [inlineClientCostDrafts]
+  );
+
+  const persistTechnicalCost = useCallback(async (report: ActivityReport, nextCost: number) => {
+    await updateCostoActividadAdmin(report.id, nextCost);
+    setReports((current) => current.map((item) => item.id === report.id ? { ...item, costoActividad: nextCost } : item));
+    setSelectedReport((current) => current && current.id === report.id ? { ...current, costoActividad: nextCost } : current);
+    setInlineTechnicalCostDrafts((current) => {
+      if (!(report.id in current)) return current;
+      const next = { ...current };
+      delete next[report.id];
+      return next;
+    });
+  }, []);
+
+  const persistVisitClientCost = useCallback(async (report: ActivityReport, nextCost: number | null) => {
+    await updateCostoClienteVisitaAdmin(report.id, nextCost, report.visitaTecnicaId);
+    const persistedCost = nextCost ?? 0;
+    setReports((current) => current.map((item) => item.id === report.id ? { ...item, costoCliente: persistedCost } : item));
+    setSelectedReport((current) => current && current.id === report.id ? { ...current, costoCliente: persistedCost } : current);
+    setInlineClientCostDrafts((current) => {
+      if (!(report.id in current)) return current;
+      const next = { ...current };
+      delete next[report.id];
+      return next;
+    });
+  }, []);
+
+  const handleInlineSaveTechnicalCost = async (report: ActivityReport) => {
+    let nextCost: number;
+    try {
+      nextCost = parseTechnicalCostInput(inlineTechnicalCostDrafts[report.id] ?? String(report.costoActividad ?? 0));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo interpretar el costo tecnico.");
+      return;
+    }
+
+    if (nextCost === (report.costoActividad ?? 0)) return;
+
+    setSavingInlineTechnicalCostId(report.id);
+    try {
+      await persistTechnicalCost(report, nextCost);
+    } catch (err) {
+      console.error("Error actualizando costo tecnico de la visita:", err);
+      alert("No se pudo guardar el costo tecnico de la visita.");
+    } finally {
+      setSavingInlineTechnicalCostId(null);
+    }
+  };
+
+  const handleInlineSaveVisitClientCost = async (report: ActivityReport) => {
+    let nextCost: number | null;
+    try {
+      nextCost = parseClientCostInput(inlineClientCostDrafts[report.id] ?? (report.costoCliente != null ? String(report.costoCliente) : ""));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo interpretar el costo cliente.");
+      return;
+    }
+
+    if (nextCost === (report.costoCliente ?? null)) return;
+
+    setSavingInlineClientCostId(report.id);
+    try {
+      await persistVisitClientCost(report, nextCost);
+    } catch (err) {
+      console.error("Error actualizando costo cliente de la visita:", err);
+      alert("No se pudo guardar el costo cliente de la visita.");
+    } finally {
+      setSavingInlineClientCostId(null);
+    }
+  };
+
+  const handleSaveSelectedVisitClientCost = async () => {
+    if (!selectedReport || selectedReport.tipo !== "visita_tecnica") return;
+
+    let nextCost: number | null;
+    try {
+      nextCost = parseClientCostInput(editableClientCost);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo interpretar el costo cliente.");
+      return;
+    }
+
+    if (nextCost === (selectedReport.costoCliente ?? null)) return;
+
+    setSavingClientCost(true);
+    try {
+      await persistVisitClientCost(selectedReport, nextCost);
+    } catch (err) {
+      console.error("Error actualizando costo cliente desde modal:", err);
+      alert("No se pudo guardar el costo cliente de la visita.");
+    } finally {
+      setSavingClientCost(false);
+    }
+  };
+
+  const handleSaveSelectedTechnicalCost = async () => {
+    if (!selectedReport) return;
+
+    let nextCost: number;
+    try {
+      nextCost = parseTechnicalCostInput(editableTechnicalCost);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo interpretar el costo tecnico.");
+      return;
+    }
+
+    if (nextCost === (selectedReport.costoActividad ?? 0)) return;
+
+    setSavingTechnicalCost(true);
+    try {
+      await persistTechnicalCost(selectedReport, nextCost);
+    } catch (err) {
+      console.error("Error actualizando costo tecnico desde modal:", err);
+      alert("No se pudo guardar el costo tecnico.");
+    } finally {
+      setSavingTechnicalCost(false);
+    }
+  };
 
   const getTipoLabel = (tipo: ActivityReport["tipo"]) => {
     if (tipo === "mantenimiento_preventivo") return "Mantenimiento Preventivo";
     if (tipo === "visita_tecnica") return "Visita Técnica";
     if (tipo === "recorrido") return "Recorrido";
     return "Actividad Grupal";
+  };
+
+  const getExportTitleLabel = (tipo: ActivityReport["tipo"]) => {
+    if (tipo === "mantenimiento_preventivo") return "Mantenimientos Preventivos";
+    if (tipo === "visita_tecnica") return "Visitas Técnicas";
+    if (tipo === "recorrido") return "Recorridos";
+    return "Actividades Grupales";
   };
 
   const buildMultilineText = (parts: Array<string | undefined | null>) =>
@@ -532,6 +874,509 @@ export default function InformesPage() {
       return matchSearch && matchGrupo;
     });
 
+  const visibleReports = useMemo(
+    () => sortReportsByNewestCreation(filterReports(viewScopedReports)),
+    [viewScopedReports, search, grupoFilter, users, clients]
+  );
+
+  const visibleClientCostReports = useMemo(
+    () => visibleReports.filter((report) => report.tipo === "visita_tecnica"),
+    [visibleReports]
+  );
+
+  const filteredPreventivos = useMemo(() => sortReportsByNewestCreation(filterReports(preventivos)), [preventivos, search, grupoFilter, users, clients]);
+  const filteredVisitas = useMemo(() => sortReportsByNewestCreation(filterReports(visitas)), [visitas, search, grupoFilter, users, clients]);
+  const filteredRecorridos = useMemo(() => sortReportsByNewestCreation(filterReports(recorridos)), [recorridos, search, grupoFilter, users, clients]);
+  const filteredGrupales = useMemo(() => sortReportsByNewestCreation(filterReports(grupales)), [grupales, search, grupoFilter, users, clients]);
+
+  const paginatedPreventivos = useMemo(() => paginateReports(filteredPreventivos, tablePages.preventivos), [filteredPreventivos, tablePages.preventivos]);
+  const paginatedVisitas = useMemo(() => paginateReports(filteredVisitas, tablePages.visitas), [filteredVisitas, tablePages.visitas]);
+  const paginatedRecorridos = useMemo(() => paginateReports(filteredRecorridos, tablePages.recorridos), [filteredRecorridos, tablePages.recorridos]);
+  const paginatedGrupales = useMemo(() => paginateReports(filteredGrupales, tablePages.grupales), [filteredGrupales, tablePages.grupales]);
+
+  const exportScopedReports = useMemo(
+    () => reports.filter((report) => isWithinDateRange(report.fecha, exportRangeStart, exportRangeEnd)),
+    [reports, exportRangeStart, exportRangeEnd]
+  );
+
+  const selectedExportReports = useMemo(
+    () => exportScopedReports
+      .filter((report) => {
+        if (report.tipo !== exportReportType) return false;
+        if (exportReportType !== "mantenimiento_preventivo") return true;
+        return preventiveExportClientId === "todos" || report.clienteId === preventiveExportClientId;
+      })
+      .sort((a, b) => a.fecha.localeCompare(b.fecha) || a.fechaCreacion.localeCompare(b.fechaCreacion)),
+    [exportScopedReports, exportReportType, preventiveExportClientId]
+  );
+
+  const technicalCostTotal = useMemo(
+    () => visibleReports.reduce((sum, report) => sum + (Number(report.costoActividad) || 0), 0),
+    [visibleReports]
+  );
+
+  const clientCostTotal = useMemo(
+    () => visibleClientCostReports.reduce((sum, report) => sum + (Number(report.costoCliente ?? 0) || 0), 0),
+    [visibleClientCostReports]
+  );
+
+  const selectedExportTechnicalTotal = useMemo(
+    () => selectedExportReports.reduce((sum, report) => sum + (Number(report.costoActividad) || 0), 0),
+    [selectedExportReports]
+  );
+
+  const selectedExportClientTotal = useMemo(
+    () => exportReportType === "visita_tecnica"
+      ? selectedExportReports.reduce((sum, report) => sum + (Number(report.costoCliente ?? 0) || 0), 0)
+      : 0,
+    [exportReportType, selectedExportReports]
+  );
+
+  const selectedPreventiveContracts = useMemo(() => {
+    if (exportReportType !== "mantenimiento_preventivo") return [];
+
+    const selectedYears = getYearRangeFromDates(exportRangeStart, exportRangeEnd);
+
+    return contracts.filter((contract) => {
+      const matchesClient = preventiveExportClientId === "todos" || contract.clienteId === preventiveExportClientId;
+      const matchesYear = !selectedYears || selectedYears.has(contract.anio);
+      return matchesClient && matchesYear;
+    });
+  }, [contracts, exportRangeEnd, exportRangeStart, exportReportType, preventiveExportClientId]);
+
+  const selectedPreventiveAnnualTotal = useMemo(
+    () => selectedPreventiveContracts.reduce((sum, contract) => sum + (Number(contract.costoTotalAnual) || 0), 0),
+    [selectedPreventiveContracts]
+  );
+
+  const filteredPreventiveExportClients = useMemo(() => {
+    const normalizedSearch = preventiveExportClientSearch.trim().toLowerCase();
+
+    if (!normalizedSearch) return clients;
+
+    return clients.filter((client) => {
+      return (client.edificio || "").toLowerCase().includes(normalizedSearch)
+        || (client.nombre || "").toLowerCase().includes(normalizedSearch)
+        || (client.contacto || "").toLowerCase().includes(normalizedSearch)
+        || (client.correo || "").toLowerCase().includes(normalizedSearch);
+    });
+  }, [clients, preventiveExportClientSearch]);
+
+  const selectedPreventiveEntries = useMemo<PreventiveExportEntry[]>(() => {
+    if (exportReportType !== "mantenimiento_preventivo") return [];
+
+    return selectedExportReports
+      .map((report) => {
+        const reportYear = new Date(`${report.fecha}T00:00:00`).getFullYear();
+        const contract = contracts.find((item) => item.clienteId === report.clienteId && item.anio === reportYear);
+        const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+        const tech = usersById.get(report.tecnicoId);
+        const matchingMaintenance = contract?.mantenimientosRealizados.find((maintenance) => {
+          const candidateDate = maintenance.fechaRealizado || maintenance.fechaProgramada;
+          return candidateDate === report.fecha;
+        });
+        const maintenanceDate = report.fecha || matchingMaintenance?.fechaRealizado || matchingMaintenance?.fechaProgramada || "";
+        const reportedCost = Number(report.costoActividad) || 0;
+        const maintenanceValue = reportedCost > 0
+          ? reportedCost
+          : matchingMaintenance?.valorRecaudado && matchingMaintenance.valorRecaudado > 0
+            ? matchingMaintenance.valorRecaudado
+            : contract?.costoPorMantenimiento || 0;
+
+        return {
+          report,
+          contract,
+          maintenanceDate,
+          maintenanceValue,
+          annualContractValue: contract?.costoTotalAnual || 0,
+          clientName: client?.nombre || "—",
+          buildingName: client?.edificio || client?.nombre || "—",
+          technicianName: tech ? `${tech.nombre} ${tech.apellido}` : "—",
+          detail: report.especificacion
+            ? `${report.descripcion} · ${report.especificacion}`
+            : (report.descripcion || "Mantenimiento preventivo realizado"),
+          contractKey: contract ? contract.id : `${report.clienteId || "sin-cliente"}:${reportYear}`,
+          monthKey: getMonthKey(maintenanceDate),
+        };
+      })
+      .sort((left, right) => {
+        return left.buildingName.localeCompare(right.buildingName, "es", { sensitivity: "base" })
+          || left.maintenanceDate.localeCompare(right.maintenanceDate)
+          || left.detail.localeCompare(right.detail, "es", { sensitivity: "base" });
+      });
+  }, [clientsById, contracts, exportReportType, selectedExportReports, usersById]);
+
+  const selectedPreventiveMaintenanceTotal = useMemo(
+    () => selectedPreventiveEntries.reduce((sum, entry) => sum + entry.maintenanceValue, 0),
+    [selectedPreventiveEntries]
+  );
+
+  const selectedExportTotalDisplay = useMemo(
+    () => exportReportType === "mantenimiento_preventivo"
+      ? selectedPreventiveMaintenanceTotal
+      : selectedExportTechnicalTotal,
+    [exportReportType, selectedPreventiveMaintenanceTotal, selectedExportTechnicalTotal]
+  );
+
+  const activeRangeLabel = useMemo(() => formatRangeLabel(exportRangeStart, exportRangeEnd), [exportRangeStart, exportRangeEnd]);
+  const selectedPreventiveClientLabel = useMemo(
+    () => preventiveExportClientId === "todos"
+      ? "Todos los clientes"
+      : (clientsById.get(preventiveExportClientId)?.edificio || clientsById.get(preventiveExportClientId)?.nombre || "Cliente seleccionado"),
+    [clientsById, preventiveExportClientId]
+  );
+
+  const selectedPreventiveAnnualRows = useMemo(() => {
+    if (exportReportType !== "mantenimiento_preventivo") return [];
+
+    return selectedPreventiveContracts
+      .map((contract) => {
+        const client = clientsById.get(contract.clienteId);
+        const entries = selectedPreventiveEntries.filter((entry) => entry.contract?.id === contract.id);
+        const executedValue = entries.reduce((sum, entry) => sum + entry.maintenanceValue, 0);
+        const monthsCovered = new Set(entries.map((entry) => entry.monthKey)).size;
+
+        return {
+          contract,
+          clientName: client?.nombre || "—",
+          buildingName: client?.edificio || client?.nombre || "—",
+          executedMaintenances: entries.length,
+          executedValue,
+          monthsCovered,
+        };
+      })
+      .sort((left, right) => {
+        return left.buildingName.localeCompare(right.buildingName, "es", { sensitivity: "base" })
+          || left.contract.anio - right.contract.anio;
+      });
+  }, [clientsById, exportReportType, selectedPreventiveContracts, selectedPreventiveEntries]);
+
+  const selectedPreventiveContractCount = useMemo(
+    () => selectedPreventiveContracts.length,
+    [selectedPreventiveContracts]
+  );
+  const selectedExportCountLabel = useMemo(
+    () => exportReportType === "mantenimiento_preventivo"
+      ? `${selectedPreventiveEntries.length} mantenimiento(s) · ${selectedPreventiveContractCount} contrato(s)`
+      : `${selectedExportReports.length} registros`,
+    [exportReportType, selectedExportReports.length, selectedPreventiveContractCount, selectedPreventiveEntries.length]
+  );
+
+  useEffect(() => {
+    setTablePages({
+      preventivos: 1,
+      visitas: 1,
+      recorridos: 1,
+      grupales: 1,
+    });
+  }, [search, grupoFilter, viewRangeStart, viewRangeEnd, reports.length]);
+
+  const applyQuickRange = useCallback((days?: number, months?: number) => {
+    const nextEnd = today;
+    const nextStart = months != null
+      ? shiftDateString(nextEnd, -months, "months")
+      : shiftDateString(nextEnd, -(Math.max((days ?? 1) - 1, 0)), "days");
+
+    setExportRangeStart(nextStart);
+    setExportRangeEnd(nextEnd);
+  }, [today]);
+
+  const handleExportPreventiveMonthlySummary = useCallback(() => {
+    if (selectedPreventiveEntries.length === 0) {
+      alert("No hay mantenimientos preventivos realizados en el rango seleccionado para exportar.");
+      return;
+    }
+
+    setExportingPreventiveMonthlySummary(true);
+    try {
+      const rows: string[][] = [];
+      let currentContractKey = "";
+      let currentMonthKey = "";
+      let currentMonthlyTotal = 0;
+
+      selectedPreventiveEntries.forEach((entry, index) => {
+        const contractKey = entry.contractKey;
+        const monthKey = entry.monthKey;
+        const isNewContract = contractKey !== currentContractKey;
+        const isNewMonth = monthKey !== currentMonthKey;
+
+        if (index > 0 && (isNewContract || isNewMonth)) {
+          rows.push(["", "", "", "", `Cierre mensual ${formatMonthKey(currentMonthKey)}`, "", formatCurrency(currentMonthlyTotal)]);
+          currentMonthlyTotal = 0;
+        }
+
+        if (index > 0 && isNewContract) {
+          rows.push(["", "", "", "", "", "", ""]);
+        }
+
+        currentContractKey = contractKey;
+        currentMonthKey = monthKey;
+        currentMonthlyTotal += entry.maintenanceValue;
+
+        rows.push([
+          entry.maintenanceDate,
+          entry.clientName,
+          entry.buildingName,
+          entry.technicianName,
+          entry.detail,
+          formatCurrency(entry.maintenanceValue),
+          "",
+        ]);
+      });
+
+      rows.push(["", "", "", "", `Cierre mensual ${formatMonthKey(currentMonthKey)}`, "", formatCurrency(currentMonthlyTotal)]);
+
+      generateTablePDF({
+        titulo: "REPORTE MENSUAL - MANTENIMIENTOS PREVENTIVOS",
+        subtitulo: "Detalle de mantenimientos realizados con cierre mensual por cliente y rango seleccionado.",
+        empresa: companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
+        periodo: `${activeRangeLabel} · ${selectedPreventiveClientLabel}`,
+        landscape: true,
+        fileName: `preventivos_mensual_${preventiveExportClientId}_${exportRangeStart || "inicio"}_${exportRangeEnd || "fin"}`,
+        summary: [
+          { label: "Mantenimientos realizados", value: String(selectedPreventiveEntries.length) },
+          { label: "Cliente", value: selectedPreventiveClientLabel },
+          { label: "Total mensual / rango", value: formatCurrency(selectedPreventiveMaintenanceTotal) },
+        ],
+        headers: ["Fecha", "Cliente", "Edificio", "Técnico", "Detalle", "Valor mantenimiento", "Cierre mensual"],
+        rows,
+        totales: ["", "", "", "", "Total", formatCurrency(selectedPreventiveMaintenanceTotal), ""],
+      });
+    } finally {
+      setExportingPreventiveMonthlySummary(false);
+    }
+  }, [activeRangeLabel, companySettings?.nombre, exportRangeEnd, exportRangeStart, preventiveExportClientId, selectedPreventiveClientLabel, selectedPreventiveEntries, selectedPreventiveMaintenanceTotal]);
+
+  const handleExportPreventiveAnnualSummary = useCallback(() => {
+    if (selectedPreventiveAnnualRows.length === 0) {
+      alert("No hay contratos preventivos para el cliente y año seleccionados.");
+      return;
+    }
+
+    setExportingPreventiveAnnualSummary(true);
+    try {
+      generateTablePDF({
+        titulo: "VALOR ANUAL - MANTENIMIENTOS PREVENTIVOS",
+        subtitulo: "Resumen de contratos preventivos con valor anual contratado y ejecución del rango seleccionado.",
+        empresa: companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
+        periodo: `${activeRangeLabel} · ${selectedPreventiveClientLabel}`,
+        landscape: true,
+        fileName: `preventivos_anual_${preventiveExportClientId}_${exportRangeStart || "inicio"}_${exportRangeEnd || "fin"}`,
+        summary: [
+          { label: "Contratos", value: String(selectedPreventiveContractCount) },
+          { label: "Valor anual contratado", value: formatCurrency(selectedPreventiveAnnualTotal) },
+          { label: "Valor ejecutado rango", value: formatCurrency(selectedPreventiveMaintenanceTotal) },
+        ],
+        headers: ["Cliente", "Edificio", "Año", "Mant. contrato", "Valor por mant.", "Valor anual", "Mant. ejecutados", "Valor ejecutado"],
+        rows: selectedPreventiveAnnualRows.map((item) => [
+          item.clientName,
+          item.buildingName,
+          String(item.contract.anio),
+          String(item.contract.cantidadMantenimientos),
+          formatCurrency(item.contract.costoPorMantenimiento),
+          formatCurrency(item.contract.costoTotalAnual),
+          `${item.executedMaintenances} (${item.monthsCovered} mes${item.monthsCovered === 1 ? "" : "es"})`,
+          formatCurrency(item.executedValue),
+        ]),
+        totales: ["", "", "", "", "", formatCurrency(selectedPreventiveAnnualTotal), "", formatCurrency(selectedPreventiveMaintenanceTotal)],
+      });
+    } finally {
+      setExportingPreventiveAnnualSummary(false);
+    }
+  }, [activeRangeLabel, companySettings?.nombre, exportRangeEnd, exportRangeStart, preventiveExportClientId, selectedPreventiveAnnualRows, selectedPreventiveAnnualTotal, selectedPreventiveClientLabel, selectedPreventiveContractCount, selectedPreventiveMaintenanceTotal]);
+
+  const handleExportTechnicalSummary = useCallback(() => {
+    if (selectedExportReports.length === 0) {
+      alert(`No hay ${getExportTitleLabel(exportReportType).toLowerCase()} en el rango seleccionado para exportar.`);
+      return;
+    }
+
+    setExportingTechnicalSummary(true);
+    try {
+      const sortedReports = [...selectedExportReports].sort((left, right) => {
+        const leftTech = usersById.get(left.tecnicoId);
+        const rightTech = usersById.get(right.tecnicoId);
+        const leftTechName = leftTech ? `${leftTech.nombre} ${leftTech.apellido}` : "";
+        const rightTechName = rightTech ? `${rightTech.nombre} ${rightTech.apellido}` : "";
+
+        return leftTechName.localeCompare(rightTechName, "es", { sensitivity: "base" })
+          || left.fecha.localeCompare(right.fecha)
+          || (left.descripcion || "").localeCompare(right.descripcion || "", "es", { sensitivity: "base" });
+      });
+
+      const exportRows = exportReportType === "recorrido"
+        ? (() => {
+          const rows: string[][] = [];
+          let currentTechName = "";
+          let currentSubtotal = 0;
+
+          sortedReports.forEach((report, index) => {
+            const tech = usersById.get(report.tecnicoId);
+            const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+            const projectName = client?.edificio || client?.nombre || groupsById.get(report.grupoId)?.nombre || "—";
+            const detail = report.especificacion
+              ? `${report.descripcion} · ${report.especificacion}`
+              : report.descripcion;
+            const techName = tech ? `${tech.nombre} ${tech.apellido}` : "—";
+
+            if (index === 0) {
+              currentTechName = techName;
+            }
+
+            if (techName !== currentTechName) {
+              rows.push(["", `${currentTechName}`, "", "", "Subtotal", formatCurrency(currentSubtotal)]);
+              rows.push(["", "", "", "", "", ""]);
+              currentTechName = techName;
+              currentSubtotal = 0;
+            }
+
+            currentSubtotal += Number(report.costoActividad) || 0;
+            rows.push([
+              report.fecha,
+              techName,
+              projectName,
+              detail || "—",
+              report.estadoAprobacionLider,
+              formatCurrency(report.costoActividad),
+            ]);
+          });
+
+          if (sortedReports.length > 0) {
+            rows.push(["", `${currentTechName}`, "", "", "Subtotal", formatCurrency(currentSubtotal)]);
+          }
+
+          return rows;
+        })()
+        : sortedReports.map((report) => {
+          const tech = usersById.get(report.tecnicoId);
+          const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+          const projectName = client?.edificio || client?.nombre || groupsById.get(report.grupoId)?.nombre || "—";
+          const detail = report.especificacion
+            ? `${report.descripcion} · ${report.especificacion}`
+            : report.descripcion;
+
+          return [
+            report.fecha,
+            tech ? `${tech.nombre} ${tech.apellido}` : "—",
+            projectName,
+            detail || "—",
+            report.estadoAprobacionLider,
+            formatCurrency(report.costoActividad),
+          ];
+        });
+
+      generateTablePDF({
+        titulo: `Reporte Consolidado de ${getExportTitleLabel(exportReportType)}`,
+        subtitulo: exportReportType === "visita_tecnica"
+          ? "Resumen administrativo de costos técnicos de visitas sin evidencia fotográfica."
+          : `Resumen administrativo de ${getExportTitleLabel(exportReportType).toLowerCase()} sin evidencia fotográfica.`,
+        empresa: companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
+        periodo: activeRangeLabel,
+        landscape: true,
+        fileName: `reporte_${exportReportType}_${exportRangeStart || "inicio"}_${exportRangeEnd || "fin"}`,
+        summary: [
+          { label: "Registros", value: String(selectedExportReports.length) },
+          { label: "Tipo", value: getExportTitleLabel(exportReportType) },
+          { label: exportReportType === "visita_tecnica" ? "Total costo técnico" : "Total", value: formatCurrency(selectedExportTechnicalTotal) },
+        ],
+        headers: ["Fecha", "Técnico", exportReportType === "actividad_grupal" ? "Grupo / Cliente" : "Cliente / Proyecto", "Detalle", "Estado", exportReportType === "visita_tecnica" ? "Costo técnico" : "Costo"],
+        rows: exportRows,
+        totales: ["", "", "", "", "Total", formatCurrency(selectedExportTechnicalTotal)],
+      });
+    } finally {
+      setExportingTechnicalSummary(false);
+    }
+  }, [activeRangeLabel, clientsById, companySettings?.nombre, exportReportType, groupsById, selectedExportReports, selectedExportTechnicalTotal, usersById]);
+
+  const updateTablePage = useCallback((table: ReportTableKey, page: number) => {
+    setTablePages((current) => ({
+      ...current,
+      [table]: page,
+    }));
+  }, []);
+
+  const renderTablePagination = useCallback((table: ReportTableKey, currentPage: number, totalPages: number) => {
+    if (totalPages <= 1) return null;
+
+    return (
+      <div className="border-t border-border/50 px-4 py-3 flex justify-center">
+        <Pagination className="w-auto justify-center">
+          <PaginationContent>
+            <PaginationItem>
+              <PaginationPrevious
+                onClick={() => updateTablePage(table, Math.max(1, currentPage - 1))}
+                className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+              />
+            </PaginationItem>
+            {Array.from({ length: totalPages }, (_, index) => {
+              const page = index + 1;
+
+              return (
+                <PaginationItem key={`${table}-${page}`}>
+                  <PaginationLink
+                    onClick={() => updateTablePage(table, page)}
+                    isActive={page === currentPage}
+                    className="cursor-pointer"
+                  >
+                    {page}
+                  </PaginationLink>
+                </PaginationItem>
+              );
+            })}
+            <PaginationItem>
+              <PaginationNext
+                onClick={() => updateTablePage(table, Math.min(totalPages, currentPage + 1))}
+                className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+              />
+            </PaginationItem>
+          </PaginationContent>
+        </Pagination>
+      </div>
+    );
+  }, [updateTablePage]);
+
+  const handleExportClientSummary = useCallback(() => {
+    if (selectedExportReports.length === 0) {
+      alert("No hay visitas técnicas en el rango seleccionado para exportar costo cliente.");
+      return;
+    }
+
+    setExportingClientSummary(true);
+    try {
+      generateTablePDF({
+        titulo: "Reporte Consolidado de Costos Cliente",
+        subtitulo: "Relación de valores cobrados al cliente para visitas técnicas en el período seleccionado.",
+        empresa: companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
+        periodo: activeRangeLabel,
+        landscape: true,
+        fileName: `costos_cliente_${exportRangeStart || "inicio"}_${exportRangeEnd || "fin"}`,
+        summary: [
+          { label: "Visitas incluidas", value: String(selectedExportReports.length) },
+          { label: "Rango", value: activeRangeLabel },
+          { label: "Total costo cliente", value: formatCurrency(selectedExportClientTotal) },
+        ],
+        headers: ["Fecha", "Técnico", "Cliente / Proyecto", "Detalle", "Costo técnico", "Costo cliente"],
+        rows: selectedExportReports.map((report) => {
+          const tech = usersById.get(report.tecnicoId);
+          const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+          const projectName = client?.edificio || client?.nombre || "—";
+
+          return [
+            report.fecha,
+            tech ? `${tech.nombre} ${tech.apellido}` : "—",
+            projectName,
+            report.descripcion || "—",
+            formatCurrency(report.costoActividad),
+            formatCurrency(report.costoCliente ?? 0),
+          ];
+        }),
+        totales: ["", "", "", "", "Total", formatCurrency(selectedExportClientTotal)],
+      });
+    } finally {
+      setExportingClientSummary(false);
+    }
+  }, [activeRangeLabel, clientsById, companySettings?.nombre, exportRangeEnd, exportRangeStart, selectedExportClientTotal, selectedExportReports, usersById]);
+
   if (loading) {
     return (
       <div>
@@ -607,6 +1452,32 @@ export default function InformesPage() {
               className="pl-10 bg-secondary/50 border-border/50"
             />
           </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Input
+              type="date"
+              value={viewRangeStart}
+              onChange={(event) => setViewRangeStart(event.target.value)}
+              className="w-40 bg-secondary/50 border-border/50"
+            />
+            <Input
+              type="date"
+              value={viewRangeEnd}
+              onChange={(event) => setViewRangeEnd(event.target.value)}
+              className="w-40 bg-secondary/50 border-border/50"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground"
+              onClick={() => {
+                setViewRangeStart("");
+                setViewRangeEnd("");
+              }}
+            >
+              Limpiar fechas
+            </Button>
+          </div>
           <Select value={grupoFilter} onValueChange={setGrupoFilter}>
             <SelectTrigger className="w-44 bg-secondary/50 border-border/50">
               <SelectValue placeholder="Grupo" />
@@ -619,6 +1490,224 @@ export default function InformesPage() {
             </SelectContent>
           </Select>
         </div>
+
+        <Collapsible open={exportPanelOpen} onOpenChange={setExportPanelOpen}>
+          <Card className="border-border/50 bg-card/80 overflow-hidden">
+            <CollapsibleTrigger asChild>
+              <button type="button" className="w-full text-left">
+                <CardHeader className="pb-4 cursor-pointer hover:bg-secondary/10 transition-colors">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div className="space-y-1">
+                      <CardTitle className="text-lg text-foreground">Reportes Consolidados</CardTitle>
+                      <p className="text-sm text-muted-foreground">
+                        {getExportTitleLabel(exportReportType)} · {selectedExportCountLabel}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
+                        {activeRangeLabel}
+                      </Badge>
+                      <Badge variant="outline" className="border-border/50 bg-secondary/40 text-foreground/80">
+                        {getExportTitleLabel(exportReportType)}
+                      </Badge>
+                      <div className={cn("rounded-full border border-border/50 p-1 transition-transform", exportPanelOpen && "rotate-180")}>
+                        <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                      </div>
+                    </div>
+                  </div>
+                </CardHeader>
+              </button>
+            </CollapsibleTrigger>
+
+            <CollapsibleContent>
+              <CardContent className="space-y-5 pt-0">
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(260px,0.8fr)]">
+                  <div className={cn("grid grid-cols-1 gap-3 sm:grid-cols-2", exportReportType === "mantenimiento_preventivo" ? "xl:grid-cols-4" : "xl:grid-cols-4")}>
+                    <div className="space-y-2 sm:col-span-2 xl:col-span-1">
+                      <p className="text-xs text-muted-foreground">Tipo de reporte</p>
+                      <Select value={exportReportType} onValueChange={(value) => setExportReportType(value as ActivityReport["tipo"])}>
+                        <SelectTrigger className="w-full bg-secondary/50 border-border/50">
+                          <SelectValue placeholder="Tipo" />
+                        </SelectTrigger>
+                        <SelectContent className="bg-card border-border">
+                          <SelectItem value="mantenimiento_preventivo">Mantenimiento preventivo</SelectItem>
+                          <SelectItem value="visita_tecnica">Visitas técnicas</SelectItem>
+                          <SelectItem value="recorrido">Recorridos</SelectItem>
+                          <SelectItem value="actividad_grupal">Actividades grupales</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {exportReportType === "mantenimiento_preventivo" && (
+                      <div className="space-y-2 sm:col-span-2 xl:col-span-1">
+                        <p className="text-xs text-muted-foreground">Cliente destino</p>
+                        <Popover open={preventiveClientSelectorOpen} onOpenChange={setPreventiveClientSelectorOpen}>
+                          <PopoverTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="w-full justify-between border-border/50 bg-secondary/50 text-foreground hover:bg-secondary/70"
+                            >
+                              <span className="truncate text-left">{selectedPreventiveClientLabel}</span>
+                              <ChevronDown className="h-4 w-4 opacity-60" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-[min(24rem,calc(100vw-2rem))] border-border bg-card p-3" align="start">
+                            <div className="space-y-3">
+                              <Input
+                                value={preventiveExportClientSearch}
+                                onChange={(event) => setPreventiveExportClientSearch(event.target.value)}
+                                placeholder="Buscar cliente, edificio o correo"
+                                className="bg-secondary/50 border-border/50"
+                              />
+                              <ScrollArea className="h-56 rounded-md border border-border/50">
+                                <div className="space-y-1 p-2">
+                                  <button
+                                    type="button"
+                                    className={cn(
+                                      "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm hover:bg-secondary/50",
+                                      preventiveExportClientId === "todos" && "bg-gold/10 text-gold"
+                                    )}
+                                    onClick={() => {
+                                      setPreventiveExportClientId("todos");
+                                      setPreventiveClientSelectorOpen(false);
+                                    }}
+                                  >
+                                    <span>Todos los clientes</span>
+                                    {preventiveExportClientId === "todos" && <span className="text-xs">Seleccionado</span>}
+                                  </button>
+                                  {filteredPreventiveExportClients.map((client) => {
+                                    const label = client.edificio || client.nombre;
+                                    const isSelected = preventiveExportClientId === client.id;
+
+                                    return (
+                                      <button
+                                        key={client.id}
+                                        type="button"
+                                        className={cn(
+                                          "flex w-full flex-col rounded-md px-3 py-2 text-left hover:bg-secondary/50",
+                                          isSelected && "bg-gold/10 text-gold"
+                                        )}
+                                        onClick={() => {
+                                          setPreventiveExportClientId(client.id);
+                                          setPreventiveClientSelectorOpen(false);
+                                        }}
+                                      >
+                                        <span className="text-sm font-medium">{label}</span>
+                                        <span className="text-xs text-muted-foreground">{client.nombre}{client.correo ? ` · ${client.correo}` : ""}</span>
+                                      </button>
+                                    );
+                                  })}
+                                  {filteredPreventiveExportClients.length === 0 && (
+                                    <p className="px-3 py-4 text-center text-xs text-muted-foreground">No hay clientes que coincidan con la búsqueda.</p>
+                                  )}
+                                </div>
+                              </ScrollArea>
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
+                    )}
+                    <div className="space-y-2">
+                      <p className="text-xs text-muted-foreground">Fecha inicial</p>
+                      <Input
+                        type="date"
+                        value={exportRangeStart}
+                        onChange={(event) => setExportRangeStart(event.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-xs text-muted-foreground">Fecha final</p>
+                      <Input
+                        type="date"
+                        value={exportRangeEnd}
+                        onChange={(event) => setExportRangeEnd(event.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                    <div className={cn("space-y-2 sm:col-span-2", exportReportType === "mantenimiento_preventivo" ? "xl:col-span-2" : "xl:col-span-2")}>
+                      <p className="text-xs text-muted-foreground">Rangos rápidos</p>
+                      <div className="flex flex-wrap gap-2">
+                        <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(7)}>
+                          7 días
+                        </Button>
+                        <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(15)}>
+                          15 días
+                        </Button>
+                        <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 1)}>
+                          1 mes
+                        </Button>
+                        <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 3)}>
+                          3 meses
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="text-muted-foreground"
+                          onClick={() => {
+                            setExportRangeStart("");
+                            setExportRangeEnd("");
+                          }}
+                        >
+                          Quitar rango
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 sm:p-4">
+                      <p className="text-xs text-muted-foreground">Total seleccionado</p>
+                      <p className="text-lg font-semibold text-gold">{formatCurrency(selectedExportTotalDisplay)}</p>
+                      <p className="text-xs text-muted-foreground">{selectedExportCountLabel}</p>
+                    </div>
+                    {exportReportType === "mantenimiento_preventivo" && (
+                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 sm:p-4">
+                        <p className="text-xs text-muted-foreground">Total anual contratos</p>
+                        <p className="text-lg font-semibold text-gold">{formatCurrency(selectedPreventiveAnnualTotal)}</p>
+                        <p className="text-xs text-muted-foreground">{selectedPreventiveContractCount} contrato(s) del cliente y año seleccionado</p>
+                      </div>
+                    )}
+                    {exportReportType === "visita_tecnica" && (
+                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 sm:p-4">
+                        <p className="text-xs text-muted-foreground">Total costo cliente</p>
+                        <p className="text-lg font-semibold text-gold">{formatCurrency(selectedExportClientTotal)}</p>
+                        <p className="text-xs text-muted-foreground">Solo visitas técnicas</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+                  {exportReportType === "mantenimiento_preventivo" ? (
+                    <>
+                      <Button type="button" className="w-full bg-gold text-black hover:bg-gold/90 sm:w-auto" onClick={handleExportPreventiveMonthlySummary} disabled={exportingPreventiveMonthlySummary}>
+                        {exportingPreventiveMonthlySummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        Reporte mensual
+                      </Button>
+                      <Button type="button" variant="outline" className="w-full border-gold/30 text-gold hover:bg-gold/10 hover:text-gold sm:w-auto" onClick={handleExportPreventiveAnnualSummary} disabled={exportingPreventiveAnnualSummary}>
+                        {exportingPreventiveAnnualSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        Valor anual
+                      </Button>
+                    </>
+                  ) : (
+                    <Button type="button" className="w-full bg-gold text-black hover:bg-gold/90 sm:w-auto" onClick={handleExportTechnicalSummary} disabled={exportingTechnicalSummary}>
+                      {exportingTechnicalSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                      {exportReportType === "visita_tecnica" ? "PDF costos técnicos" : `PDF ${getExportTitleLabel(exportReportType).toLowerCase()}`}
+                    </Button>
+                  )}
+                  {exportReportType === "visita_tecnica" && (
+                    <Button type="button" variant="outline" className="w-full border-gold/30 text-gold hover:bg-gold/10 hover:text-gold sm:w-auto" onClick={handleExportClientSummary} disabled={exportingClientSummary}>
+                      {exportingClientSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                      PDF costos cliente
+                    </Button>
+                  )}
+                </div>
+              </CardContent>
+            </CollapsibleContent>
+          </Card>
+        </Collapsible>
 
         <Tabs defaultValue="preventivos" className="space-y-4">
           <TabsList className="bg-secondary/50 border border-border/50">
@@ -673,7 +1762,7 @@ export default function InformesPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filterReports(preventivos).map((r) => {
+                    {paginatedPreventivos.items.map((r) => {
                       const tech = usersById.get(r.tecnicoId);
                       const client = r.clienteId ? clientsById.get(r.clienteId) : null;
                       const leader = usersById.get(r.liderGrupoId);
@@ -752,6 +1841,7 @@ export default function InformesPage() {
                     })}
                   </TableBody>
                 </Table>
+                {renderTablePagination("preventivos", paginatedPreventivos.currentPage, paginatedPreventivos.totalPages)}
               </CardContent>
             </Card>
           </TabsContent>
@@ -778,14 +1868,25 @@ export default function InformesPage() {
                       <TableHead className="text-muted-foreground">Fotos</TableHead>
                       <TableHead className="text-muted-foreground">Aprobación Líder</TableHead>
                       <TableHead className="text-muted-foreground">Correo</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Costo</TableHead>
+                      <TableHead className="text-muted-foreground text-right">Costo técnico</TableHead>
+                      <TableHead className="text-muted-foreground text-right">Costo cliente</TableHead>
                       <TableHead className="text-muted-foreground w-32"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filterReports(visitas).map((r) => {
+                    {paginatedVisitas.items.map((r) => {
                       const tech = usersById.get(r.tecnicoId);
                       const client = r.clienteId ? clientsById.get(r.clienteId) : null;
+                      const inlineTechnicalCostValue = getInlineTechnicalCostValue(r);
+                      const normalizedCurrentTechnicalCost = r.costoActividad ?? 0;
+                      const normalizedDraftTechnicalCost = inlineTechnicalCostValue.trim() ? Number(inlineTechnicalCostValue) : 0;
+                      const isInlineTechnicalCostDirty = normalizedDraftTechnicalCost !== normalizedCurrentTechnicalCost;
+                      const isInlineTechnicalCostSaving = savingInlineTechnicalCostId === r.id;
+                      const inlineClientCostValue = getInlineClientCostValue(r);
+                      const normalizedCurrentClientCost = r.costoCliente ?? 0;
+                      const normalizedDraftClientCost = inlineClientCostValue.trim() ? Number(inlineClientCostValue) : 0;
+                      const isInlineClientCostDirty = normalizedDraftClientCost !== normalizedCurrentClientCost;
+                      const isInlineClientCostSaving = savingInlineClientCostId === r.id;
                       return (
                         <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
                           <TableCell className="text-sm font-medium text-foreground">
@@ -829,8 +1930,89 @@ export default function InformesPage() {
                             </Badge>
                           </TableCell>
                           <TableCell>{renderEmailStatusBadge(r)}</TableCell>
-                          <TableCell className="text-right font-semibold text-gold text-sm">
-                            {formatCurrency(r.costoActividad)}
+                          <TableCell className="text-right">
+                            <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
+                              <div className="relative w-24 sm:w-28">
+                                <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
+                                <Input
+                                  type="number"
+                                  min="0"
+                                  value={inlineTechnicalCostValue}
+                                  onClick={(event) => event.stopPropagation()}
+                                  onChange={(event) =>
+                                    setInlineTechnicalCostDrafts((current) => ({
+                                      ...current,
+                                      [r.id]: event.target.value,
+                                    }))
+                                  }
+                                  className={cn(
+                                    "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
+                                    isInlineTechnicalCostDirty && "border-gold/50 bg-gold/5"
+                                  )}
+                                />
+                              </div>
+                              {isInlineTechnicalCostDirty && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleInlineSaveTechnicalCost(r);
+                                  }}
+                                  disabled={isInlineTechnicalCostSaving}
+                                >
+                                  {isInlineTechnicalCostSaving ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Save className="h-4 w-4" />
+                                  )}
+                                </Button>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
+                              <div className="relative w-24 sm:w-28">
+                                <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
+                                <Input
+                                  type="number"
+                                  min="0"
+                                  value={inlineClientCostValue}
+                                  onClick={(event) => event.stopPropagation()}
+                                  onChange={(event) =>
+                                    setInlineClientCostDrafts((current) => ({
+                                      ...current,
+                                      [r.id]: event.target.value,
+                                    }))
+                                  }
+                                  className={cn(
+                                    "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
+                                    isInlineClientCostDirty && "border-gold/50 bg-gold/5"
+                                  )}
+                                />
+                              </div>
+                              {isInlineClientCostDirty && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleInlineSaveVisitClientCost(r);
+                                  }}
+                                  disabled={isInlineClientCostSaving}
+                                >
+                                  {isInlineClientCostSaving ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Save className="h-4 w-4" />
+                                  )}
+                                </Button>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell>{renderActionButtons(r)}</TableCell>
                         </TableRow>
@@ -838,6 +2020,7 @@ export default function InformesPage() {
                     })}
                   </TableBody>
                 </Table>
+                {renderTablePagination("visitas", paginatedVisitas.currentPage, paginatedVisitas.totalPages)}
               </CardContent>
             </Card>
           </TabsContent>
@@ -870,7 +2053,7 @@ export default function InformesPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filterReports(recorridos).map((r) => {
+                    {paginatedRecorridos.items.map((r) => {
                       const tech = usersById.get(r.tecnicoId);
                       return (
                         <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
@@ -939,6 +2122,7 @@ export default function InformesPage() {
                     })}
                   </TableBody>
                 </Table>
+                {renderTablePagination("recorridos", paginatedRecorridos.currentPage, paginatedRecorridos.totalPages)}
               </CardContent>
             </Card>
           </TabsContent>
@@ -969,7 +2153,7 @@ export default function InformesPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filterReports(grupales).map((r) => {
+                    {paginatedGrupales.items.map((r) => {
                       const tech = usersById.get(r.tecnicoId);
                       const group = groupsById.get(r.grupoId);
                       const leader = usersById.get(r.liderGrupoId);
@@ -1024,6 +2208,7 @@ export default function InformesPage() {
                     })}
                   </TableBody>
                 </Table>
+                {renderTablePagination("grupales", paginatedGrupales.currentPage, paginatedGrupales.totalPages)}
               </CardContent>
             </Card>
           </TabsContent>
@@ -1134,6 +2319,96 @@ export default function InformesPage() {
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Observaciones</p>
                     <p className="text-sm text-foreground">{selectedReport.observaciones}</p>
+                  </div>
+                )}
+
+                {selectedReport.tipo === "visita_tecnica" && (
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-3">
+                      <div>
+                        <p className="text-xs text-muted-foreground">Resumen economico</p>
+                        <p className="text-sm text-foreground/80">
+                          El costo tecnico corresponde al valor interno del servicio. El costo cliente se define manualmente desde administracion para esta visita.
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-border/50 bg-background/40 p-3 space-y-3">
+                        <div className="space-y-1">
+                          <p className="text-xs text-muted-foreground">Editar costo tecnico</p>
+                          <p className="text-xs text-foreground/70">Este valor afecta el costo interno y los reportes asociados.</p>
+                        </div>
+                        <div className="relative max-w-40">
+                          <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
+                          <Input
+                            type="number"
+                            min="0"
+                            value={editableTechnicalCost}
+                            onChange={(event) => setEditableTechnicalCost(event.target.value)}
+                            className={cn(
+                              "pl-9 bg-background/70 border-border/50 text-gold font-semibold",
+                              (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) !== (selectedReport.costoActividad ?? 0)
+                              && "border-gold shadow-[0_0_0_1px_rgba(234,179,8,0.25)]"
+                            )}
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="w-full gap-2 border-border/50 text-foreground hover:bg-secondary/40"
+                          onClick={handleSaveSelectedTechnicalCost}
+                          disabled={savingTechnicalCost || (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) === (selectedReport.costoActividad ?? 0)}
+                        >
+                          {savingTechnicalCost ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Save className="h-4 w-4" />
+                          )}
+                          {savingTechnicalCost ? "Guardando..." : "Guardar costo tecnico"}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-gold/20 bg-gold/5 p-4 space-y-3">
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-foreground">Editar costo cliente</p>
+                        <p className="text-xs text-muted-foreground">
+                          Este valor es independiente del costo tecnico y solo lo define administracion.
+                        </p>
+                      </div>
+                      <div className="relative max-w-40">
+                        <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
+                        <Input
+                          type="number"
+                          min="0"
+                          value={editableClientCost}
+                          onChange={(event) => setEditableClientCost(event.target.value)}
+                          className={cn(
+                            "pl-9 bg-background/70 border-gold/20 text-gold font-semibold",
+                            (editableClientCost.trim() ? Number(editableClientCost) : 0) !== (selectedReport.costoCliente ?? 0)
+                            && "border-gold shadow-[0_0_0_1px_rgba(234,179,8,0.25)]"
+                          )}
+                        />
+                      </div>
+                      <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+                        <p className="text-xs text-muted-foreground">Estado</p>
+                        <p className="text-sm font-medium text-foreground">
+                          Configurado manualmente
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="w-full gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
+                        onClick={handleSaveSelectedVisitClientCost}
+                        disabled={savingClientCost || (editableClientCost.trim() ? Number(editableClientCost) : 0) === (selectedReport.costoCliente ?? 0)}
+                      >
+                        {savingClientCost ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Save className="h-4 w-4" />
+                        )}
+                        {savingClientCost ? "Guardando..." : "Guardar costo cliente"}
+                      </Button>
+                    </div>
                   </div>
                 )}
 

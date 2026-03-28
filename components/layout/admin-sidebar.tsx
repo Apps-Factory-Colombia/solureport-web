@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { warmAdminRouteData } from "@/lib/admin/prefetch";
 
 const menuItems = [
   {
@@ -138,6 +139,8 @@ export function AdminSidebar({ collapsed, onToggle }: AdminSidebarProps) {
               <Link
                 key={item.href}
                 href={item.href}
+                onMouseEnter={() => warmAdminRouteData(item.href)}
+                onFocus={() => warmAdminRouteData(item.href)}
                 className={cn(
                   "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-200",
                   isActive

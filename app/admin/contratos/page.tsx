@@ -64,6 +64,8 @@ export default function ContratosPage() {
   const [exportType, setExportType] = useState<"mensual" | "anual">("mensual");
   const [exportFechaInicio, setExportFechaInicio] = useState("");
   const [exportFechaFin, setExportFechaFin] = useState("");
+  const [exportClienteId, setExportClienteId] = useState<string>("todos");
+  const [exportMes, setExportMes] = useState<string>(String(new Date().getMonth() + 1));
   const [createOpen, setCreateOpen] = useState(false);
   const [newClienteId, setNewClienteId] = useState("");
   const [newAnio, setNewAnio] = useState(String(new Date().getFullYear()));
@@ -263,6 +265,85 @@ export default function ContratosPage() {
     }
   };
 
+  const handleExportInformeMensual = (contract: MaintenanceContract, mes: number) => {
+    const client = clients.find((c) => c.id === contract.clienteId);
+    const mantsDelMes = contract.mantenimientosRealizados.filter((m) => m.mes === mes);
+    const totalMes = mantsDelMes.reduce((s, m) => s + m.valorRecaudado, 0);
+    const totalAcumulado = contract.mantenimientosRealizados
+      .filter((m) => m.mes <= mes)
+      .reduce((s, m) => s + m.valorRecaudado, 0);
+
+    const rows = mantsDelMes.length > 0
+      ? mantsDelMes.map((m) => [
+        monthNames[m.mes - 1],
+        m.fechaProgramada,
+        m.fechaRealizado || "No registrada",
+        m.estado.charAt(0).toUpperCase() + m.estado.slice(1),
+        formatCurrency(m.valorRecaudado),
+      ])
+      : [["", "", "Sin mantenimientos en este mes", "", ""]];
+
+    generateTablePDF({
+      titulo: `INFORME MENSUAL - ${monthNames[mes - 1].toUpperCase()} ${contract.anio}`,
+      subtitulo: `Contrato de Mantenimiento Preventivo · ${client?.edificio || client?.nombre || ""}`,
+      empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
+      periodo: `${monthNames[mes - 1]} de ${contract.anio}`,
+      summary: [
+        { label: "Valor Total Anual Contrato", value: formatCurrency(contract.costoTotalAnual) },
+        { label: `Total Recaudado ${monthNames[mes - 1]}`, value: formatCurrency(totalMes) },
+        { label: "Acumulado a la fecha", value: formatCurrency(totalAcumulado) },
+      ],
+      headers: ["Mes", "Fecha Programada", "Fecha Realizado", "Estado", "Valor"],
+      rows,
+      totales: mantsDelMes.length > 0 ? ["", "", "", "Total del mes", formatCurrency(totalMes)] : undefined,
+      fileName: `informe_mensual_${(client?.edificio || "cliente").replace(/\s+/g, "_")}_${monthNames[mes - 1].toLowerCase()}_${contract.anio}`,
+    });
+  };
+
+  const handleExportCierreAnual = (contract: MaintenanceContract) => {
+    const client = clients.find((c) => c.id === contract.clienteId);
+    const totalRecaudado = contract.mantenimientosRealizados.reduce((s, m) => s + m.valorRecaudado, 0);
+    const rows: string[][] = [];
+    let currentMes = 0;
+    let mesTotal = 0;
+
+    contract.mantenimientosRealizados.forEach((m, i) => {
+      if (m.mes !== currentMes && currentMes > 0) {
+        rows.push(["", "", "", `Cierre ${monthNames[currentMes - 1]}`, formatCurrency(mesTotal)]);
+        mesTotal = 0;
+      }
+      currentMes = m.mes;
+      mesTotal += m.valorRecaudado;
+      rows.push([
+        monthNames[m.mes - 1],
+        m.fechaProgramada,
+        m.fechaRealizado || "—",
+        m.estado.charAt(0).toUpperCase() + m.estado.slice(1),
+        formatCurrency(m.valorRecaudado),
+      ]);
+      if (i === contract.mantenimientosRealizados.length - 1) {
+        rows.push(["", "", "", `Cierre ${monthNames[currentMes - 1]}`, formatCurrency(mesTotal)]);
+        rows.push(["", "", "", "Valor Total Anual Contrato", formatCurrency(contract.costoTotalAnual)]);
+      }
+    });
+
+    generateTablePDF({
+      titulo: `CIERRE ANUAL ${contract.anio}`,
+      subtitulo: `Mantenimiento Preventivo · ${client?.edificio || client?.nombre || ""}`,
+      empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
+      periodo: `Año ${contract.anio}`,
+      summary: [
+        { label: "Valor Total Anual Contrato", value: formatCurrency(contract.costoTotalAnual) },
+        { label: "Total Recaudado", value: formatCurrency(totalRecaudado) },
+        { label: "Saldo Pendiente", value: formatCurrency(contract.costoTotalAnual - totalRecaudado) },
+      ],
+      headers: ["Mes", "Fecha Programada", "Fecha Realizado", "Estado", "Valor"],
+      rows,
+      totales: ["", "", "", "Total Anual", formatCurrency(totalRecaudado)],
+      fileName: `cierre_anual_${(client?.edificio || "cliente").replace(/\s+/g, "_")}_${contract.anio}`,
+    });
+  };
+
   const handleDeleteContract = async () => {
     if (!deleteContract) return;
     setDeleting(true);
@@ -324,6 +405,7 @@ export default function ContratosPage() {
     }> = [];
 
     contracts.forEach((ct) => {
+      if (exportClienteId !== "todos" && ct.clienteId !== exportClienteId) return;
       ct.mantenimientosRealizados.forEach((m) => {
         const fechaM = m.fechaProgramada;
         if (exportFechaInicio && fechaM < exportFechaInicio) return;
@@ -332,26 +414,70 @@ export default function ContratosPage() {
       });
     });
 
-    const rows = filteredMaintenance.map(({ contrato, mantenimiento }) => {
-      const client = clients.find((c) => c.id === contrato.clienteId);
-      return [
-        client?.nombre || "—",
-        client?.edificio || "—",
-        String(client?.puertasPeatonales || 0),
-        String(client?.puertasVehiculares || 0),
-        mantenimiento.fechaProgramada,
-        mantenimiento.estado,
-        formatCurrency(mantenimiento.valorRecaudado),
-      ];
-    });
+    const totalValorFiltrado = filteredMaintenance.reduce((s, fm) => s + fm.mantenimiento.valorRecaudado, 0);
+    const uniqueContractIds = [...new Set(filteredMaintenance.map((fm) => fm.contrato.id))];
+    const totalAnualContratos = uniqueContractIds.reduce((s, id) => {
+      const ct = contracts.find((c) => c.id === id);
+      return s + (ct?.costoTotalAnual || 0);
+    }, 0);
+
+    const rows: string[][] = [];
+
+    if (exportType === "mensual") {
+      const byMonth: Record<string, typeof filteredMaintenance> = {};
+      filteredMaintenance.forEach((fm) => {
+        const monthKey = fm.mantenimiento.fechaProgramada.slice(0, 7);
+        if (!byMonth[monthKey]) byMonth[monthKey] = [];
+        byMonth[monthKey].push(fm);
+      });
+
+      Object.entries(byMonth).sort(([a], [b]) => a.localeCompare(b)).forEach(([monthKey, items]) => {
+        items.forEach(({ contrato, mantenimiento }) => {
+          const client = clients.find((c) => c.id === contrato.clienteId);
+          rows.push([
+            client?.nombre || "—",
+            client?.edificio || "—",
+            mantenimiento.fechaProgramada,
+            mantenimiento.estado,
+            formatCurrency(mantenimiento.valorRecaudado),
+            formatCurrency(contrato.costoTotalAnual),
+          ]);
+        });
+        const monthTotal = items.reduce((s, fm) => s + fm.mantenimiento.valorRecaudado, 0);
+        const [year, month] = monthKey.split("-");
+        rows.push(["", "", `Cierre ${monthNames[Number(month) - 1]} ${year}`, "", formatCurrency(monthTotal), ""]);
+      });
+    } else {
+      filteredMaintenance.forEach(({ contrato, mantenimiento }) => {
+        const client = clients.find((c) => c.id === contrato.clienteId);
+        rows.push([
+          client?.nombre || "—",
+          client?.edificio || "—",
+          mantenimiento.fechaProgramada,
+          mantenimiento.estado,
+          formatCurrency(mantenimiento.valorRecaudado),
+          formatCurrency(contrato.costoTotalAnual),
+        ]);
+      });
+      rows.push(["", "", "", "Valor Total Anual Contratos", "", formatCurrency(totalAnualContratos)]);
+    }
+
+    const clientLabel = exportClienteId === "todos"
+      ? "Todos los clientes"
+      : (clients.find((c) => c.id === exportClienteId)?.edificio || "Cliente seleccionado");
 
     generateTablePDF({
       titulo: `REPORTE DE CONTRATOS - ${exportType === "mensual" ? "Cierre Mensual" : "Cierre Anual"}`,
       empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
-      periodo: `${exportFechaInicio || "Inicio"} a ${exportFechaFin || "Fin"}`,
-      headers: ["Cliente", "Edificio", "P.Peat.", "P.Veh.", "Fecha", "Estado", "Valor"],
+      periodo: `${exportFechaInicio || "Inicio"} a ${exportFechaFin || "Fin"} · ${clientLabel}`,
+      summary: [
+        { label: "Mantenimientos", value: String(filteredMaintenance.length) },
+        { label: "Total recaudado", value: formatCurrency(totalValorFiltrado) },
+        { label: "Valor anual contratos", value: formatCurrency(totalAnualContratos) },
+      ],
+      headers: ["Cliente", "Edificio", "Fecha", "Estado", "Valor", "Valor Anual"],
       rows,
-      totales: ["TOTAL", "", "", "", `${filteredMaintenance.length} registros`, "", formatCurrency(filteredMaintenance.reduce((s, fm) => s + fm.mantenimiento.valorRecaudado, 0))],
+      totales: ["TOTAL", "", `${filteredMaintenance.length} registros`, "", formatCurrency(totalValorFiltrado), formatCurrency(totalAnualContratos)],
     });
     setExportOpen(false);
   };
@@ -1008,6 +1134,49 @@ export default function ContratosPage() {
                       })}
                     </div>
                   </div>
+
+                  <div className="space-y-3 pt-4 border-t border-border/50">
+                    <h4 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                      <Download className="h-4 w-4 text-gold" />
+                      Exportar Informes para Cliente
+                    </h4>
+                    <div className="flex flex-wrap items-end gap-3">
+                      <div className="space-y-1">
+                        <label className="text-xs text-muted-foreground">Mes</label>
+                        <Select value={exportMes} onValueChange={setExportMes}>
+                          <SelectTrigger className="w-40 bg-secondary/50 border-border/50 text-sm h-9">
+                            <SelectValue placeholder="Seleccionar mes" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-card border-border">
+                            {monthNames.map((m, i) => (
+                              <SelectItem key={i + 1} value={String(i + 1)}>{m}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-2 h-9 border-gold/30 text-gold hover:bg-gold/10"
+                        onClick={() => handleExportInformeMensual(selectedContract, Number(exportMes))}
+                      >
+                        <Download className="h-4 w-4" />
+                        Informe Mensual
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-2 h-9 border-cyan-neon/30 text-cyan-neon hover:bg-cyan-neon/10"
+                        onClick={() => handleExportCierreAnual(selectedContract)}
+                      >
+                        <Download className="h-4 w-4" />
+                        Cierre Anual
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      El informe mensual incluye el valor total anual del contrato, los mantenimientos del mes seleccionado con fecha y valor, y el acumulado a la fecha.
+                    </p>
+                  </div>
                 </TabsContent>
 
                 <TabsContent value="configuracion" className="p-6 m-0 space-y-4">
@@ -1292,6 +1461,20 @@ export default function ContratosPage() {
                 </SelectContent>
               </Select>
             </div>
+            <div className="space-y-2">
+              <Label className="text-foreground/80">Cliente (opcional)</Label>
+              <Select value={exportClienteId} onValueChange={setExportClienteId}>
+                <SelectTrigger className="bg-secondary/50 border-border/50">
+                  <SelectValue placeholder="Todos los clientes" />
+                </SelectTrigger>
+                <SelectContent className="bg-card border-border">
+                  <SelectItem value="todos">Todos los clientes</SelectItem>
+                  {clients.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>{c.edificio || c.nombre}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label className="text-foreground/80">Fecha Inicio</Label>
@@ -1313,7 +1496,7 @@ export default function ContratosPage() {
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Solo se exportarán los mantenimientos que se encuentren dentro de las fechas seleccionadas.
+              El PDF incluirá el valor total anual de cada contrato, los mantenimientos realizados en el rango de fechas con su valor individual, y los totales por cierre mensual y anual.
             </p>
           </div>
           <DialogFooter>

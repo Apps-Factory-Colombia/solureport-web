@@ -4,6 +4,8 @@ import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache
 
 const REPORTES_ACTIVIDAD_CACHE_KEY = "reportes-actividad:list";
 const REPORTES_ACTIVIDAD_CACHE_TTL = 20_000;
+const LOTES_APROBACION_CACHE_KEY = "lotes-aprobacion:list";
+const LOTES_APROBACION_CACHE_TTL = 20_000;
 const ACUMULACIONES_LIDER_CACHE_KEY = "acumulaciones-lider:list";
 const ACUMULACIONES_LIDER_CACHE_TTL = 20_000;
 
@@ -29,6 +31,9 @@ interface ReporteActividadRow {
   foto_herramienta_url?: string | null;
   estado_aprobacion_lider: ActivityReport["estadoAprobacionLider"];
   fecha_aprobacion_lider?: string | null;
+  costo_actividad_default?: number | string | null;
+  valor_modificado?: boolean | null;
+  motivo_modificacion_valor?: string | null;
   costo_actividad?: number | string | null;
   costo_administrable?: boolean | null;
   enviado_correo?: boolean | null;
@@ -46,6 +51,10 @@ interface RegistroActividadRow {
   cliente_id?: string | null;
   cliente_nombre?: string | null;
   especificacion?: string | null;
+  valor_actividad_base?: number | string | null;
+  valor_actividad_aplicado?: number | string | null;
+  valor_modificado?: boolean | null;
+  motivo_modificacion_valor?: string | null;
   enviado_correo?: boolean | null;
   fecha_ultimo_envio_correo?: string | null;
   periodo_id?: string | null;
@@ -55,6 +64,7 @@ interface RegistroActividadRow {
 interface ActividadParticipanteRow {
   registro_actividad_id: string;
   tecnico_id: string;
+  porcentaje?: number | string | null;
   valor_calculado?: number | string | null;
 }
 
@@ -123,6 +133,24 @@ interface LegacyActivityMirrorMaps {
   fallback: Map<string, ActivityReport>;
 }
 
+interface VisitMirrorRow {
+  id: string;
+  tecnico_id: string;
+  cliente_id?: string | null;
+  descripcion?: string | null;
+  fecha_inicio: string;
+  costo_visita_tecnica_default?: number | string | null;
+  costo_cliente?: number | string | null;
+  valor_modificado?: boolean | null;
+  motivo_modificacion_valor?: string | null;
+  valor_cobrado_cliente?: number | string | null;
+}
+
+interface VisitMirrorMaps {
+  strict: Map<string, VisitMirrorRow>;
+  fallback: Map<string, VisitMirrorRow>;
+}
+
 function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues: string[]): ActivityReport {
   const normalizedTipo: ActivityReport["tipo"] =
     row.tipo === "actividad"
@@ -155,6 +183,9 @@ function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues:
     fotoHerramienta: row.foto_herramienta_url || undefined,
     estadoAprobacionLider: row.estado_aprobacion_lider,
     fechaAprobacionLider: row.fecha_aprobacion_lider?.split("T")[0] || undefined,
+    costoActividadDefault: Number(row.costo_actividad_default ?? 0) || 0,
+    valorModificado: row.valor_modificado ?? false,
+    motivoModificacionValor: row.motivo_modificacion_valor || undefined,
     costoActividad: Number(row.costo_actividad ?? 0) || 0,
     costoAdministrable: row.costo_administrable || false,
     correoEnviado: row.enviado_correo || false,
@@ -222,6 +253,144 @@ function enrichLegacyActivityReport(
     fechaUltimoEnvioCorreo: mirror.fechaUltimoEnvioCorreo || report.fechaUltimoEnvioCorreo,
     fechaCreacion: mirror.fechaCreacion || report.fechaCreacion,
   };
+}
+
+function buildVisitMirrorStrictKey(params: {
+  tecnicoId: string;
+  fecha: string;
+  clienteId?: string | null;
+  descripcion?: string | null;
+}) {
+  return [params.tecnicoId, params.fecha, params.clienteId || "", params.descripcion || ""].join("|");
+}
+
+function buildVisitMirrorFallbackKey(params: {
+  tecnicoId: string;
+  fecha: string;
+  clienteId?: string | null;
+}) {
+  return [params.tecnicoId, params.fecha, params.clienteId || ""].join("|");
+}
+
+function enrichVisitReport(
+  report: ActivityReport,
+  mirrors?: VisitMirrorMaps
+): ActivityReport {
+  if (!mirrors || report.tipo !== "visita_tecnica") return report;
+
+  const strictKey = buildVisitMirrorStrictKey({
+    tecnicoId: report.tecnicoId,
+    fecha: report.fecha,
+    clienteId: report.clienteId,
+    descripcion: report.descripcion,
+  });
+  const fallbackKey = buildVisitMirrorFallbackKey({
+    tecnicoId: report.tecnicoId,
+    fecha: report.fecha,
+    clienteId: report.clienteId,
+  });
+
+  const mirror = mirrors.strict.get(strictKey) || mirrors.fallback.get(fallbackKey);
+
+  if (!mirror) return report;
+
+  const mirrorDefaultCost = Number(mirror.costo_visita_tecnica_default ?? 0) || 0;
+  const mirrorReportedCost = Number(mirror.valor_cobrado_cliente ?? 0) || 0;
+  const hasMirrorVisitId = !report.visitaTecnicaId && !!mirror.id;
+  const shouldUseMirrorClientCost = mirror.costo_cliente != null && report.costoCliente !== (Number(mirror.costo_cliente) || 0);
+  const shouldUseMirrorDefault = !report.costoActividadDefault && mirrorDefaultCost > 0;
+  const shouldUseMirrorReason = !report.motivoModificacionValor && !!mirror.motivo_modificacion_valor;
+  const shouldUseMirrorModifiedFlag = !report.valorModificado && !!mirror.valor_modificado;
+  const shouldUseMirrorReportedCost = report.costoActividad <= 0 && mirrorReportedCost > 0;
+
+  if (!hasMirrorVisitId && !shouldUseMirrorClientCost && !shouldUseMirrorDefault && !shouldUseMirrorReason && !shouldUseMirrorModifiedFlag && !shouldUseMirrorReportedCost) {
+    return report;
+  }
+
+  return {
+    ...report,
+    visitaTecnicaId: report.visitaTecnicaId || mirror.id,
+    costoCliente: mirror.costo_cliente == null ? (report.costoCliente ?? 0) : Number(mirror.costo_cliente) || 0,
+    costoActividadDefault: shouldUseMirrorDefault ? mirrorDefaultCost : report.costoActividadDefault,
+    valorModificado: shouldUseMirrorModifiedFlag ? true : report.valorModificado,
+    motivoModificacionValor: shouldUseMirrorReason ? mirror.motivo_modificacion_valor || undefined : report.motivoModificacionValor,
+    costoActividad: shouldUseMirrorReportedCost ? mirrorReportedCost : report.costoActividad,
+  };
+}
+
+export async function updateCostoClienteVisitaAdmin(
+  reporteId: string,
+  costoCliente: number | null,
+  visitaTecnicaId?: string
+): Promise<void> {
+  const normalizedCostoCliente = costoCliente ?? 0;
+
+  if (visitaTecnicaId) {
+    const { error: directUpdateError } = await supabase
+      .from("visitas_tecnicas")
+      .update({ costo_cliente: normalizedCostoCliente })
+      .eq("id", visitaTecnicaId);
+    if (directUpdateError) throw directUpdateError;
+
+    invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+    invalidateCachedValue("visitas:list");
+    return;
+  }
+
+  const { data: report, error: reportError } = await supabase
+    .from("reportes_actividad")
+    .select("id, tipo, tecnico_id, cliente_id, fecha, descripcion")
+    .eq("id", reporteId)
+    .single();
+  if (reportError) throw reportError;
+
+  if (report?.tipo !== "visita_tecnica") {
+    throw new Error("El costo cliente solo aplica a visitas técnicas.");
+  }
+
+  const startDate = report.fecha;
+  const endDate = addOneDay(report.fecha);
+
+  let visitQuery = supabase
+    .from("visitas_tecnicas")
+    .select("id, descripcion")
+    .eq("tecnico_id", report.tecnico_id)
+    .gte("fecha_inicio", startDate)
+    .lt("fecha_inicio", endDate);
+
+  if (report.cliente_id) {
+    visitQuery = visitQuery.eq("cliente_id", report.cliente_id);
+  } else {
+    visitQuery = visitQuery.is("cliente_id", null);
+  }
+
+  const { data: candidateVisits, error: visitsLookupError } = await visitQuery;
+  if (visitsLookupError) throw visitsLookupError;
+
+  let visitIds = (candidateVisits || []).map((visit: { id: string }) => visit.id);
+
+  if (visitIds.length > 1 && report.descripcion) {
+    const exactMatches = (candidateVisits || [])
+      .filter((visit: { id: string; descripcion?: string | null }) => visit.descripcion === report.descripcion)
+      .map((visit: { id: string }) => visit.id);
+
+    if (exactMatches.length > 0) {
+      visitIds = exactMatches;
+    }
+  }
+
+  if (visitIds.length === 0) {
+    throw new Error("No se encontró la visita técnica asociada al reporte.");
+  }
+
+  const { error: updateError } = await supabase
+    .from("visitas_tecnicas")
+    .update({ costo_cliente: normalizedCostoCliente })
+    .in("id", visitIds);
+  if (updateError) throw updateError;
+
+  invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+  invalidateCachedValue("visitas:list");
 }
 
 async function syncVisitLiquidationFromReport(params: {
@@ -399,6 +568,16 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
         approval?.estado === "aprobada" ? "aprobado"
           : approval?.estado === "rechazada" ? "rechazado"
             : "pendiente";
+      const porcentajeParticipacion = Number(part.porcentaje ?? 0) || 0;
+      const valorActividadBase = Number(reg.valor_actividad_base ?? 0) || 0;
+      const valorActividadAplicado = Number(reg.valor_actividad_aplicado ?? 0) || 0;
+      const valorBaseParticipante = porcentajeParticipacion > 0
+        ? (valorActividadBase * porcentajeParticipacion) / 100
+        : valorActividadBase;
+      const valorAplicadoParticipante = porcentajeParticipacion > 0
+        ? (valorActividadAplicado * porcentajeParticipacion) / 100
+        : valorActividadAplicado;
+      const valorCalculadoParticipante = Number(part.valor_calculado ?? 0) || 0;
 
       reports.push(enrichLegacyActivityReport({
         id: `reg-${reg.id}-${part.tecnico_id}`,
@@ -412,7 +591,10 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
         especificacion: reg.especificacion || undefined,
         estadoAprobacionLider: estadoAprobacion,
         fechaAprobacionLider: approval?.fecha_aprobacion?.split("T")[0] || undefined,
-        costoActividad: Number(part.valor_calculado ?? 0) || 0,
+        costoActividadDefault: valorBaseParticipante,
+        valorModificado: reg.valor_modificado ?? valorActividadBase !== valorActividadAplicado,
+        motivoModificacionValor: reg.motivo_modificacion_valor || undefined,
+        costoActividad: valorCalculadoParticipante || valorAplicadoParticipante,
         costoAdministrable: false,
         correoEnviado: reg.enviado_correo || false,
         fechaUltimoEnvioCorreo: reg.fecha_ultimo_envio_correo || undefined,
@@ -443,6 +625,53 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 
     if (fotosError) throw fotosError;
 
+    const visitReportRows = (data || []).filter((row: ReporteActividadRow) => row.tipo === "visita_tecnica");
+    const uniqueVisitTechIds = Array.from(new Set(visitReportRows.map((row) => row.tecnico_id).filter(Boolean)));
+    const visitDates = visitReportRows.map((row) => row.fecha).filter(Boolean);
+    const minVisitDate = visitDates.length > 0 ? [...visitDates].sort()[0] : null;
+    const maxVisitDate = visitDates.length > 0 ? [...visitDates].sort().at(-1) || null : null;
+
+    const { data: visitMirrorData, error: visitMirrorError } = uniqueVisitTechIds.length > 0 && minVisitDate && maxVisitDate
+      ? await supabase
+        .from("visitas_tecnicas")
+        .select("*")
+        .in("tecnico_id", uniqueVisitTechIds)
+        .gte("fecha_inicio", `${minVisitDate}T00:00:00`)
+        .lt("fecha_inicio", `${addOneDay(maxVisitDate)}T00:00:00`)
+      : { data: [], error: null };
+
+    if (visitMirrorError) throw visitMirrorError;
+
+    const visitMirrors: VisitMirrorMaps = {
+      strict: new Map<string, VisitMirrorRow>(),
+      fallback: new Map<string, VisitMirrorRow>(),
+    };
+
+    for (const row of (visitMirrorData || []) as VisitMirrorRow[]) {
+      const fecha = row.fecha_inicio?.split("T")[0] || "";
+      if (!row.tecnico_id || !fecha) continue;
+
+      const strictKey = buildVisitMirrorStrictKey({
+        tecnicoId: row.tecnico_id,
+        fecha,
+        clienteId: row.cliente_id,
+        descripcion: row.descripcion,
+      });
+      const fallbackKey = buildVisitMirrorFallbackKey({
+        tecnicoId: row.tecnico_id,
+        fecha,
+        clienteId: row.cliente_id,
+      });
+
+      if (!visitMirrors.strict.has(strictKey)) {
+        visitMirrors.strict.set(strictKey, row);
+      }
+
+      if (!visitMirrors.fallback.has(fallbackKey)) {
+        visitMirrors.fallback.set(fallbackKey, row);
+      }
+    }
+
     const fotosByReporte = new Map<string, Array<{ tipo: string; url: string }>>();
     for (const foto of (fotosData || []) as ReporteActividadFotoRow[]) {
       const reporteId = foto.reporte_actividad_id;
@@ -462,7 +691,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       const fotos = fotosByReporte.get(row.id) || [];
       const fotosAntes = fotos.filter((f) => f.tipo === "antes").map((f) => f.url);
       const fotosDespues = fotos.filter((f) => f.tipo === "despues").map((f) => f.url);
-      const mappedReport = mapReport(row, fotosAntes, fotosDespues);
+      const mappedReport = enrichVisitReport(mapReport(row, fotosAntes, fotosDespues), visitMirrors);
 
       if (mappedReport.tipo === "actividad_grupal") {
         const strictKey = buildLegacyActivityMirrorKey({
@@ -634,12 +863,14 @@ function mapBatch(row: LeaderApprovalBatchRow): LeaderApprovalBatch {
 }
 
 export async function getLotesAprobacion(): Promise<LeaderApprovalBatch[]> {
-  const { data, error } = await supabase
-    .from("lotes_aprobacion_lider")
-    .select("*")
-    .order("fecha_cierre", { ascending: false });
-  if (error) throw error;
-  return (data || []).map(mapBatch);
+  return getCachedValue(LOTES_APROBACION_CACHE_KEY, LOTES_APROBACION_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("lotes_aprobacion_lider")
+      .select("*")
+      .order("fecha_cierre", { ascending: false });
+    if (error) throw error;
+    return (data || []).map(mapBatch);
+  });
 }
 
 function mapAccumulation(row: LeaderAccumulationRow): LeaderAccumulation {

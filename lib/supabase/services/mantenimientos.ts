@@ -8,6 +8,14 @@ const MANTENIMIENTOS_CACHE_TTL = 30_000;
 const REPORTES_MANTENIMIENTO_CACHE_KEY = "mantenimientos:reportes";
 const REPORTES_MANTENIMIENTO_CACHE_TTL = 30_000;
 
+export function invalidateMantenimientosCache() {
+  invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
+}
+
+export function invalidateReportesMantenimientoCache() {
+  invalidateCachedValue(REPORTES_MANTENIMIENTO_CACHE_KEY);
+}
+
 function toDateOnly(value: unknown): string {
   if (typeof value !== "string") return "";
   return value.split("T")[0] || "";
@@ -114,7 +122,7 @@ export async function createMantenimiento(m: Partial<Maintenance>): Promise<Main
     .select()
     .single();
   if (error) throw error;
-  invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
+  invalidateMantenimientosCache();
   return mapRow(data);
 }
 
@@ -157,7 +165,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
       .maybeSingle();
     if (contratoError) throw contratoError;
 
-    invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
+    invalidateMantenimientosCache();
     return mapContratoRow(contratoMant, contrato);
   }
 
@@ -177,7 +185,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
     .select()
     .single();
   if (error) throw error;
-  invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
+  invalidateMantenimientosCache();
   return mapRow(data);
 }
 
@@ -192,13 +200,13 @@ export async function deleteMantenimiento(id: string): Promise<void> {
   if (mantenimientoExistente) {
     const { error } = await supabase.from("mantenimientos").delete().eq("id", id);
     if (error) throw error;
-    invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
+    invalidateMantenimientosCache();
     return;
   }
 
   const { error } = await supabase.from("contrato_mantenimientos").delete().eq("id", id);
   if (error) throw error;
-  invalidateCachedValue(MANTENIMIENTOS_CACHE_KEY);
+  invalidateMantenimientosCache();
 }
 
 function mapReport(

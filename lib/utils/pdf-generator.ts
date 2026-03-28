@@ -21,11 +21,114 @@ interface PDFReportData {
 
 interface PDFTableData {
   titulo: string;
+  subtitulo?: string;
   empresa: string;
   periodo?: string;
   headers: string[];
   rows: string[][];
   totales?: string[];
+  summary?: Array<{ label: string; value: string }>;
+  fileName?: string;
+  landscape?: boolean;
+}
+
+function normalizePdfCellValue(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function normalizePdfHeaderLabel(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function getTableColumnStyles(headers: string[], availableWidth: number) {
+  const columnStyles: Record<number, { cellWidth: number; halign?: "left" | "center" | "right" }> = {};
+  const flexibleIndexes: number[] = [];
+  let fixedWidth = 0;
+
+  headers.forEach((header, index) => {
+    const normalizedHeader = normalizePdfHeaderLabel(header);
+
+    if (normalizedHeader.includes("fecha")) {
+      columnStyles[index] = { cellWidth: 24 };
+      fixedWidth += 24;
+      return;
+    }
+
+    if (normalizedHeader.includes("tecnico")) {
+      columnStyles[index] = { cellWidth: 38 };
+      fixedWidth += 38;
+      return;
+    }
+
+    if (normalizedHeader.includes("cliente") || normalizedHeader.includes("proyecto") || normalizedHeader.includes("grupo")) {
+      columnStyles[index] = { cellWidth: 32 };
+      fixedWidth += 32;
+      return;
+    }
+
+    if (normalizedHeader.includes("estado")) {
+      columnStyles[index] = { cellWidth: 18, halign: "center" };
+      fixedWidth += 18;
+      return;
+    }
+
+    if (normalizedHeader.includes("tipo")) {
+      columnStyles[index] = { cellWidth: 44 };
+      fixedWidth += 44;
+      return;
+    }
+
+    if (normalizedHeader.includes("costo") || normalizedHeader.includes("valor") || normalizedHeader.includes("total")) {
+      const width = normalizedHeader.length > 10 ? 32 : 24;
+      columnStyles[index] = { cellWidth: width, halign: "right" };
+      fixedWidth += width;
+      return;
+    }
+
+    flexibleIndexes.push(index);
+  });
+
+  const remainingWidth = Math.max(availableWidth - fixedWidth, flexibleIndexes.length * 18);
+  const flexibleWidth = remainingWidth / Math.max(flexibleIndexes.length, 1);
+
+  flexibleIndexes.forEach((index) => {
+    columnStyles[index] = { cellWidth: flexibleWidth };
+  });
+
+  return columnStyles;
+}
+
+function buildWrappedTableRows(
+  doc: jsPDF,
+  headers: string[],
+  rows: string[][],
+  columnStyles: Record<number, { cellWidth: number; halign?: "left" | "center" | "right" }>,
+) {
+  const normalizedHeaders = headers.map(normalizePdfHeaderLabel);
+
+  return rows.map((row) => row.map((cell, index) => {
+    const value = normalizePdfCellValue(cell || "");
+    if (!value) return "";
+
+    const header = normalizedHeaders[index] || "";
+    const columnWidth = columnStyles[index]?.cellWidth ?? 28;
+    const wrapWidth = Math.max(columnWidth - 5, 10);
+    const shouldKeepSingleLine =
+      header.includes("fecha") ||
+      header.includes("estado") ||
+      header.includes("costo") ||
+      header.includes("valor") ||
+      header.includes("total");
+
+    if (shouldKeepSingleLine) {
+      return value;
+    }
+
+    return doc.splitTextToSize(value, wrapWidth);
+  }));
 }
 
 async function getBase64ImageFromUrl(imageUrl: string): Promise<string | null> {
@@ -299,61 +402,104 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
 }
 
 export function generateTablePDF(data: PDFTableData): void {
-  const doc = new jsPDF();
+  const doc = new jsPDF({ orientation: data.landscape ? "landscape" : "portrait" });
   const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const tableMargin = { left: 14, right: 14, bottom: 16, top: 10 };
+  const tableContentWidth = pageWidth - tableMargin.left - tableMargin.right;
   let y = 15;
 
-  // Header
-  doc.setFontSize(10);
-  doc.setTextColor(100);
-  doc.text(data.empresa, pageWidth / 2, y, { align: "center" });
-  y += 8;
+  doc.setFillColor(15, 23, 42);
+  doc.roundedRect(12, 10, pageWidth - 24, 28, 4, 4, "F");
 
-  doc.setFontSize(14);
-  doc.setTextColor(30);
-  doc.text(data.titulo, pageWidth / 2, y, { align: "center" });
-  y += 7;
+  doc.setFontSize(9);
+  doc.setTextColor(191, 219, 254);
+  doc.text(data.empresa, 18, 18);
+
+  doc.setFontSize(17);
+  doc.setTextColor(255, 255, 255);
+  doc.text(data.titulo, 18, 27);
+
+  if (data.subtitulo) {
+    doc.setFontSize(9);
+    doc.setTextColor(203, 213, 225);
+    doc.text(data.subtitulo, 18, 34);
+  }
+
+  y = 46;
 
   if (data.periodo) {
+    doc.setFillColor(241, 245, 249);
+    doc.roundedRect(14, y - 4, pageWidth - 28, 10, 3, 3, "F");
     doc.setFontSize(9);
-    doc.setTextColor(100);
-    doc.text(`Período: ${data.periodo}`, pageWidth / 2, y, { align: "center" });
-    y += 5;
+    doc.setTextColor(71, 85, 105);
+    doc.text(`Período consultado: ${data.periodo}`, 18, y + 2);
+    y += 12;
+  }
+
+  if ((data.summary || []).length > 0) {
+    const summaryItems = data.summary || [];
+    const gap = 4;
+    const cardWidth = (pageWidth - 28 - gap * (summaryItems.length - 1)) / summaryItems.length;
+
+    summaryItems.forEach((item, index) => {
+      const x = 14 + index * (cardWidth + gap);
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(x, y, cardWidth, 18, 3, 3, "FD");
+      doc.setFontSize(8);
+      doc.setTextColor(100, 116, 139);
+      doc.text(item.label, x + 4, y + 6);
+      doc.setFontSize(11);
+      doc.setTextColor(15, 23, 42);
+      doc.text(item.value, x + 4, y + 13);
+    });
+
+    y += 24;
   }
 
   doc.setFontSize(8);
   doc.setTextColor(100);
-  doc.text(`Fecha de generación: ${new Date().toLocaleDateString("es-CO")}`, pageWidth / 2, y, { align: "center" });
-  y += 8;
+  doc.text(`Fecha de generación: ${new Date().toLocaleDateString("es-CO")}`, pageWidth - 14, y, { align: "right" });
+  y += 6;
 
-  // Table
+  const columnStyles = getTableColumnStyles(data.headers, tableContentWidth);
+  const wrappedRows = buildWrappedTableRows(doc, data.headers, data.rows, columnStyles);
+  const wrappedFoot = data.totales ? buildWrappedTableRows(doc, data.headers, [data.totales], columnStyles) : undefined;
+
   autoTable(doc, {
     startY: y,
     head: [data.headers],
-    body: data.rows,
-    foot: data.totales ? [data.totales] : undefined,
+    body: wrappedRows,
+    foot: wrappedFoot,
     styles: {
-      fontSize: 8,
+      fontSize: 7.5,
       cellPadding: 3,
-      textColor: [50, 50, 50],
+      overflow: "linebreak",
+      textColor: [43, 50, 61],
+      lineColor: [226, 232, 240],
+      lineWidth: 0.2,
+      valign: "middle",
     },
     headStyles: {
-      fillColor: [13, 138, 188],
+      fillColor: [15, 23, 42],
       textColor: [255, 255, 255],
       fontStyle: "bold",
     },
     footStyles: {
-      fillColor: [240, 240, 240],
-      textColor: [30, 30, 30],
+      fillColor: [226, 232, 240],
+      textColor: [15, 23, 42],
       fontStyle: "bold",
     },
     alternateRowStyles: {
-      fillColor: [248, 248, 248],
+      fillColor: [248, 250, 252],
     },
+    columnStyles,
+    tableWidth: tableContentWidth,
     theme: "grid",
+    margin: tableMargin,
   });
 
-  // Footer
   const pageCount = doc.getNumberOfPages();
   for (let i = 1; i <= pageCount; i++) {
     doc.setPage(i);
@@ -362,12 +508,12 @@ export function generateTablePDF(data: PDFTableData): void {
     doc.text(
       `${data.empresa} - Generado: ${new Date().toLocaleDateString("es-CO")} - Página ${i}/${pageCount}`,
       pageWidth / 2,
-      doc.internal.pageSize.getHeight() - 8,
+      pageHeight - 8,
       { align: "center" }
     );
   }
 
-  const safeTitulo = data.titulo.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 50);
+  const safeTitulo = (data.fileName || data.titulo).replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 70);
   doc.save(`${safeTitulo}_${new Date().toISOString().split("T")[0]}.pdf`);
 }
 
@@ -386,6 +532,8 @@ export function generateComprobantePDF(data: {
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
   let y = 15;
+  const tableMargin = { left: 14, right: 14 };
+  const tableContentWidth = pageWidth - tableMargin.left - tableMargin.right;
 
   // Header
   doc.setFontSize(10);
@@ -430,9 +578,17 @@ export function generateComprobantePDF(data: {
       `${item.porcentaje}%`,
       formatCurrencyPDF(item.valorBase),
     ]),
-    styles: { fontSize: 8, cellPadding: 2.5 },
+    styles: { fontSize: 8, cellPadding: 2.5, overflow: "linebreak", valign: "middle" },
     headStyles: { fillColor: [13, 138, 188], textColor: [255, 255, 255] },
+    columnStyles: {
+      0: { cellWidth: tableContentWidth - 82 },
+      1: { cellWidth: 24 },
+      2: { cellWidth: 28, halign: "right" },
+      3: { cellWidth: 10, halign: "center" },
+      4: { cellWidth: 20, halign: "right" },
+    },
     theme: "grid",
+    margin: tableMargin,
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -452,9 +608,15 @@ export function generateComprobantePDF(data: {
         item.fecha,
         formatCurrencyPDF(item.valor),
       ]),
-      styles: { fontSize: 8, cellPadding: 2.5 },
+      styles: { fontSize: 8, cellPadding: 2.5, overflow: "linebreak", valign: "middle" },
       headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255] },
+      columnStyles: {
+        0: { cellWidth: tableContentWidth - 52 },
+        1: { cellWidth: 24 },
+        2: { cellWidth: 28, halign: "right" },
+      },
       theme: "grid",
+      margin: tableMargin,
     });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

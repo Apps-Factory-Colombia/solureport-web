@@ -1,5 +1,9 @@
 import { supabase } from "../client";
 import { Activity, PriceHistory } from "@/lib/types";
+import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+
+const ACTIVIDADES_CACHE_KEY = "actividades:list";
+const ACTIVIDADES_CACHE_TTL = 60_000;
 
 interface ActivityRow {
   id: string;
@@ -39,33 +43,35 @@ function mapHistorial(row: ActivityHistoryRow): PriceHistory {
 }
 
 export async function getActividades(): Promise<Activity[]> {
-  const { data, error } = await supabase
-    .from("actividades")
-    .select("*")
-    .order("codigo", { ascending: true });
-  if (error) throw error;
+  return getCachedValue(ACTIVIDADES_CACHE_KEY, ACTIVIDADES_CACHE_TTL, async () => {
+    const { data, error } = await supabase
+      .from("actividades")
+      .select("*")
+      .order("codigo", { ascending: true });
+    if (error) throw error;
 
-  const activityRows = (data || []) as ActivityRow[];
-  const activityIds = activityRows.map((row) => row.id);
+    const activityRows = (data || []) as ActivityRow[];
+    const activityIds = activityRows.map((row) => row.id);
 
-  const { data: historyData, error: historyError } = activityIds.length > 0
-    ? await supabase
-      .from("actividades_historial_precios")
-      .select("actividad_id, fecha, valor_anterior, valor_nuevo")
-      .in("actividad_id", activityIds)
-      .order("fecha", { ascending: false })
-    : { data: [], error: null };
+    const { data: historyData, error: historyError } = activityIds.length > 0
+      ? await supabase
+        .from("actividades_historial_precios")
+        .select("actividad_id, fecha, valor_anterior, valor_nuevo")
+        .in("actividad_id", activityIds)
+        .order("fecha", { ascending: false })
+      : { data: [], error: null };
 
-  if (historyError) throw historyError;
+    if (historyError) throw historyError;
 
-  const historyByActivityId = new Map<string, PriceHistory[]>();
-  for (const historyRow of (historyData || []) as ActivityHistoryRow[]) {
-    const current = historyByActivityId.get(historyRow.actividad_id) || [];
-    current.push(mapHistorial(historyRow));
-    historyByActivityId.set(historyRow.actividad_id, current);
-  }
+    const historyByActivityId = new Map<string, PriceHistory[]>();
+    for (const historyRow of (historyData || []) as ActivityHistoryRow[]) {
+      const current = historyByActivityId.get(historyRow.actividad_id) || [];
+      current.push(mapHistorial(historyRow));
+      historyByActivityId.set(historyRow.actividad_id, current);
+    }
 
-  return activityRows.map((row) => mapRow(row, historyByActivityId.get(row.id) || []));
+    return activityRows.map((row) => mapRow(row, historyByActivityId.get(row.id) || []));
+  });
 }
 
 export async function createActividad(activity: Partial<Activity>): Promise<Activity> {
@@ -81,6 +87,7 @@ export async function createActividad(activity: Partial<Activity>): Promise<Acti
     .select()
     .single();
   if (error) throw error;
+  invalidateCachedValue(ACTIVIDADES_CACHE_KEY);
   return mapRow(data);
 }
 
@@ -116,10 +123,12 @@ export async function updateActividad(id: string, activity: Partial<Activity>): 
     .select("*")
     .eq("actividad_id", id)
     .order("fecha", { ascending: false });
+  invalidateCachedValue(ACTIVIDADES_CACHE_KEY);
   return mapRow(data, (hist || []).map(mapHistorial));
 }
 
 export async function deleteActividad(id: string): Promise<void> {
   const { error } = await supabase.from("actividades").delete().eq("id", id);
   if (error) throw error;
+  invalidateCachedValue(ACTIVIDADES_CACHE_KEY);
 }
