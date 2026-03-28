@@ -19,7 +19,10 @@ export async function getCachedValue<T>(
     const existing = cache.get(key) as CacheEntry<T> | undefined;
 
     if (isFresh(existing, now)) {
-        return existing.value;
+        const cachedValue = existing?.value;
+        if (cachedValue !== undefined) {
+            return cachedValue;
+        }
     }
 
     if (existing?.promise) {
@@ -53,7 +56,7 @@ export function peekCachedValue<T>(
     options?: { allowExpired?: boolean }
 ): T | undefined {
     const entry = cache.get(key) as CacheEntry<T> | undefined;
-    if (!entry?.value) {
+    if (entry?.value === undefined) {
         return undefined;
     }
 
