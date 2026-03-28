@@ -85,7 +85,12 @@ function mapRow(row: LlegadaRow, schedulesByUser: ScheduleMap = {}): ArrivalReco
     mensajeEnviado: row.mensaje_enviado || undefined,
     tipoMensaje: row.tipo_mensaje || undefined,
     descuentoAplicado: row.descuento_aplicado || false,
-    porcentajeDescuento: parseFloat(row.porcentaje_descuento) || 0,
+    porcentajeDescuento:
+      typeof row.porcentaje_descuento === "number"
+        ? row.porcentaje_descuento
+        : row.porcentaje_descuento
+          ? Number(row.porcentaje_descuento)
+          : 0,
     fechaCreacion: row.fecha_creacion?.split("T")[0] || "",
   };
 }
