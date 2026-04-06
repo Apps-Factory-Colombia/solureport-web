@@ -28,11 +28,20 @@ interface LiquidationEntryRow {
 interface LiquidationParticipantRow {
   registro_actividad_id: string;
   tecnico_id: string;
-  porcentaje: string | number;
-  valor_calculado: string | number;
+  porcentaje: string | number | null;
+  valor_calculado: string | number | null;
 }
 
 type PeriodUpdatePayload = Partial<Pick<LiquidationPeriodRow, "fecha_inicio" | "fecha_fin" | "estado">>;
+
+function toNumber(value: string | number | null | undefined): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
 
 function mapPeriod(row: LiquidationPeriodRow): LiquidationPeriod {
   return {
@@ -166,8 +175,8 @@ export async function getLiquidationEntries(): Promise<LiquidationEntry[]> {
       const current = participantesByRegistro.get(registroId) || [];
       current.push({
         tecnicoId: part.tecnico_id,
-        porcentaje: parseFloat(part.porcentaje) || 0,
-        valorCalculado: parseFloat(part.valor_calculado) || 0,
+        porcentaje: toNumber(part.porcentaje),
+        valorCalculado: toNumber(part.valor_calculado),
       });
       participantesByRegistro.set(registroId, current);
     }
@@ -208,8 +217,8 @@ export async function createLiquidationEntry(entry: Partial<LiquidationEntry> & 
       if (pData) {
         participantes.push({
           tecnicoId: pData.tecnico_id,
-          porcentaje: parseFloat(pData.porcentaje),
-          valorCalculado: parseFloat(pData.valor_calculado),
+          porcentaje: toNumber(pData.porcentaje),
+          valorCalculado: toNumber(pData.valor_calculado),
         });
       }
     }

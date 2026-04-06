@@ -137,12 +137,6 @@ function calculateDiscountValue(base: number, percentage: number) {
   return Math.round(base * percentage / 100);
 }
 
-function getLeaderExtraValue(accumulations: LeaderAccumulation[], periodId: string, techId: string) {
-  const accumulation = accumulations.find((item) => item.periodoId === periodId && item.liderId === techId);
-  if (!accumulation || accumulation.extraLiderActivo === false) return 0;
-  return Number(accumulation.extraLider ?? 0) || 0;
-}
-
 function buildStableOrderKey(periodId: string, entityId: string) {
   return `${periodId}:${entityId}`;
 }
@@ -332,15 +326,52 @@ export default function LiquidacionPage() {
     return acc;
   }, new Map());
 
-  const leaderExtraByTech = leaderAccumulations.reduce<Map<string, number>>((acc, accumulation) => {
-    if (accumulation.periodoId !== selectedPeriodId || accumulation.extraLiderActivo === false) {
+  const periodAccumulationSettings = leaderAccumulations.reduce<Map<string, LeaderAccumulation>>((acc, item) => {
+    if (item.periodoId === selectedPeriodId) {
+      acc.set(item.liderId, item);
+    }
+    return acc;
+  }, new Map());
+
+  const defaultExtraPct = companySettings?.porcentajeExtraLider || 0;
+  const defaultExtraActivo = companySettings?.extraLiderActivo ?? false;
+
+  const leaderExtraByTech = groups.reduce<Map<string, number>>((acc, group) => {
+    const liderId = group.liderId;
+    if (!liderId) return acc;
+
+    const persisted = periodAccumulationSettings.get(liderId);
+    const porcentajeExtraLiderAplicado = persisted?.porcentajeExtraLiderAplicado ?? defaultExtraPct;
+    const extraLiderActivo = persisted?.extraLiderActivo ?? defaultExtraActivo;
+
+    if (!extraLiderActivo || porcentajeExtraLiderAplicado <= 0) {
+      acc.set(liderId, 0);
       return acc;
     }
 
-    const extraValue = Number(accumulation.extraLider ?? 0) || 0;
-    if (extraValue <= 0) return acc;
+    const groupMembers = users.filter((user) => group.miembros.includes(user.id) && user.id !== liderId);
+    const excludedTechnicianIds = persisted?.tecnicosExcluidosExtraIds?.length
+      ? persisted.tecnicosExcluidosExtraIds
+      : groupMembers[0]
+        ? [groupMembers[0].id]
+        : [];
 
-    acc.set(accumulation.liderId, (acc.get(accumulation.liderId) || 0) + extraValue);
+    let extraBase = 0;
+
+    groupMembers.forEach((member) => {
+      if (excludedTechnicianIds.includes(member.id)) return;
+
+      const memberReports = periodReports.filter(
+        (report) => report.tecnicoId === member.id
+          && report.tipo !== "recorrido"
+          && report.estadoAprobacionLider === "aprobado"
+          && report.liderGrupoId === liderId
+      );
+
+      extraBase += memberReports.reduce((sum, report) => sum + report.costoActividad, 0);
+    });
+
+    acc.set(liderId, Math.round(extraBase * porcentajeExtraLiderAplicado / 100));
     return acc;
   }, new Map());
 
@@ -629,7 +660,7 @@ export default function LiquidacionPage() {
       const pdfAuxilio = pdfNonRecorrido.reduce((sum, report) => sum + report.costoActividad, 0);
       const pdfRodamiento = pdfRecorrido.reduce((sum, report) => sum + report.costoActividad, 0);
       const pdfDescuentoTardanza = techData.descuentoValor;
-      const pdfExtraLider = selectedPeriodId ? getLeaderExtraValue(leaderAccumulations, selectedPeriodId, selectedTechId) : 0;
+      const pdfExtraLider = leaderExtraByTech.get(selectedTechId) || 0;
 
       generateComprobantePDF({
         empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
@@ -1333,7 +1364,7 @@ export default function LiquidacionPage() {
                   const techRecorridos = techReports.filter((r) => r.tipo === "recorrido");
                   const rodamiento = techRecorridos.reduce((s, r) => s + r.costoActividad, 0);
                   const auxilioNeto = data.totalNoRecorridos - data.descuentoValor;
-                  const extraLider = selectedPeriodId ? getLeaderExtraValue(leaderAccumulations, selectedPeriodId, techId) : 0;
+                  const extraLider = leaderExtraByTech.get(techId) || 0;
                   const totalComprobante = auxilioNeto + rodamiento + extraLider;
 
                   return (
@@ -1574,7 +1605,7 @@ export default function LiquidacionPage() {
             const rodamientoTotal = recorridoReports.reduce((s, r) => s + r.costoActividad, 0);
             const descuentoTardanza = techData.descuentoValor;
             const auxilioNeto = auxilioTotal - descuentoTardanza;
-            const extraLider = selectedPeriodId ? getLeaderExtraValue(leaderAccumulations, selectedPeriodId, selectedTechId) : 0;
+            const extraLider = leaderExtraByTech.get(selectedTechId) || 0;
             const grandTotal = auxilioNeto + rodamientoTotal + extraLider;
 
             return (
