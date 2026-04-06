@@ -67,6 +67,7 @@ import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { getCurrentOrLatestPeriodo, getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
+import { sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
 import { CompanySettings, LiquidationPeriod } from "@/lib/types";
 import {
   Pagination,
@@ -455,24 +456,28 @@ export default function AprobacionesPage() {
     const clienteNombre = client?.contacto || client?.nombre || "Cliente";
     const edificio = client?.edificio || group?.nombre || tipo.label;
     const fileBaseName = getSafeFileSegment(client?.edificio || group?.nombre || tipo.label);
-    const resumen = report.descripcion || report.especificacion || report.observaciones || `Servicio de ${tipo.label.toLowerCase()}`;
+    const normalizedObservaciones = report.tipo === "actividad_grupal"
+      ? sanitizeGroupActivityObservations(report.observaciones)
+      : report.tipo === "visita_tecnica"
+        ? sanitizeTechnicalVisitObservations(report.observaciones)
+        : report.observaciones?.trim() || undefined;
+    const resumen = report.descripcion || report.especificacion || normalizedObservaciones || `Servicio de ${tipo.label.toLowerCase()}`;
 
     const detailLines = (() => {
       if (report.tipo === "visita_tecnica") {
         return buildMultilineText([
           report.descripcion,
-          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+          normalizedObservaciones,
         ]);
       }
 
       if (report.tipo === "recorrido") {
         return buildMultilineText([
-          report.descripcion,
           report.puntoPartida ? `Punto de partida: ${report.puntoPartida}` : undefined,
           report.puntoLlegada ? `Punto de llegada: ${report.puntoLlegada}` : undefined,
           report.tipoRecorrido ? `Tipo de recorrido: ${report.tipoRecorrido === "con_herramienta" ? "Con herramienta" : "Normal"}` : undefined,
           report.fotoHerramienta ? "Incluye evidencia fotográfica de herramienta." : undefined,
-          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+          normalizedObservaciones,
         ]);
       }
 
@@ -480,14 +485,13 @@ export default function AprobacionesPage() {
         return buildMultilineText([
           report.descripcion,
           report.especificacion ? `Especificación: ${report.especificacion}` : undefined,
-          group?.nombre ? `Grupo: ${group.nombre}` : undefined,
-          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+          normalizedObservaciones,
         ]);
       }
 
       return buildMultilineText([
         report.descripcion,
-        report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        normalizedObservaciones,
       ]);
     })();
 
@@ -507,9 +511,7 @@ export default function AprobacionesPage() {
             ? report.tipoRecorrido === "con_herramienta"
               ? "Recorrido con herramienta"
               : "Recorrido normal"
-            : group?.nombre
-              ? `Grupo: ${group.nombre}`
-              : undefined,
+            : undefined,
       empresa: companyName,
       fecha: report.fecha,
       tecnico: tecnicoNombre,
@@ -550,7 +552,7 @@ export default function AprobacionesPage() {
             tecnicoNombre,
             tipoVisita: "aprobada",
             descripcion: report.descripcion,
-            observaciones: report.observaciones,
+            observaciones: normalizedObservaciones,
           }
           : {
             companyName,

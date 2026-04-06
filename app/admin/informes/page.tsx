@@ -75,6 +75,7 @@ import { getContratos } from "@/lib/supabase/services/contratos";
 import { getCurrentOrLatestPeriodo, getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
+import { sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
 
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 const TABLE_PAGE_SIZE = 10;
@@ -374,10 +375,7 @@ export default function InformesPage() {
 
     setViewRangeStart(selectedPeriod.fechaInicio);
     setViewRangeEnd(selectedPeriod.fechaFin);
-    setExportRangeStart(selectedPeriod.fechaInicio);
-    setExportRangeEnd(selectedPeriod.fechaFin);
     setViewQuincenaMonth(getMonthInputValue(selectedPeriod.fechaInicio));
-    setExportQuincenaMonth(getMonthInputValue(selectedPeriod.fechaInicio));
   }, [selectedPeriod]);
 
   const periodScopedReports = useMemo(
@@ -655,23 +653,26 @@ export default function InformesPage() {
     const tipoLabel = getTipoLabel(report.tipo);
     const edificio = client?.edificio || group?.nombre || tipoLabel;
     const visitCategoryLabel = report.tipo === "visita_tecnica" ? getVisitCategoryLabel(report.tipoVisita) : undefined;
+    const normalizedObservaciones = report.tipo === "actividad_grupal"
+      ? sanitizeGroupActivityObservations(report.observaciones)
+      : report.tipo === "visita_tecnica"
+        ? sanitizeTechnicalVisitObservations(report.observaciones)
+        : report.observaciones?.trim() || undefined;
 
     const observaciones = (() => {
       if (report.tipo === "visita_tecnica") {
         return buildMultilineText([
-          visitCategoryLabel ? `Categoría: ${visitCategoryLabel}` : undefined,
           report.descripcion,
-          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+          normalizedObservaciones,
         ]);
       }
 
       if (report.tipo === "recorrido") {
         return buildMultilineText([
-          report.descripcion,
           report.puntoPartida ? `Punto de partida: ${report.puntoPartida}` : undefined,
           report.puntoLlegada ? `Punto de llegada: ${report.puntoLlegada}` : undefined,
           report.tipoRecorrido ? `Tipo de recorrido: ${report.tipoRecorrido === "con_herramienta" ? "Con herramienta" : "Normal"}` : undefined,
-          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+          normalizedObservaciones,
         ]);
       }
 
@@ -679,14 +680,13 @@ export default function InformesPage() {
         return buildMultilineText([
           report.descripcion,
           report.especificacion ? `Especificación: ${report.especificacion}` : undefined,
-          group?.nombre ? `Grupo: ${group.nombre}` : undefined,
-          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+          normalizedObservaciones,
         ]);
       }
 
       return buildMultilineText([
         report.descripcion,
-        report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        normalizedObservaciones,
       ]);
     })();
 
@@ -714,9 +714,7 @@ export default function InformesPage() {
               ? report.tipoRecorrido === "con_herramienta"
                 ? "Recorrido con herramienta"
                 : "Recorrido normal"
-              : group?.nombre
-                ? `Grupo: ${group.nombre}`
-                : undefined,
+              : undefined,
         empresa: companyName,
         fecha: report.fecha,
         categoria: visitCategoryLabel,
@@ -740,24 +738,28 @@ export default function InformesPage() {
     const operationalEmail = companySettings?.correoEmpresa || DEFAULT_NOTIFICATION_BCC;
     const clienteNombre = client?.contacto || client?.nombre || "Cliente";
     const fileBaseName = getSafeFileSegment(client?.edificio || group?.nombre || tipoLabel);
-    const resumen = report.descripcion || report.especificacion || report.observaciones || `Servicio de ${tipoLabel.toLowerCase()}`;
+    const normalizedObservaciones = report.tipo === "actividad_grupal"
+      ? sanitizeGroupActivityObservations(report.observaciones)
+      : report.tipo === "visita_tecnica"
+        ? sanitizeTechnicalVisitObservations(report.observaciones)
+        : report.observaciones?.trim() || undefined;
+    const resumen = report.descripcion || report.especificacion || normalizedObservaciones || `Servicio de ${tipoLabel.toLowerCase()}`;
 
     const detailLines = (() => {
       if (report.tipo === "visita_tecnica") {
         return buildMultilineText([
           report.descripcion,
-          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+          normalizedObservaciones,
         ]);
       }
 
       if (report.tipo === "recorrido") {
         return buildMultilineText([
-          report.descripcion,
           report.puntoPartida ? `Punto de partida: ${report.puntoPartida}` : undefined,
           report.puntoLlegada ? `Punto de llegada: ${report.puntoLlegada}` : undefined,
           report.tipoRecorrido ? `Tipo de recorrido: ${report.tipoRecorrido === "con_herramienta" ? "Con herramienta" : "Normal"}` : undefined,
           report.fotoHerramienta ? "Incluye evidencia fotográfica de herramienta." : undefined,
-          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+          normalizedObservaciones,
         ]);
       }
 
@@ -765,14 +767,13 @@ export default function InformesPage() {
         return buildMultilineText([
           report.descripcion,
           report.especificacion ? `Especificación: ${report.especificacion}` : undefined,
-          group?.nombre ? `Grupo: ${group.nombre}` : undefined,
-          report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+          normalizedObservaciones,
         ]);
       }
 
       return buildMultilineText([
         report.descripcion,
-        report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
+        normalizedObservaciones,
       ]);
     })();
 
@@ -802,7 +803,7 @@ export default function InformesPage() {
             tecnicoNombre,
             tipoVisita: getVisitCategoryLabel(report.tipoVisita),
             descripcion: report.descripcion,
-            observaciones: report.observaciones,
+            observaciones: normalizedObservaciones,
           }
           : {
             companyName,
@@ -1016,8 +1017,8 @@ export default function InformesPage() {
   const paginatedGrupales = useMemo(() => paginateReports(filteredGrupales, tablePages.grupales), [filteredGrupales, tablePages.grupales]);
 
   const exportScopedReports = useMemo(
-    () => periodScopedReports.filter((report) => isWithinDateRange(report.fecha, exportRangeStart, exportRangeEnd)),
-    [periodScopedReports, exportRangeStart, exportRangeEnd]
+    () => reports.filter((report) => isWithinDateRange(report.fecha, exportRangeStart, exportRangeEnd)),
+    [reports, exportRangeStart, exportRangeEnd]
   );
 
   const selectedExportReports = useMemo(
@@ -1702,6 +1703,9 @@ export default function InformesPage() {
                       <CardTitle className="text-lg text-foreground">Reportes Consolidados</CardTitle>
                       <p className="text-sm text-muted-foreground">
                         {getExportTitleLabel(exportReportType)} · {selectedExportCountLabel}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Este panel usa solo sus propias fechas y no depende del período ni de los filtros externos.
                       </p>
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">
