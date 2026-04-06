@@ -237,6 +237,30 @@ export async function uploadHerramientaRecorrido(
     .from("recorridos")
     .update({ foto_herramienta_url: url })
     .eq("id", recorridoId);
+
+  const { data: recorrido } = await supabase
+    .from("recorridos")
+    .select("tecnico_id, fecha, punto_partida, punto_llegada, tipo_recorrido")
+    .eq("id", recorridoId)
+    .maybeSingle();
+
+  if (recorrido) {
+    let reportQuery = supabase
+      .from("reportes_actividad")
+      .update({ foto_herramienta_url: url })
+      .eq("tipo", "recorrido")
+      .eq("tecnico_id", recorrido.tecnico_id)
+      .eq("fecha", recorrido.fecha)
+      .eq("punto_partida", recorrido.punto_partida)
+      .eq("punto_llegada", recorrido.punto_llegada);
+
+    if (recorrido.tipo_recorrido) {
+      reportQuery = reportQuery.eq("tipo_recorrido", recorrido.tipo_recorrido);
+    }
+
+    await reportQuery;
+  }
+
   return url;
 }
 
@@ -283,4 +307,14 @@ export async function deleteAllFotosVisita(
     .from("visita_tecnica_fotos")
     .delete()
     .eq("visita_tecnica_id", visitaId);
+}
+
+// ── Helper: delete all files for a recorrido ───────────────────────
+export async function deleteAllFotosRecorrido(
+  recorridoId: string
+): Promise<void> {
+  const files = await listFiles(BUCKETS.FOTOS_RECORRIDOS, recorridoId);
+  if (files.length > 0) {
+    await deleteFiles(BUCKETS.FOTOS_RECORRIDOS, files);
+  }
 }

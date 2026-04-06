@@ -13,6 +13,7 @@ const adminRoutes = [
     "/admin/acumulados",
     "/admin/llegadas",
     "/admin/configuracion",
+    "/admin/depuracion",
 ];
 
 const coreWarmers: Warmer[] = [
@@ -87,6 +88,10 @@ const routeWarmers: Record<string, Warmer[]> = {
     "/admin/configuracion": [
         () => import("@/lib/supabase/services/configuracion").then((module) => module.getConfiguracion()),
         () => import("@/lib/supabase/services/liquidacion").then((module) => module.getPeriodos()),
+    ],
+    "/admin/depuracion": [
+        () => import("@/lib/supabase/services/liquidacion").then((module) => module.getPeriodos()),
+        () => import("@/lib/supabase/services/configuracion").then((module) => module.getConfiguracion()),
     ],
 };
 

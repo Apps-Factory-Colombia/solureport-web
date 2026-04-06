@@ -135,6 +135,12 @@ function calculateDiscountValue(base: number, percentage: number) {
   return Math.round(base * percentage / 100);
 }
 
+function getLeaderExtraValue(accumulations: LeaderAccumulation[], periodId: string, techId: string) {
+  const accumulation = accumulations.find((item) => item.periodoId === periodId && item.liderId === techId);
+  if (!accumulation || accumulation.extraLiderActivo === false) return 0;
+  return Number(accumulation.extraLider ?? 0) || 0;
+}
+
 function buildStableOrderKey(periodId: string, entityId: string) {
   return `${periodId}:${entityId}`;
 }
@@ -310,6 +316,9 @@ export default function LiquidacionPage() {
   const periodReports = actReports.filter(
     (r) => r.periodoId === selectedPeriodId
   );
+  const liquidablePeriodReports = periodReports.filter(
+    (report) => report.estadoAprobacionLider === "aprobado"
+  );
 
   const discountRecordsByUser = arrivalRecords.reduce<Map<string, number>>((acc, record) => {
     if (!record.descuentoAplicado || !record.porcentajeDescuento || !isDateWithinSelectedPeriod(record.fecha)) {
@@ -405,10 +414,10 @@ export default function LiquidacionPage() {
   };
 
   // Resumen por técnico basado en reportes_actividad
-  const techSummary = buildTechSummary(periodReports);
+  const techSummary = buildTechSummary(liquidablePeriodReports);
 
   // Resumen por grupo basado en reportes_actividad
-  const groupSummary = buildGroupSummary(periodReports);
+  const groupSummary = buildGroupSummary(liquidablePeriodReports);
 
   const totalPeriod = Array.from(techSummary.values()).reduce(
     (sum, t) => sum + t.total,
@@ -483,7 +492,7 @@ export default function LiquidacionPage() {
     return matchGroup && matchTechnician;
   }));
 
-  const filteredTechTabReports = periodReports.filter((report) => {
+  const filteredTechTabReports = liquidablePeriodReports.filter((report) => {
     const tech = usersById.get(report.tecnicoId);
     const techFullName = normalizeSearchValue(tech ? `${tech.nombre} ${tech.apellido}` : "");
     const matchTechnician = !normalizedTechnicianTabSearch || techFullName.includes(normalizedTechnicianTabSearch);
@@ -495,7 +504,7 @@ export default function LiquidacionPage() {
 
   const filteredTechEntries = applyStableTechOrder(Array.from(filteredTechSummary.entries()));
 
-  const filteredGroupReports = periodReports.filter((report) => {
+  const filteredGroupReports = liquidablePeriodReports.filter((report) => {
     const group = groupsById.get(report.grupoId);
     const leader = group?.liderId ? usersById.get(group.liderId) : null;
     const groupName = normalizeSearchValue(group?.nombre);
@@ -507,7 +516,7 @@ export default function LiquidacionPage() {
 
   const filteredGroupEntries = applyStableGroupOrder(Array.from(filteredGroupSummary.entries()));
 
-  const filteredComprobanteReports = periodReports.filter((report) => {
+  const filteredComprobanteReports = liquidablePeriodReports.filter((report) => {
     const tech = usersById.get(report.tecnicoId);
     const techFullName = normalizeSearchValue(tech ? `${tech.nombre} ${tech.apellido}` : "");
     const matchTechnician = !normalizedComprobanteSearch || techFullName.includes(normalizedComprobanteSearch);
@@ -574,7 +583,7 @@ export default function LiquidacionPage() {
     try {
       await waitForNextPaint();
 
-      const pdfReports = periodReports.filter(
+      const pdfReports = liquidablePeriodReports.filter(
         (r) => r.tecnicoId === selectedTechId && (comprobanteGroupId === "todos" || r.grupoId === comprobanteGroupId)
       );
       const pdfNonRecorrido = pdfReports.filter((r) => r.tipo !== "recorrido");
@@ -582,6 +591,7 @@ export default function LiquidacionPage() {
       const pdfAuxilio = pdfNonRecorrido.reduce((sum, report) => sum + report.costoActividad, 0);
       const pdfRodamiento = pdfRecorrido.reduce((sum, report) => sum + report.costoActividad, 0);
       const pdfDescuentoTardanza = techData.descuentoValor;
+      const pdfExtraLider = selectedPeriodId ? getLeaderExtraValue(leaderAccumulations, selectedPeriodId, selectedTechId) : 0;
 
       generateComprobantePDF({
         empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
@@ -601,7 +611,8 @@ export default function LiquidacionPage() {
         totalAuxilio: pdfAuxilio,
         totalDescuentoTardanza: pdfDescuentoTardanza,
         totalRodamiento: pdfRodamiento,
-        grandTotal: pdfAuxilio - pdfDescuentoTardanza + pdfRodamiento,
+        totalExtraLider: pdfExtraLider,
+        grandTotal: pdfAuxilio - pdfDescuentoTardanza + pdfRodamiento + pdfExtraLider,
       });
     } catch (err) {
       console.error("Error generando comprobante PDF:", err);
@@ -638,7 +649,7 @@ export default function LiquidacionPage() {
               className="gap-2 border-border/50 text-foreground/80"
               onClick={() => {
                 const tipoLabels: Record<string, string> = { mantenimiento_preventivo: "Mant. Preventivo", visita_tecnica: "Visita Técnica", recorrido: "Recorrido", actividad_grupal: "Act. Grupal" };
-                const rows = periodReports.map((r) => {
+                const rows = liquidablePeriodReports.map((r) => {
                   const tech = users.find((u) => u.id === r.tecnicoId);
                   const group = groups.find((g) => g.id === r.grupoId);
                   return [
@@ -647,7 +658,7 @@ export default function LiquidacionPage() {
                     group?.nombre || "\u2014",
                     r.fecha,
                     tech ? `${tech.nombre} ${tech.apellido}` : "\u2014",
-                    r.estadoAprobacionLider === "aprobado" ? "Aprobado" : "Pendiente",
+                    getEstadoLabel(r.estadoAprobacionLider),
                     formatCurrency(r.costoActividad),
                   ];
                 });
@@ -657,7 +668,7 @@ export default function LiquidacionPage() {
                   periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} \u2192 ${selectedPeriod.fechaFin}` : "",
                   headers: ["Tipo", "Descripci\u00f3n", "Grupo", "Fecha", "T\u00e9cnico", "Estado", "Valor"],
                   rows,
-                  totales: ["TOTAL", "", "", "", "", `${periodReports.length} actividades`, formatCurrency(totalPeriod)],
+                  totales: ["TOTAL", "", "", "", "", `${liquidablePeriodReports.length} actividades`, formatCurrency(totalPeriod)],
                 });
               }}
             >
@@ -744,7 +755,7 @@ export default function LiquidacionPage() {
                 const totalAprobado = Array.from(buildTechSummary(approvedReports).values()).reduce((s, item) => s + item.total, 0);
                 const totalPendiente = Array.from(buildTechSummary(pendingReports).values()).reduce((s, item) => s + item.total, 0);
                 const recorridos = actReports.filter(
-                  (r) => r.periodoId === selectedPeriodId && r.tipo === "recorrido"
+                  (r) => r.periodoId === selectedPeriodId && r.tipo === "recorrido" && r.estadoAprobacionLider !== "rechazado"
                 );
                 const totalRecorridos = recorridos.reduce((s, r) => s + r.costoActividad, 0);
 
@@ -897,9 +908,11 @@ export default function LiquidacionPage() {
                               "text-xs",
                               r.estadoAprobacionLider === "aprobado"
                                 ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                                : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                : r.estadoAprobacionLider === "rechazado"
+                                  ? "bg-red-500/10 text-red-400 border-red-500/20"
+                                  : "bg-amber-500/10 text-amber-400 border-amber-500/20"
                             )}>
-                              {r.estadoAprobacionLider === "aprobado" ? "Aprobado" : "Pendiente"}
+                              {getEstadoLabel(r.estadoAprobacionLider)}
                             </Badge>
                           </TableCell>
                           <TableCell className="text-right font-semibold text-gold">
@@ -1245,6 +1258,8 @@ export default function LiquidacionPage() {
                   const techRecorridos = techReports.filter((r) => r.tipo === "recorrido");
                   const rodamiento = techRecorridos.reduce((s, r) => s + r.costoActividad, 0);
                   const auxilioNeto = data.totalNoRecorridos - data.descuentoValor;
+                  const extraLider = selectedPeriodId ? getLeaderExtraValue(leaderAccumulations, selectedPeriodId, techId) : 0;
+                  const totalComprobante = auxilioNeto + rodamiento + extraLider;
 
                   return (
                     <Card
@@ -1289,11 +1304,20 @@ export default function LiquidacionPage() {
                               <span className="font-semibold text-emerald-400">{formatCurrency(rodamiento)}</span>
                             </div>
                           )}
+                          {extraLider > 0 && (
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="flex items-center gap-1.5 text-muted-foreground">
+                                <Sparkles className="h-3.5 w-3.5 text-violet-400" />
+                                EXTRA LÍDER
+                              </span>
+                              <span className="font-semibold text-violet-400">{formatCurrency(extraLider)}</span>
+                            </div>
+                          )}
                         </div>
                         <div className="pt-2 border-t border-border/50 flex items-center justify-between">
                           <span className="text-xs text-muted-foreground">Total comprobante</span>
                           <span className="font-bold text-gold">
-                            {formatCurrency(data.total)}
+                            {formatCurrency(totalComprobante)}
                           </span>
                         </div>
                       </CardContent>
@@ -1459,7 +1483,7 @@ export default function LiquidacionPage() {
             const techData = filteredComprobanteSummary.get(selectedTechId) || techSummary.get(selectedTechId);
             if (!tech || !techData) return null;
 
-            const techReportsForComprobante = periodReports.filter(
+            const techReportsForComprobante = liquidablePeriodReports.filter(
               (r) => r.tecnicoId === selectedTechId && (comprobanteGroupId === "todos" || r.grupoId === comprobanteGroupId)
             );
             const nonRecorridoReports = techReportsForComprobante.filter((r) => r.tipo !== "recorrido");
@@ -1469,7 +1493,8 @@ export default function LiquidacionPage() {
             const rodamientoTotal = recorridoReports.reduce((s, r) => s + r.costoActividad, 0);
             const descuentoTardanza = techData.descuentoValor;
             const auxilioNeto = auxilioTotal - descuentoTardanza;
-            const grandTotal = auxilioNeto + rodamientoTotal;
+            const extraLider = selectedPeriodId ? getLeaderExtraValue(leaderAccumulations, selectedPeriodId, selectedTechId) : 0;
+            const grandTotal = auxilioNeto + rodamientoTotal + extraLider;
 
             return (
               <div className="space-y-6">
@@ -1597,6 +1622,12 @@ export default function LiquidacionPage() {
                       <div className="flex justify-between text-sm">
                         <span className="text-muted-foreground">Recorridos y Desplazamientos</span>
                         <span className="font-medium text-foreground">{formatCurrency(rodamientoTotal)}</span>
+                      </div>
+                    )}
+                    {extraLider > 0 && (
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Extra Líder</span>
+                        <span className="font-medium text-violet-400">{formatCurrency(extraLider)}</span>
                       </div>
                     )}
                     <div className="flex justify-between text-lg font-bold border-t border-gold/20 pt-2">

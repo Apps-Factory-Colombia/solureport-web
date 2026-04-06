@@ -215,7 +215,16 @@ function formatMonthKey(monthKey: string) {
 }
 
 function canSendReportEmail(report: ActivityReport) {
-  return report.tipo === "mantenimiento_preventivo" || report.tipo === "visita_tecnica";
+  if (report.tipo === "mantenimiento_preventivo") return true;
+  if (report.tipo === "visita_tecnica") return report.tipoVisita !== "garantia";
+  return false;
+}
+
+function getVisitCategoryLabel(tipoVisita?: ActivityReport["tipoVisita"]) {
+  if (tipoVisita === "garantia") return "Garantía";
+  if (tipoVisita === "emergencia") return "Emergencia";
+  if (tipoVisita === "imprevisto") return "Imprevisto";
+  return "Sin categoría";
 }
 
 function sortReportsByNewestCreation(reports: ActivityReport[]) {
@@ -253,6 +262,36 @@ function getYearRangeFromDates(start: string, end: string) {
   return years;
 }
 
+function getMonthInputValue(date: string) {
+  return date.slice(0, 7);
+}
+
+function getQuincenaRange(monthValue: string, half: "primera" | "segunda") {
+  const [yearText, monthText] = monthValue.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+
+  if (!year || !month) {
+    const fallback = getTodayDateString();
+    return half === "primera"
+      ? { start: `${fallback.slice(0, 7)}-01`, end: `${fallback.slice(0, 7)}-15` }
+      : { start: `${fallback.slice(0, 7)}-16`, end: fallback };
+  }
+
+  const lastDay = new Date(year, month, 0).getDate();
+  const paddedMonth = String(month).padStart(2, "0");
+
+  return half === "primera"
+    ? {
+      start: `${year}-${paddedMonth}-01`,
+      end: `${year}-${paddedMonth}-15`,
+    }
+    : {
+      start: `${year}-${paddedMonth}-16`,
+      end: `${year}-${paddedMonth}-${String(lastDay).padStart(2, "0")}`,
+    };
+}
+
 export default function InformesPage() {
   const today = useMemo(() => getTodayDateString(), []);
   const [reports, setReports] = useState<ActivityReport[]>([]);
@@ -265,6 +304,7 @@ export default function InformesPage() {
   const [search, setSearch] = useState("");
   const [viewRangeStart, setViewRangeStart] = useState("");
   const [viewRangeEnd, setViewRangeEnd] = useState("");
+  const [viewQuincenaMonth, setViewQuincenaMonth] = useState(() => getMonthInputValue(getTodayDateString()));
   const [grupoFilter, setGrupoFilter] = useState<string>("todos");
   const [selectedReport, setSelectedReport] = useState<ActivityReport | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -281,6 +321,7 @@ export default function InformesPage() {
   const [savingInlineClientCostId, setSavingInlineClientCostId] = useState<string | null>(null);
   const [exportRangeStart, setExportRangeStart] = useState(() => shiftDateString(getTodayDateString(), -14, "days"));
   const [exportRangeEnd, setExportRangeEnd] = useState(() => getTodayDateString());
+  const [exportQuincenaMonth, setExportQuincenaMonth] = useState(() => getMonthInputValue(getTodayDateString()));
   const [exportPanelOpen, setExportPanelOpen] = useState(false);
   const [exportReportType, setExportReportType] = useState<ActivityReport["tipo"]>("visita_tecnica");
   const [preventiveExportClientId, setPreventiveExportClientId] = useState<string>("todos");
@@ -309,14 +350,31 @@ export default function InformesPage() {
     loadData();
   }, []);
 
+  const getConfiguredRecorridoCost = useCallback((report: ActivityReport) => {
+    const normalCost = companySettings?.costoRecorridoNormal ?? 25000;
+    const toolCost = companySettings?.costoRecorridoHerramienta ?? 40000;
+    return report.tipoRecorrido === "con_herramienta" ? toolCost : normalCost;
+  }, [companySettings]);
+
+  const getEffectiveTechnicalCost = useCallback((report: ActivityReport) => {
+    if (report.tipo !== "recorrido") return Number(report.costoActividad ?? 0) || 0;
+
+    const configuredCost = getConfiguredRecorridoCost(report);
+    if (report.valorModificado) {
+      return Number(report.costoActividad ?? configuredCost) || configuredCost;
+    }
+
+    return configuredCost;
+  }, [getConfiguredRecorridoCost]);
+
   useEffect(() => {
-    setEditableTechnicalCost(selectedReport ? String(selectedReport.costoActividad ?? 0) : "");
+    setEditableTechnicalCost(selectedReport ? String(getEffectiveTechnicalCost(selectedReport)) : "");
     setEditableClientCost(
       selectedReport?.tipo === "visita_tecnica"
         ? String(selectedReport.costoCliente ?? 0)
         : ""
     );
-  }, [selectedReport]);
+  }, [getEffectiveTechnicalCost, selectedReport]);
 
   const handleDeleteReport = async () => {
     if (!reportToDelete) return;
@@ -359,8 +417,8 @@ export default function InformesPage() {
   const clientsById = useMemo(() => new Map(clients.map((client) => [client.id, client])), [clients]);
   const groupsById = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
   const getInlineTechnicalCostValue = useCallback(
-    (report: ActivityReport) => inlineTechnicalCostDrafts[report.id] ?? String(report.costoActividad ?? 0),
-    [inlineTechnicalCostDrafts]
+    (report: ActivityReport) => inlineTechnicalCostDrafts[report.id] ?? String(getEffectiveTechnicalCost(report)),
+    [getEffectiveTechnicalCost, inlineTechnicalCostDrafts]
   );
 
   const getInlineClientCostValue = useCallback(
@@ -370,15 +428,23 @@ export default function InformesPage() {
 
   const persistTechnicalCost = useCallback(async (report: ActivityReport, nextCost: number) => {
     await updateCostoActividadAdmin(report.id, nextCost);
-    setReports((current) => current.map((item) => item.id === report.id ? { ...item, costoActividad: nextCost } : item));
-    setSelectedReport((current) => current && current.id === report.id ? { ...current, costoActividad: nextCost } : current);
+    setReports((current) => current.map((item) => item.id === report.id ? {
+      ...item,
+      costoActividad: nextCost,
+      valorModificado: item.tipo === "recorrido" ? nextCost !== getConfiguredRecorridoCost(item) : item.valorModificado,
+    } : item));
+    setSelectedReport((current) => current && current.id === report.id ? {
+      ...current,
+      costoActividad: nextCost,
+      valorModificado: current.tipo === "recorrido" ? nextCost !== getConfiguredRecorridoCost(current) : current.valorModificado,
+    } : current);
     setInlineTechnicalCostDrafts((current) => {
       if (!(report.id in current)) return current;
       const next = { ...current };
       delete next[report.id];
       return next;
     });
-  }, []);
+  }, [getConfiguredRecorridoCost]);
 
   const persistVisitClientCost = useCallback(async (report: ActivityReport, nextCost: number | null) => {
     await updateCostoClienteVisitaAdmin(report.id, nextCost, report.visitaTecnicaId);
@@ -396,20 +462,20 @@ export default function InformesPage() {
   const handleInlineSaveTechnicalCost = async (report: ActivityReport) => {
     let nextCost: number;
     try {
-      nextCost = parseTechnicalCostInput(inlineTechnicalCostDrafts[report.id] ?? String(report.costoActividad ?? 0));
+      nextCost = parseTechnicalCostInput(inlineTechnicalCostDrafts[report.id] ?? String(getEffectiveTechnicalCost(report)));
     } catch (err) {
       alert(err instanceof Error ? err.message : "No se pudo interpretar el costo tecnico.");
       return;
     }
 
-    if (nextCost === (report.costoActividad ?? 0)) return;
+    if (nextCost === getEffectiveTechnicalCost(report)) return;
 
     setSavingInlineTechnicalCostId(report.id);
     try {
       await persistTechnicalCost(report, nextCost);
     } catch (err) {
-      console.error("Error actualizando costo tecnico de la visita:", err);
-      alert("No se pudo guardar el costo tecnico de la visita.");
+      console.error("Error actualizando costo tecnico del informe:", err);
+      alert("No se pudo guardar el costo tecnico del informe.");
     } finally {
       setSavingInlineTechnicalCostId(null);
     }
@@ -472,7 +538,7 @@ export default function InformesPage() {
       return;
     }
 
-    if (nextCost === (selectedReport.costoActividad ?? 0)) return;
+    if (nextCost === getEffectiveTechnicalCost(selectedReport)) return;
 
     setSavingTechnicalCost(true);
     try {
@@ -510,7 +576,7 @@ export default function InformesPage() {
   };
 
   const getEvidenceCount = (report: ActivityReport) => {
-    return (report.fotosAntes?.length || 0) + (report.fotosDespues?.length || 0) + (report.fotoBitacora ? 1 : 0);
+    return (report.fotosAntes?.length || 0) + (report.fotosDespues?.length || 0) + (report.fotoBitacora ? 1 : 0) + (report.fotoHerramienta ? 1 : 0);
   };
 
   const applySentState = (targetReport: ActivityReport, sentAt: string) => {
@@ -553,10 +619,12 @@ export default function InformesPage() {
     const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
     const tipoLabel = getTipoLabel(report.tipo);
     const edificio = client?.edificio || group?.nombre || tipoLabel;
+    const visitCategoryLabel = report.tipo === "visita_tecnica" ? getVisitCategoryLabel(report.tipoVisita) : undefined;
 
     const observaciones = (() => {
       if (report.tipo === "visita_tecnica") {
         return buildMultilineText([
+          visitCategoryLabel ? `Categoría: ${visitCategoryLabel}` : undefined,
           report.descripcion,
           report.observaciones ? `Observaciones: ${report.observaciones}` : undefined,
         ]);
@@ -616,6 +684,7 @@ export default function InformesPage() {
                 : undefined,
         empresa: companyName,
         fecha: report.fecha,
+        categoria: visitCategoryLabel,
         tecnico: tecnicoNombre,
         cliente: client?.nombre || "—",
         edificio,
@@ -696,7 +765,7 @@ export default function InformesPage() {
             edificio,
             fecha: report.fecha,
             tecnicoNombre,
-            tipoVisita: "aprobada",
+            tipoVisita: getVisitCategoryLabel(report.tipoVisita),
             descripcion: report.descripcion,
             observaciones: report.observaciones,
           }
@@ -736,7 +805,7 @@ export default function InformesPage() {
 
   const handleSendEmail = async (report: ActivityReport) => {
     if (!canSendReportEmail(report)) {
-      alert("Solo se envían correos para mantenimientos preventivos y visitas técnicas.");
+      alert("Las garantías no se exportan en el PDF enviado al cliente. Solo se envían correos para mantenimientos preventivos y visitas técnicas habilitadas.");
       return;
     }
 
@@ -859,7 +928,9 @@ export default function InformesPage() {
       )}
     >
       {!canSendReportEmail(report) ? (
-        "No aplica"
+        report.tipo === "visita_tecnica" && report.tipoVisita === "garantia"
+          ? "Garantía sin envío"
+          : "No aplica"
       ) : report.correoEnviado ? (
         <><Send className="mr-0.5 h-3 w-3" />Enviado</>
       ) : (
@@ -926,8 +997,8 @@ export default function InformesPage() {
   );
 
   const technicalCostTotal = useMemo(
-    () => visibleReports.reduce((sum, report) => sum + (Number(report.costoActividad) || 0), 0),
-    [visibleReports]
+    () => visibleReports.reduce((sum, report) => sum + getEffectiveTechnicalCost(report), 0),
+    [getEffectiveTechnicalCost, visibleReports]
   );
 
   const clientCostTotal = useMemo(
@@ -936,8 +1007,8 @@ export default function InformesPage() {
   );
 
   const selectedExportTechnicalTotal = useMemo(
-    () => selectedExportReports.reduce((sum, report) => sum + (Number(report.costoActividad) || 0), 0),
-    [selectedExportReports]
+    () => selectedExportReports.reduce((sum, report) => sum + getEffectiveTechnicalCost(report), 0),
+    [getEffectiveTechnicalCost, selectedExportReports]
   );
 
   const selectedExportClientTotal = useMemo(
@@ -945,6 +1016,18 @@ export default function InformesPage() {
       ? selectedExportReports.reduce((sum, report) => sum + (Number(report.costoCliente ?? 0) || 0), 0)
       : 0,
     [exportReportType, selectedExportReports]
+  );
+
+  const selectedExportClientReports = useMemo(
+    () => exportReportType === "visita_tecnica"
+      ? selectedExportReports.filter((report) => report.tipoVisita !== "garantia")
+      : [],
+    [exportReportType, selectedExportReports]
+  );
+
+  const selectedExportClientVisibleTotal = useMemo(
+    () => selectedExportClientReports.reduce((sum, report) => sum + (Number(report.costoCliente ?? 0) || 0), 0),
+    [selectedExportClientReports]
   );
 
   const selectedPreventiveContracts = useMemo(() => {
@@ -1096,6 +1179,18 @@ export default function InformesPage() {
     setExportRangeEnd(nextEnd);
   }, [today]);
 
+  const applyViewQuincenaRange = useCallback((half: "primera" | "segunda") => {
+    const range = getQuincenaRange(viewQuincenaMonth, half);
+    setViewRangeStart(range.start);
+    setViewRangeEnd(range.end);
+  }, [viewQuincenaMonth]);
+
+  const applyExportQuincenaRange = useCallback((half: "primera" | "segunda") => {
+    const range = getQuincenaRange(exportQuincenaMonth, half);
+    setExportRangeStart(range.start);
+    setExportRangeEnd(range.end);
+  }, [exportQuincenaMonth]);
+
   const handleExportPreventiveMonthlySummary = useCallback(() => {
     if (selectedPreventiveEntries.length === 0) {
       alert("No hay mantenimientos preventivos realizados en el rango seleccionado para exportar.");
@@ -1245,14 +1340,14 @@ export default function InformesPage() {
               currentSubtotal = 0;
             }
 
-            currentSubtotal += Number(report.costoActividad) || 0;
+            currentSubtotal += getEffectiveTechnicalCost(report);
             rows.push([
               report.fecha,
               techName,
               projectName,
               detail || "—",
               report.estadoAprobacionLider,
-              formatCurrency(report.costoActividad),
+              formatCurrency(getEffectiveTechnicalCost(report)),
             ]);
           });
 
@@ -1270,14 +1365,24 @@ export default function InformesPage() {
             ? `${report.descripcion} · ${report.especificacion}`
             : report.descripcion;
 
-          return [
-            report.fecha,
-            tech ? `${tech.nombre} ${tech.apellido}` : "—",
-            projectName,
-            detail || "—",
-            report.estadoAprobacionLider,
-            formatCurrency(report.costoActividad),
-          ];
+          return exportReportType === "visita_tecnica"
+            ? [
+              report.fecha,
+              tech ? `${tech.nombre} ${tech.apellido}` : "—",
+              projectName,
+              getVisitCategoryLabel(report.tipoVisita),
+              detail || "—",
+              report.estadoAprobacionLider,
+              formatCurrency(report.costoActividad),
+            ]
+            : [
+              report.fecha,
+              tech ? `${tech.nombre} ${tech.apellido}` : "—",
+              projectName,
+              detail || "—",
+              report.estadoAprobacionLider,
+              formatCurrency(report.costoActividad),
+            ];
         });
 
       generateTablePDF({
@@ -1294,14 +1399,30 @@ export default function InformesPage() {
           { label: "Tipo", value: getExportTitleLabel(exportReportType) },
           { label: exportReportType === "visita_tecnica" ? "Total costo técnico" : "Total", value: formatCurrency(selectedExportTechnicalTotal) },
         ],
-        headers: ["Fecha", "Técnico", exportReportType === "actividad_grupal" ? "Grupo / Cliente" : "Cliente / Proyecto", "Detalle", "Estado", exportReportType === "visita_tecnica" ? "Costo técnico" : "Costo"],
+        headers: exportReportType === "visita_tecnica"
+          ? ["Fecha", "Técnico", "Cliente / Proyecto", "Categoría", "Detalle", "Estado", "Costo técnico"]
+          : ["Fecha", "Técnico", exportReportType === "actividad_grupal" ? "Grupo / Cliente" : "Cliente / Proyecto", "Detalle", "Estado", "Costo"],
         rows: exportRows,
-        totales: ["", "", "", "", "Total", formatCurrency(selectedExportTechnicalTotal)],
+        totales: exportReportType === "visita_tecnica"
+          ? ["", "", "", "", "", "Total", formatCurrency(selectedExportTechnicalTotal)]
+          : ["", "", "", "", "Total", formatCurrency(selectedExportTechnicalTotal)],
       });
     } finally {
       setExportingTechnicalSummary(false);
     }
-  }, [activeRangeLabel, clientsById, companySettings?.nombre, exportReportType, groupsById, selectedExportReports, selectedExportTechnicalTotal, usersById]);
+  }, [
+    activeRangeLabel,
+    clientsById,
+    companySettings?.nombre,
+    exportRangeEnd,
+    exportRangeStart,
+    exportReportType,
+    getEffectiveTechnicalCost,
+    groupsById,
+    selectedExportReports,
+    selectedExportTechnicalTotal,
+    usersById,
+  ]);
 
   const updateTablePage = useCallback((table: ReportTableKey, page: number) => {
     setTablePages((current) => ({
@@ -1351,8 +1472,8 @@ export default function InformesPage() {
   }, [updateTablePage]);
 
   const handleExportClientSummary = useCallback(() => {
-    if (selectedExportReports.length === 0) {
-      alert("No hay visitas técnicas en el rango seleccionado para exportar costo cliente.");
+    if (selectedExportClientReports.length === 0) {
+      alert("No hay visitas técnicas exportables al cliente en el rango seleccionado. Las garantías se excluyen de este PDF.");
       return;
     }
 
@@ -1366,12 +1487,12 @@ export default function InformesPage() {
         landscape: true,
         fileName: `costos_cliente_${exportRangeStart || "inicio"}_${exportRangeEnd || "fin"}`,
         summary: [
-          { label: "Visitas incluidas", value: String(selectedExportReports.length) },
+          { label: "Visitas incluidas", value: String(selectedExportClientReports.length) },
           { label: "Rango", value: activeRangeLabel },
-          { label: "Total costo cliente", value: formatCurrency(selectedExportClientTotal) },
+          { label: "Total costo cliente", value: formatCurrency(selectedExportClientVisibleTotal) },
         ],
-        headers: ["Fecha", "Técnico", "Cliente / Proyecto", "Detalle", "Costo técnico", "Costo cliente"],
-        rows: selectedExportReports.map((report) => {
+        headers: ["Fecha", "Técnico", "Cliente / Proyecto", "Categoría", "Detalle", "Costo cliente"],
+        rows: selectedExportClientReports.map((report) => {
           const tech = usersById.get(report.tecnicoId);
           const client = report.clienteId ? clientsById.get(report.clienteId) : null;
           const projectName = client?.edificio || client?.nombre || "—";
@@ -1380,17 +1501,17 @@ export default function InformesPage() {
             report.fecha,
             tech ? `${tech.nombre} ${tech.apellido}` : "—",
             projectName,
+            getVisitCategoryLabel(report.tipoVisita),
             report.descripcion || "—",
-            formatCurrency(report.costoActividad),
             formatCurrency(report.costoCliente ?? 0),
           ];
         }),
-        totales: ["", "", "", "", "Total", formatCurrency(selectedExportClientTotal)],
+        totales: ["", "", "", "", "Total", formatCurrency(selectedExportClientVisibleTotal)],
       });
     } finally {
       setExportingClientSummary(false);
     }
-  }, [activeRangeLabel, clientsById, companySettings?.nombre, exportRangeEnd, exportRangeStart, selectedExportClientTotal, selectedExportReports, usersById]);
+  }, [activeRangeLabel, clientsById, companySettings?.nombre, exportRangeEnd, exportRangeStart, selectedExportClientReports, selectedExportClientVisibleTotal, usersById]);
 
   if (loading) {
     return (
@@ -1491,6 +1612,21 @@ export default function InformesPage() {
               }}
             >
               Limpiar fechas
+            </Button>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap rounded-lg border border-border/50 bg-secondary/20 px-3 py-2">
+            <span className="text-xs text-muted-foreground">Quincena</span>
+            <Input
+              type="month"
+              value={viewQuincenaMonth}
+              onChange={(event) => setViewQuincenaMonth(event.target.value)}
+              className="w-40 bg-secondary/50 border-border/50"
+            />
+            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyViewQuincenaRange("primera")}>
+              1ra
+            </Button>
+            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyViewQuincenaRange("segunda")}>
+              2da
             </Button>
           </div>
           <Select value={grupoFilter} onValueChange={setGrupoFilter}>
@@ -1640,35 +1776,49 @@ export default function InformesPage() {
                         className="bg-secondary/50 border-border/50"
                       />
                     </div>
-                    <div className={cn("space-y-2 sm:col-span-2", exportReportType === "mantenimiento_preventivo" ? "xl:col-span-2" : "xl:col-span-2")}>
-                      <p className="text-xs text-muted-foreground">Rangos rápidos</p>
-                      <div className="flex flex-wrap gap-2">
-                        <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(7)}>
-                          7 días
-                        </Button>
-                        <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(15)}>
-                          15 días
-                        </Button>
-                        <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 1)}>
-                          1 mes
-                        </Button>
-                        <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 3)}>
-                          3 meses
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="text-muted-foreground"
-                          onClick={() => {
-                            setExportRangeStart("");
-                            setExportRangeEnd("");
-                          }}
-                        >
-                          Quitar rango
-                        </Button>
+                    {exportReportType !== "mantenimiento_preventivo" && (
+                      <div className="space-y-2 sm:col-span-2 xl:col-span-2">
+                        <p className="text-xs text-muted-foreground">Rangos rápidos</p>
+                        <div className="flex flex-wrap gap-2">
+                          <Input
+                            type="month"
+                            value={exportQuincenaMonth}
+                            onChange={(event) => setExportQuincenaMonth(event.target.value)}
+                            className="w-40 bg-secondary/50 border-border/50"
+                          />
+                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyExportQuincenaRange("primera")}>
+                            1ra quincena
+                          </Button>
+                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyExportQuincenaRange("segunda")}>
+                            2da quincena
+                          </Button>
+                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(7)}>
+                            7 días
+                          </Button>
+                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(15)}>
+                            15 días
+                          </Button>
+                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 1)}>
+                            1 mes
+                          </Button>
+                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 3)}>
+                            3 meses
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground"
+                            onClick={() => {
+                              setExportRangeStart("");
+                              setExportRangeEnd("");
+                            }}
+                          >
+                            Quitar rango
+                          </Button>
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
@@ -1878,6 +2028,7 @@ export default function InformesPage() {
                     <TableRow className="border-border/50 hover:bg-transparent">
                       <TableHead className="text-muted-foreground">Técnico</TableHead>
                       <TableHead className="text-muted-foreground">Cliente</TableHead>
+                      <TableHead className="text-muted-foreground">Categoría</TableHead>
                       <TableHead className="text-muted-foreground">Fecha</TableHead>
                       <TableHead className="text-muted-foreground">Descripción</TableHead>
                       <TableHead className="text-muted-foreground">Fotos</TableHead>
@@ -1909,6 +2060,21 @@ export default function InformesPage() {
                           </TableCell>
                           <TableCell className="text-sm text-foreground/80">
                             {client?.edificio || "—"}
+                          </TableCell>
+                          <TableCell>
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                "text-[10px]",
+                                r.tipoVisita === "garantia"
+                                  ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                  : r.tipoVisita === "emergencia"
+                                    ? "bg-red-500/10 text-red-400 border-red-500/20"
+                                    : "bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20"
+                              )}
+                            >
+                              {getVisitCategoryLabel(r.tipoVisita)}
+                            </Badge>
                           </TableCell>
                           <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
                           <TableCell className="text-sm text-foreground/80 max-w-56 truncate">
@@ -2070,6 +2236,11 @@ export default function InformesPage() {
                   <TableBody>
                     {paginatedRecorridos.items.map((r) => {
                       const tech = usersById.get(r.tecnicoId);
+                      const inlineTechnicalCostValue = getInlineTechnicalCostValue(r);
+                      const normalizedCurrentTechnicalCost = getEffectiveTechnicalCost(r);
+                      const normalizedDraftTechnicalCost = inlineTechnicalCostValue.trim() ? Number(inlineTechnicalCostValue) : 0;
+                      const isInlineTechnicalCostDirty = normalizedDraftTechnicalCost !== normalizedCurrentTechnicalCost;
+                      const isInlineTechnicalCostSaving = savingInlineTechnicalCostId === r.id;
                       return (
                         <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
                           <TableCell className="text-sm font-medium text-foreground">
@@ -2128,8 +2299,50 @@ export default function InformesPage() {
                             </Badge>
                           </TableCell>
                           <TableCell>{renderEmailStatusBadge(r)}</TableCell>
-                          <TableCell className="text-right font-semibold text-gold text-sm">
-                            {formatCurrency(r.costoActividad)}
+                          <TableCell className="text-right">
+                            <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
+                              <div className="relative w-24 sm:w-28">
+                                <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
+                                <Input
+                                  type="number"
+                                  min="0"
+                                  value={inlineTechnicalCostValue}
+                                  onClick={(event) => event.stopPropagation()}
+                                  onChange={(event) =>
+                                    setInlineTechnicalCostDrafts((current) => ({
+                                      ...current,
+                                      [r.id]: event.target.value,
+                                    }))
+                                  }
+                                  className={cn(
+                                    "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
+                                    isInlineTechnicalCostDirty && "border-gold/50 bg-gold/5"
+                                  )}
+                                />
+                              </div>
+                              {isInlineTechnicalCostDirty && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleInlineSaveTechnicalCost(r);
+                                  }}
+                                  disabled={isInlineTechnicalCostSaving}
+                                >
+                                  {isInlineTechnicalCostSaving ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Save className="h-4 w-4" />
+                                  )}
+                                </Button>
+                              )}
+                            </div>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              Configuración actual: {formatCurrency(getConfiguredRecorridoCost(r))}
+                            </p>
                           </TableCell>
                           <TableCell>{renderActionButtons(r)}</TableCell>
                         </TableRow>
@@ -2276,7 +2489,7 @@ export default function InformesPage() {
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Costo técnico</p>
-                    <p className="text-sm font-medium text-gold">{formatCurrency(selectedReport.costoActividad)}</p>
+                    <p className="text-sm font-medium text-gold">{formatCurrency(getEffectiveTechnicalCost(selectedReport))}</p>
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Estado aprobación</p>
@@ -2340,6 +2553,10 @@ export default function InformesPage() {
                 {selectedReport.tipo === "visita_tecnica" && (
                   <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-3">
+                      <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+                        <p className="text-xs text-muted-foreground">Categoría de la visita</p>
+                        <p className="text-sm font-medium text-foreground">{getVisitCategoryLabel(selectedReport.tipoVisita)}</p>
+                      </div>
                       <div>
                         <p className="text-xs text-muted-foreground">Resumen economico</p>
                         <p className="text-sm text-foreground/80">
@@ -2456,18 +2673,57 @@ export default function InformesPage() {
                 )}
 
                 {selectedReport.tipo === "recorrido" && (
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
-                      <p className="text-xs text-muted-foreground">Punto de partida</p>
-                      <p className="text-sm font-medium text-foreground">{selectedReport.puntoPartida || "—"}</p>
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                        <p className="text-xs text-muted-foreground">Punto de partida</p>
+                        <p className="text-sm font-medium text-foreground">{selectedReport.puntoPartida || "—"}</p>
+                      </div>
+                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                        <p className="text-xs text-muted-foreground">Punto de llegada</p>
+                        <p className="text-sm font-medium text-foreground">{selectedReport.puntoLlegada || "—"}</p>
+                      </div>
+                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                        <p className="text-xs text-muted-foreground">Tipo de recorrido</p>
+                        <p className="text-sm font-medium text-foreground">{selectedReport.tipoRecorrido || "—"}</p>
+                      </div>
                     </div>
-                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
-                      <p className="text-xs text-muted-foreground">Punto de llegada</p>
-                      <p className="text-sm font-medium text-foreground">{selectedReport.puntoLlegada || "—"}</p>
-                    </div>
-                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
-                      <p className="text-xs text-muted-foreground">Tipo de recorrido</p>
-                      <p className="text-sm font-medium text-foreground">{selectedReport.tipoRecorrido || "—"}</p>
+
+                    <div className="rounded-lg border border-gold/20 bg-gold/5 p-4 space-y-3">
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-foreground">Editar costo del recorrido</p>
+                        <p className="text-xs text-muted-foreground">
+                          Valor configurado: {formatCurrency(getConfiguredRecorridoCost(selectedReport))}
+                        </p>
+                      </div>
+                      <div className="relative max-w-40">
+                        <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
+                        <Input
+                          type="number"
+                          min="0"
+                          value={editableTechnicalCost}
+                          onChange={(event) => setEditableTechnicalCost(event.target.value)}
+                          className={cn(
+                            "pl-9 bg-background/70 border-gold/20 text-gold font-semibold",
+                            (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) !== getEffectiveTechnicalCost(selectedReport)
+                            && "border-gold shadow-[0_0_0_1px_rgba(234,179,8,0.25)]"
+                          )}
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="w-full gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
+                        onClick={handleSaveSelectedTechnicalCost}
+                        disabled={savingTechnicalCost || (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) === getEffectiveTechnicalCost(selectedReport)}
+                      >
+                        {savingTechnicalCost ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Save className="h-4 w-4" />
+                        )}
+                        {savingTechnicalCost ? "Guardando..." : "Guardar costo"}
+                      </Button>
                     </div>
                   </div>
                 )}
@@ -2513,6 +2769,20 @@ export default function InformesPage() {
                           >
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img src={selectedReport.fotoBitacora} alt="Foto de bitácora" className="h-full w-full object-cover" />
+                          </a>
+                        </div>
+                      )}
+                      {selectedReport.fotoHerramienta && (
+                        <div className="space-y-2 md:col-span-2">
+                          <p className="text-xs text-muted-foreground">Foto de herramienta</p>
+                          <a
+                            href={selectedReport.fotoHerramienta}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/20"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={selectedReport.fotoHerramienta} alt="Foto de herramienta" className="h-full w-full object-cover" />
                           </a>
                         </div>
                       )}

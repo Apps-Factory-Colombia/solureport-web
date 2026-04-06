@@ -12,3 +12,4 @@ export * from "./reportes-actividad";
 export * from "./configuracion";
 export * from "./storage";
 export * from "./notificaciones";
+export * from "./depuracion";

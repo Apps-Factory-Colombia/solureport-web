@@ -6,6 +6,7 @@ interface PDFReportData {
   subtitulo?: string;
   empresa: string;
   fecha: string;
+  categoria?: string;
   tecnico?: string;
   cliente?: string;
   edificio?: string;
@@ -198,6 +199,7 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
   doc.setFontSize(10);
   const infoItems: [string, string][] = [];
   if (data.fecha) infoItems.push(["Fecha:", data.fecha]);
+  if (data.categoria) infoItems.push(["Categoría:", data.categoria]);
   if (data.tecnico) infoItems.push(["Técnico:", data.tecnico]);
   if (data.cliente) infoItems.push(["Cliente:", data.cliente]);
   if (data.edificio) infoItems.push(["Edificio:", data.edificio]);
@@ -527,6 +529,7 @@ export function generateComprobantePDF(data: {
   totalAuxilio: number;
   totalDescuentoTardanza?: number;
   totalRodamiento: number;
+  totalExtraLider?: number;
   grandTotal: number;
 }): void {
   const doc = new jsPDF();
@@ -655,6 +658,14 @@ export function generateComprobantePDF(data: {
     doc.text("Comp. Rodamiento y Transporte:", totalsX - 30, y);
     doc.setTextColor(30);
     doc.text(formatCurrencyPDF(data.totalRodamiento), pageWidth - 14, y, { align: "right" });
+    y += 6;
+  }
+
+  if ((data.totalExtraLider || 0) > 0) {
+    doc.setTextColor(60);
+    doc.text("Extra Líder:", totalsX, y);
+    doc.setTextColor(30);
+    doc.text(formatCurrencyPDF(data.totalExtraLider || 0), pageWidth - 14, y, { align: "right" });
     y += 6;
   }
 

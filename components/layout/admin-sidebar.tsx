@@ -17,6 +17,7 @@ import {
   Clock,
   ClipboardCheck,
   Star,
+  ShieldAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/lib/context/auth-context";
@@ -87,6 +88,11 @@ const menuItems = [
     title: "Configuración",
     href: "/admin/configuracion",
     icon: Settings,
+  },
+  {
+    title: "Depuración",
+    href: "/admin/depuracion",
+    icon: ShieldAlert,
   },
 ];
 

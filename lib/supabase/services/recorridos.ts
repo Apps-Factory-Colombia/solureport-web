@@ -1,4 +1,5 @@
 import { supabase } from "../client";
+import { getConfiguracion } from "./configuracion";
 
 export interface Recorrido {
   id: string;
@@ -44,6 +45,12 @@ export async function getRecorridos(): Promise<Recorrido[]> {
 }
 
 export async function createRecorrido(r: Partial<Recorrido>): Promise<Recorrido> {
+  const configuracion = await getConfiguracion();
+  const configuredValue = (r.tipoRecorrido || "normal") === "con_herramienta"
+    ? configuracion.costoRecorridoHerramienta
+    : configuracion.costoRecorridoNormal;
+  const normalizedValue = r.valor != null ? Number(r.valor) || 0 : configuredValue;
+
   const { data, error } = await supabase
     .from("recorridos")
     .insert({
@@ -53,7 +60,8 @@ export async function createRecorrido(r: Partial<Recorrido>): Promise<Recorrido>
       punto_llegada: r.puntoLlegada,
       tipo_recorrido: r.tipoRecorrido || "normal",
       estado: r.estado || "completado",
-      valor: r.valor || 0,
+      valor: normalizedValue,
+      foto_herramienta_url: r.fotoHerramientaUrl || null,
     })
     .select()
     .single();
@@ -118,8 +126,11 @@ export async function createRecorrido(r: Partial<Recorrido>): Promise<Recorrido>
       punto_partida: r.puntoPartida,
       punto_llegada: r.puntoLlegada,
       tipo_recorrido: r.tipoRecorrido || "normal",
+      foto_herramienta_url: r.fotoHerramientaUrl || null,
       estado_aprobacion_lider: "pendiente",
-      costo_actividad: r.valor || 0,
+      costo_actividad_default: configuredValue,
+      costo_actividad: normalizedValue,
+      valor_modificado: normalizedValue !== configuredValue,
       costo_administrable: false,
       periodo_id: periodoId,
     });

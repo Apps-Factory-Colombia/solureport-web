@@ -235,9 +235,12 @@ export interface ActivityReport {
   id: string;
   tipo: TipoInforme;
   visitaTecnicaId?: string;
+  tipoVisita?: "imprevisto" | "garantia" | "emergencia";
+  registroActividadId?: string;
   tecnicoId: string;
   liderGrupoId: string;
   grupoId: string;
+  porcentajeParticipacion?: number;
   fecha: string;
   clienteId?: string;
   descripcion: string;
@@ -265,6 +268,8 @@ export interface ActivityReport {
   fechaUltimoEnvioCorreo?: string;
   periodoId: string;
   fechaCreacion: string;
+  valorActividadBaseGlobal?: number;
+  valorActividadAplicadoGlobal?: number;
 }
 
 export interface LeaderApprovalBatch {
