@@ -64,9 +64,10 @@ import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
 import { getConfiguracion, updateConfiguracion } from "@/lib/supabase/services/configuracion";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
+import { getCurrentOrLatestPeriodo, getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
-import { CompanySettings } from "@/lib/types";
+import { CompanySettings, LiquidationPeriod } from "@/lib/types";
 import {
   Pagination,
   PaginationContent,
@@ -91,6 +92,11 @@ function formatCurrencyDelta(value: number) {
   if (value === 0) return formatCurrency(0);
   const formatted = formatCurrency(Math.abs(value));
   return value > 0 ? `+${formatted}` : `-${formatted}`;
+}
+
+function formatPeriodLabel(period?: LiquidationPeriod) {
+  if (!period) return "Sin período";
+  return `${period.fechaInicio} al ${period.fechaFin}`;
 }
 
 function normalizeSearchValue(value?: string | null) {
@@ -219,6 +225,8 @@ export default function AprobacionesPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
+  const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
+  const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [activeTab, setActiveTab] = useState("preventivos");
   const [search, setSearch] = useState("");
@@ -245,8 +253,12 @@ export default function AprobacionesPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [r, u, c, g, s] = await Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion()]);
-      setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s);
+      const [r, u, c, g, s, p] = await Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion(), getPeriodos()]);
+      setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setPeriods(p);
+      setSelectedPeriodId((current) => {
+        if (current && p.some((period) => period.id === current)) return current;
+        return getCurrentOrLatestPeriodo(p)?.id || "";
+      });
     } catch (err) {
       console.error("Error cargando aprobaciones:", err);
     } finally {
@@ -361,21 +373,29 @@ export default function AprobacionesPage() {
     () => new Map(groups.map((group) => [group.id, group])),
     [groups]
   );
+  const selectedPeriod = useMemo(
+    () => periods.find((period) => period.id === selectedPeriodId),
+    [periods, selectedPeriodId]
+  );
+  const periodScopedReports = useMemo(
+    () => selectedPeriodId ? reports.filter((report) => report.periodoId === selectedPeriodId) : reports,
+    [reports, selectedPeriodId]
+  );
   const preventivos = useMemo(
-    () => reports.filter((report) => report.tipo === "mantenimiento_preventivo"),
-    [reports]
+    () => periodScopedReports.filter((report) => report.tipo === "mantenimiento_preventivo"),
+    [periodScopedReports]
   );
   const visitas = useMemo(
-    () => reports.filter((report) => report.tipo === "visita_tecnica"),
-    [reports]
+    () => periodScopedReports.filter((report) => report.tipo === "visita_tecnica"),
+    [periodScopedReports]
   );
   const recorridos = useMemo(
-    () => reports.filter((report) => report.tipo === "recorrido"),
-    [reports]
+    () => periodScopedReports.filter((report) => report.tipo === "recorrido"),
+    [periodScopedReports]
   );
   const grupales = useMemo(
-    () => reports.filter((report) => report.tipo === "actividad_grupal"),
-    [reports]
+    () => periodScopedReports.filter((report) => report.tipo === "actividad_grupal"),
+    [periodScopedReports]
   );
   const getInlineCostValue = useCallback(
     (report: ActivityReport) => inlineCostDrafts[getCostDraftKey(report)] ?? String(getEditableValueForReport(report)),
@@ -798,7 +818,7 @@ export default function AprobacionesPage() {
     const normalizedSearch = normalizeSearchValue(search);
     const normalizedTecnicoFilter = normalizeSearchValue(tecnicoFilter);
 
-    return reports
+    return periodScopedReports
       .filter((r) => {
         const tech = usersById.get(r.tecnicoId);
         const client = r.clienteId ? clientsById.get(r.clienteId) : null;
@@ -829,7 +849,7 @@ export default function AprobacionesPage() {
 
         return b.id.localeCompare(a.id);
       });
-  }, [reports, search, tecnicoFilter, dateFilter, estadoFilter, grupoFilter, usersById, clientsById, groupsById]);
+  }, [periodScopedReports, search, tecnicoFilter, dateFilter, estadoFilter, grupoFilter, usersById, clientsById, groupsById]);
 
   const filteredPreventivos = useMemo(
     () => filtered.filter((report) => report.tipo === "mantenimiento_preventivo"),
@@ -869,12 +889,12 @@ export default function AprobacionesPage() {
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [search, tecnicoFilter, dateFilter, estadoFilter, grupoFilter, activeTab]);
+  }, [search, tecnicoFilter, dateFilter, estadoFilter, grupoFilter, activeTab, selectedPeriodId]);
 
-  const totalReportes = reports.length;
-  const aprobados = reports.filter((r) => r.estadoAprobacionLider === "aprobado").length;
-  const pendientes = reports.filter((r) => r.estadoAprobacionLider === "pendiente").length;
-  const totalValor = reports
+  const totalReportes = periodScopedReports.length;
+  const aprobados = periodScopedReports.filter((r) => r.estadoAprobacionLider === "aprobado").length;
+  const pendientes = periodScopedReports.filter((r) => r.estadoAprobacionLider === "pendiente").length;
+  const totalValor = periodScopedReports
     .filter((r) => r.estadoAprobacionLider === "aprobado")
     .reduce((s, r) => s + r.costoActividad, 0);
 
@@ -1280,6 +1300,18 @@ export default function AprobacionesPage() {
               className="pl-10 bg-secondary/50 border-border/50"
             />
           </div>
+          <Select value={selectedPeriodId || undefined} onValueChange={setSelectedPeriodId}>
+            <SelectTrigger className="w-56 bg-secondary/50 border-border/50" disabled={periods.length === 0}>
+              <SelectValue placeholder="Selecciona un período" />
+            </SelectTrigger>
+            <SelectContent className="bg-card border-border">
+              {periods.map((period) => (
+                <SelectItem key={period.id} value={period.id}>
+                  {formatPeriodLabel(period)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Input
             placeholder="Filtrar por técnico"
             value={tecnicoFilter}
@@ -1314,6 +1346,9 @@ export default function AprobacionesPage() {
               ))}
             </SelectContent>
           </Select>
+          <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
+            {selectedPeriod ? `Período actual: ${formatPeriodLabel(selectedPeriod)}` : "Sin período configurado"}
+          </Badge>
         </div>
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">

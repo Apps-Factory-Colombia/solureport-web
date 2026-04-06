@@ -7,7 +7,34 @@ const PERIODOS_CACHE_TTL = 30_000;
 const LIQUIDATION_ENTRIES_CACHE_KEY = "liquidacion:entries";
 const LIQUIDATION_ENTRIES_CACHE_TTL = 30_000;
 
-function mapPeriod(row: any): LiquidationPeriod {
+interface LiquidationPeriodRow {
+  id: string;
+  fecha_inicio: string;
+  fecha_fin: string;
+  estado: LiquidationPeriod["estado"];
+  fecha_cierre?: string | null;
+}
+
+interface LiquidationEntryRow {
+  id: string;
+  actividad_id: string;
+  grupo_id: string;
+  lugar?: string | null;
+  edificio?: string | null;
+  fecha: string;
+  periodo_id?: string | null;
+}
+
+interface LiquidationParticipantRow {
+  registro_actividad_id: string;
+  tecnico_id: string;
+  porcentaje: string | number;
+  valor_calculado: string | number;
+}
+
+type PeriodUpdatePayload = Partial<Pick<LiquidationPeriodRow, "fecha_inicio" | "fecha_fin" | "estado">>;
+
+function mapPeriod(row: LiquidationPeriodRow): LiquidationPeriod {
   return {
     id: row.id,
     fechaInicio: row.fecha_inicio,
@@ -15,6 +42,28 @@ function mapPeriod(row: any): LiquidationPeriod {
     estado: row.estado,
     fechaCierre: row.fecha_cierre?.split("T")[0] || undefined,
   };
+}
+
+function toDateOnly(value?: Date | string): string {
+  if (!value) {
+    const now = new Date();
+    const offset = now.getTimezoneOffset() * 60_000;
+    return new Date(now.getTime() - offset).toISOString().split("T")[0] || "";
+  }
+
+  if (typeof value === "string") {
+    return value.includes("T") ? value.split("T")[0] : value;
+  }
+
+  const offset = value.getTimezoneOffset() * 60_000;
+  return new Date(value.getTime() - offset).toISOString().split("T")[0] || "";
+}
+
+export function getCurrentOrLatestPeriodo(periods: LiquidationPeriod[], referenceDate?: Date | string): LiquidationPeriod | undefined {
+  if (periods.length === 0) return undefined;
+
+  const currentDate = toDateOnly(referenceDate);
+  return periods.find((period) => currentDate >= period.fechaInicio && currentDate <= period.fechaFin) || periods[0];
 }
 
 export async function getPeriodos(): Promise<LiquidationPeriod[]> {
@@ -44,7 +93,7 @@ export async function createPeriodo(p: Partial<LiquidationPeriod>): Promise<Liqu
 }
 
 export async function updatePeriodo(id: string, p: Partial<LiquidationPeriod>): Promise<LiquidationPeriod> {
-  const updateData: any = {};
+  const updateData: PeriodUpdatePayload = {};
   if (p.fechaInicio !== undefined) updateData.fecha_inicio = p.fechaInicio;
   if (p.fechaFin !== undefined) updateData.fecha_fin = p.fechaFin;
   if (p.estado !== undefined) updateData.estado = p.estado;
@@ -81,7 +130,7 @@ export async function deletePeriodo(id: string): Promise<void> {
   invalidateCachedValue(PERIODOS_CACHE_KEY);
 }
 
-function mapEntry(row: any, participantes: LiquidationParticipant[]): LiquidationEntry {
+function mapEntry(row: LiquidationEntryRow, participantes: LiquidationParticipant[]): LiquidationEntry {
   return {
     id: row.id,
     actividadId: row.actividad_id,
@@ -101,7 +150,7 @@ export async function getLiquidationEntries(): Promise<LiquidationEntry[]> {
       .order("fecha", { ascending: false });
     if (error) throw error;
 
-    const registroIds = (data || []).map((row: any) => row.id).filter(Boolean);
+    const registroIds = ((data || []) as LiquidationEntryRow[]).map((row) => row.id).filter(Boolean);
     const { data: parts, error: partsError } = registroIds.length > 0
       ? await supabase
         .from("actividad_participantes")
@@ -111,7 +160,7 @@ export async function getLiquidationEntries(): Promise<LiquidationEntry[]> {
     if (partsError) throw partsError;
 
     const participantesByRegistro = new Map<string, LiquidationParticipant[]>();
-    for (const part of parts || []) {
+    for (const part of (parts || []) as LiquidationParticipantRow[]) {
       const registroId = part.registro_actividad_id;
       if (!registroId) continue;
       const current = participantesByRegistro.get(registroId) || [];
@@ -123,7 +172,7 @@ export async function getLiquidationEntries(): Promise<LiquidationEntry[]> {
       participantesByRegistro.set(registroId, current);
     }
 
-    return (data || []).map((row: any) => mapEntry(row, participantesByRegistro.get(row.id) || []));
+    return ((data || []) as LiquidationEntryRow[]).map((row) => mapEntry(row, participantesByRegistro.get(row.id) || []));
   });
 }
 

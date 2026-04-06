@@ -65,13 +65,14 @@ import {
   Save,
   ChevronDown,
 } from "lucide-react";
-import { ActivityReport, User, Client, WorkGroup, CompanySettings, MaintenanceContract } from "@/lib/types";
+import { ActivityReport, User, Client, WorkGroup, CompanySettings, LiquidationPeriod, MaintenanceContract } from "@/lib/types";
 import { deleteReporteActividadAdmin, getReportesActividad, markReporteActividadEmailSent, updateCostoActividadAdmin, updateCostoClienteVisitaAdmin } from "@/lib/supabase/services/reportes-actividad";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { getContratos } from "@/lib/supabase/services/contratos";
+import { getCurrentOrLatestPeriodo, getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
 
@@ -139,6 +140,11 @@ function formatRangeLabel(start: string, end: string) {
   }
 
   return `${formatter.format(startDate)} al ${formatter.format(endDate)}`;
+}
+
+function formatPeriodLabel(period?: LiquidationPeriod) {
+  if (!period) return "Sin período";
+  return `${period.fechaInicio} al ${period.fechaFin}`;
 }
 
 function isWithinDateRange(fecha: string, start: string, end: string) {
@@ -298,6 +304,8 @@ export default function InformesPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
+  const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
+  const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
@@ -340,8 +348,14 @@ export default function InformesPage() {
 
   const loadData = async () => {
     setLoading(true);
-    Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion(), getContratos()])
-      .then(([r, u, c, g, s, ct]) => { setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setContracts(ct); })
+    Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion(), getContratos(), getPeriodos()])
+      .then(([r, u, c, g, s, ct, p]) => {
+        setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setContracts(ct); setPeriods(p);
+        setSelectedPeriodId((current) => {
+          if (current && p.some((period) => period.id === current)) return current;
+          return getCurrentOrLatestPeriodo(p)?.id || "";
+        });
+      })
       .catch((err) => console.error("Error cargando informes:", err))
       .finally(() => setLoading(false));
   };
@@ -349,6 +363,27 @@ export default function InformesPage() {
   useEffect(() => {
     loadData();
   }, []);
+
+  const selectedPeriod = useMemo(
+    () => periods.find((period) => period.id === selectedPeriodId),
+    [periods, selectedPeriodId]
+  );
+
+  useEffect(() => {
+    if (!selectedPeriod) return;
+
+    setViewRangeStart(selectedPeriod.fechaInicio);
+    setViewRangeEnd(selectedPeriod.fechaFin);
+    setExportRangeStart(selectedPeriod.fechaInicio);
+    setExportRangeEnd(selectedPeriod.fechaFin);
+    setViewQuincenaMonth(getMonthInputValue(selectedPeriod.fechaInicio));
+    setExportQuincenaMonth(getMonthInputValue(selectedPeriod.fechaInicio));
+  }, [selectedPeriod]);
+
+  const periodScopedReports = useMemo(
+    () => selectedPeriodId ? reports.filter((report) => report.periodoId === selectedPeriodId) : reports,
+    [reports, selectedPeriodId]
+  );
 
   const getConfiguredRecorridoCost = useCallback((report: ActivityReport) => {
     const normalCost = companySettings?.costoRecorridoNormal ?? 25000;
@@ -392,8 +427,8 @@ export default function InformesPage() {
   };
 
   const viewScopedReports = useMemo(
-    () => reports.filter((report) => isWithinDateRange(report.fecha, viewRangeStart, viewRangeEnd)),
-    [reports, viewRangeEnd, viewRangeStart]
+    () => periodScopedReports.filter((report) => isWithinDateRange(report.fecha, viewRangeStart, viewRangeEnd)),
+    [periodScopedReports, viewRangeEnd, viewRangeStart]
   );
 
   const preventivos = useMemo(
@@ -981,8 +1016,8 @@ export default function InformesPage() {
   const paginatedGrupales = useMemo(() => paginateReports(filteredGrupales, tablePages.grupales), [filteredGrupales, tablePages.grupales]);
 
   const exportScopedReports = useMemo(
-    () => reports.filter((report) => isWithinDateRange(report.fecha, exportRangeStart, exportRangeEnd)),
-    [reports, exportRangeStart, exportRangeEnd]
+    () => periodScopedReports.filter((report) => isWithinDateRange(report.fecha, exportRangeStart, exportRangeEnd)),
+    [periodScopedReports, exportRangeStart, exportRangeEnd]
   );
 
   const selectedExportReports = useMemo(
@@ -1167,7 +1202,7 @@ export default function InformesPage() {
       recorridos: 1,
       grupales: 1,
     });
-  }, [search, grupoFilter, viewRangeStart, viewRangeEnd, reports.length]);
+  }, [search, grupoFilter, viewRangeStart, viewRangeEnd, selectedPeriodId, periodScopedReports.length]);
 
   const applyQuickRange = useCallback((days?: number, months?: number) => {
     const nextEnd = today;
@@ -1588,6 +1623,18 @@ export default function InformesPage() {
               className="pl-10 bg-secondary/50 border-border/50"
             />
           </div>
+          <Select value={selectedPeriodId || undefined} onValueChange={setSelectedPeriodId}>
+            <SelectTrigger className="w-56 bg-secondary/50 border-border/50" disabled={periods.length === 0}>
+              <SelectValue placeholder="Selecciona un período" />
+            </SelectTrigger>
+            <SelectContent className="bg-card border-border">
+              {periods.map((period) => (
+                <SelectItem key={period.id} value={period.id}>
+                  {formatPeriodLabel(period)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <div className="flex items-center gap-2 flex-wrap">
             <Input
               type="date"
@@ -1607,11 +1654,11 @@ export default function InformesPage() {
               size="sm"
               className="text-muted-foreground"
               onClick={() => {
-                setViewRangeStart("");
-                setViewRangeEnd("");
+                setViewRangeStart(selectedPeriod?.fechaInicio || "");
+                setViewRangeEnd(selectedPeriod?.fechaFin || "");
               }}
             >
-              Limpiar fechas
+              Restablecer período
             </Button>
           </div>
           <div className="flex items-center gap-2 flex-wrap rounded-lg border border-border/50 bg-secondary/20 px-3 py-2">
@@ -1640,6 +1687,9 @@ export default function InformesPage() {
               ))}
             </SelectContent>
           </Select>
+          <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
+            {selectedPeriod ? `Período activo: ${formatPeriodLabel(selectedPeriod)}` : "Sin período configurado"}
+          </Badge>
         </div>
 
         <Collapsible open={exportPanelOpen} onOpenChange={setExportPanelOpen}>
