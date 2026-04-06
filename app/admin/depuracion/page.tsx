@@ -226,7 +226,7 @@ export default function DepuracionPage() {
     };
 
     if (loading) {
-        return <AdminPageLoader title="Depuración" subtitle="Analizando cierres y bloques de datos" />;
+        return <AdminPageLoader title="Depuración" message="Analizando cierres y bloques de datos" />;
     }
 
     return (
