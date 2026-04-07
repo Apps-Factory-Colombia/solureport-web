@@ -882,7 +882,7 @@ export default function LiquidacionPage() {
                   titulo: "LIQUIDACI\u00d3N DE ACTIVIDADES",
                   empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
                   periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} \u2192 ${selectedPeriod.fechaFin}` : "",
-                  headers: ["Tipo", "Descripci\u00f3n", "Grupo", "Fecha", "T\u00e9cnico", "Estado", "Valor"],
+                  headers: ["Tipo", "Descripción", "Grupo", "Fecha", "Técnico", "Estado", "Valor"],
                   rows,
                   summary: totalExtraLeaderPeriod > 0 ? [{ label: "Extra líder período", value: formatCurrency(totalExtraLeaderPeriod) }] : undefined,
                   totales: ["TOTAL", "", "", "", "", `${liquidablePeriodReports.length} actividades + ${extraLeaderRows.length} extra(s)`, formatCurrency(totalPeriod)],
@@ -1093,8 +1093,8 @@ export default function LiquidacionPage() {
                   <TableHeader>
                     <TableRow className="border-border/50 hover:bg-transparent">
                       <TableHead className="w-36 whitespace-normal text-muted-foreground">Tipo</TableHead>
-                      <TableHead className="w-104 whitespace-normal text-muted-foreground">Descripci\u00f3n</TableHead>
-                      <TableHead className="w-52 whitespace-normal text-muted-foreground">T\u00e9cnico</TableHead>
+                      <TableHead className="w-104 whitespace-normal text-muted-foreground">Descripción</TableHead>
+                      <TableHead className="w-52 whitespace-normal text-muted-foreground">Técnico</TableHead>
                       <TableHead className="w-44 whitespace-normal text-muted-foreground">Grupo</TableHead>
                       <TableHead className="w-32 whitespace-normal text-muted-foreground">Fecha</TableHead>
                       <TableHead className="w-32 whitespace-normal text-muted-foreground">Estado</TableHead>
