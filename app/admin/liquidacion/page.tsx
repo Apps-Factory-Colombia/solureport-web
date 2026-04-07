@@ -128,6 +128,16 @@ type GroupLiquidationSummary = {
   total: number;
 };
 
+type TechLiquidationDisplaySummary = TechLiquidationSummary & {
+  actividadesVisibles: number;
+  actividadesAprobadas: number;
+};
+
+type GroupLiquidationDisplaySummary = GroupLiquidationSummary & {
+  actividadesVisibles: number;
+  actividadesAprobadas: number;
+};
+
 function clampPercentage(value: number) {
   return Math.max(0, Math.min(100, value));
 }
@@ -383,6 +393,14 @@ export default function LiquidacionPage() {
   }, new Map());
 
   const totalExtraLeaderPeriod = Array.from(leaderExtraByTech.values()).reduce((sum, value) => sum + value, 0);
+  const usersById = new Map(users.map((user) => [user.id, user]));
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  const groupIdByUser = users.reduce<Map<string, string | null>>((acc, user) => {
+    const directGroupId = user.grupoId || null;
+    const memberGroup = groups.find((group) => group.miembros.includes(user.id) || group.liderId === user.id);
+    acc.set(user.id, directGroupId || memberGroup?.id || null);
+    return acc;
+  }, new Map());
 
   const buildTechSummary = (reports: ActivityReport[], includeLeaderExtra: boolean = false) => {
     const summary = new Map<string, TechLiquidationSummary>();
@@ -419,6 +437,47 @@ export default function LiquidacionPage() {
       item.descuentoValor = calculateDiscountValue(item.totalNoRecorridos, item.descuentoPorcentaje);
       item.extraLider = includeLeaderExtra ? (leaderExtraByTech.get(techId) || 0) : 0;
       item.total = item.totalBruto - item.descuentoValor + item.extraLider;
+    });
+
+    return summary;
+  };
+
+  const buildTechDisplaySummary = (
+    seedUsers: User[],
+    visibleReports: ActivityReport[],
+    payableReports: ActivityReport[],
+    includeLeaderExtra: boolean = false,
+  ) => {
+    const payableSummary = buildTechSummary(payableReports, includeLeaderExtra);
+    const visibleCounts = new Map<string, number>();
+
+    visibleReports.forEach((report) => {
+      visibleCounts.set(report.tecnicoId, (visibleCounts.get(report.tecnicoId) || 0) + 1);
+    });
+
+    const summary = new Map<string, TechLiquidationDisplaySummary>();
+
+    seedUsers.forEach((tech) => {
+      const payableData = payableSummary.get(tech.id);
+      summary.set(tech.id, {
+        nombre: payableData?.nombre || `${tech.nombre} ${tech.apellido}`,
+        actividades: payableData?.actividades || 0,
+        actividadesVisibles: visibleCounts.get(tech.id) || 0,
+        actividadesAprobadas: payableData?.actividades || 0,
+        totalBruto: payableData?.totalBruto || 0,
+        totalNoRecorridos: payableData?.totalNoRecorridos || 0,
+        totalRecorridos: payableData?.totalRecorridos || 0,
+        extraLider: payableData?.extraLider || 0,
+        descuentoPorcentaje: payableData?.descuentoPorcentaje || 0,
+        descuentoValor: payableData?.descuentoValor || 0,
+        total: payableData?.total || 0,
+      });
+    });
+
+    visibleCounts.forEach((actividadesVisibles, techId) => {
+      const existing = summary.get(techId);
+      if (!existing) return;
+      existing.actividadesVisibles = actividadesVisibles;
     });
 
     return summary;
@@ -482,20 +541,54 @@ export default function LiquidacionPage() {
     return summary;
   };
 
+  const buildGroupDisplaySummary = (
+    seedGroups: WorkGroup[],
+    visibleReports: ActivityReport[],
+    payableReports: ActivityReport[],
+    includeLeaderExtra: boolean = false,
+  ) => {
+    const payableSummary = buildGroupSummary(payableReports, includeLeaderExtra);
+    const visibleCounts = new Map<string, number>();
+
+    visibleReports.forEach((report) => {
+      visibleCounts.set(report.grupoId, (visibleCounts.get(report.grupoId) || 0) + 1);
+    });
+
+    const summary = new Map<string, GroupLiquidationDisplaySummary>();
+
+    seedGroups.forEach((group) => {
+      const payableData = payableSummary.get(group.id);
+      summary.set(group.id, {
+        nombre: payableData?.nombre || group.nombre,
+        actividades: payableData?.actividades || 0,
+        actividadesVisibles: visibleCounts.get(group.id) || 0,
+        actividadesAprobadas: payableData?.actividades || 0,
+        totalBruto: payableData?.totalBruto || 0,
+        totalNoRecorridos: payableData?.totalNoRecorridos || 0,
+        totalRecorridos: payableData?.totalRecorridos || 0,
+        extraLider: payableData?.extraLider || 0,
+        descuentoValor: payableData?.descuentoValor || 0,
+        total: payableData?.total || 0,
+      });
+    });
+
+    visibleCounts.forEach((actividadesVisibles, groupId) => {
+      const existing = summary.get(groupId);
+      if (!existing) return;
+      existing.actividadesVisibles = actividadesVisibles;
+    });
+
+    return summary;
+  };
+
   // Resumen por técnico basado en reportes_actividad
   const techSummary = buildTechSummary(liquidablePeriodReports, true);
-
-  // Resumen por grupo basado en reportes_actividad
-  const groupSummary = buildGroupSummary(liquidablePeriodReports, true);
 
   const totalPeriod = Array.from(techSummary.values()).reduce(
     (sum, t) => sum + t.total,
     0
   );
   const totalPenaltyPeriod = Array.from(techSummary.values()).reduce((sum, t) => sum + t.descuentoValor, 0);
-
-  const usersById = new Map(users.map((user) => [user.id, user]));
-  const groupsById = new Map(groups.map((group) => [group.id, group]));
 
   const applyStableReportOrder = (reports: ActivityReport[]) => {
     reports.forEach((report) => {
@@ -512,7 +605,7 @@ export default function LiquidacionPage() {
     });
   };
 
-  const applyStableTechOrder = (entries: Array<[string, TechLiquidationSummary]>) => {
+  const applyStableTechOrder = <T extends TechLiquidationSummary>(entries: Array<[string, T]>) => {
     entries.forEach(([techId]) => {
       const key = buildStableOrderKey(selectedPeriodId, techId);
       if (!techOrderRef.current.has(key)) {
@@ -527,7 +620,7 @@ export default function LiquidacionPage() {
     });
   };
 
-  const applyStableGroupOrder = (entries: Array<[string, GroupLiquidationSummary]>) => {
+  const applyStableGroupOrder = <T extends GroupLiquidationSummary>(entries: Array<[string, T]>) => {
     entries.forEach(([groupId]) => {
       const key = buildStableOrderKey(selectedPeriodId, groupId);
       if (!groupOrderRef.current.has(key)) {
@@ -542,8 +635,6 @@ export default function LiquidacionPage() {
     });
   };
 
-  const techEntries = applyStableTechOrder(Array.from(techSummary.entries()));
-  const groupEntries = applyStableGroupOrder(Array.from(groupSummary.entries()));
   const normalizedTechnicianTabSearch = normalizeSearchValue(technicianTabSearch);
   const normalizedGroupTabSearch = normalizeSearchValue(groupTabSearch);
   const normalizedComprobanteSearch = normalizeSearchValue(comprobanteSearch);
@@ -561,7 +652,7 @@ export default function LiquidacionPage() {
     return matchGroup && matchTechnician;
   }));
 
-  const filteredTechTabReports = liquidablePeriodReports.filter((report) => {
+  const filteredTechTabReports = periodReports.filter((report) => {
     const tech = usersById.get(report.tecnicoId);
     const techFullName = normalizeSearchValue(tech ? `${tech.nombre} ${tech.apellido}` : "");
     const matchTechnician = !normalizedTechnicianTabSearch || techFullName.includes(normalizedTechnicianTabSearch);
@@ -569,11 +660,23 @@ export default function LiquidacionPage() {
     return matchTechnician && matchGroup;
   });
 
-  const filteredTechSummary = buildTechSummary(filteredTechTabReports, true);
+  const filteredTechUsers = users.filter((user) => {
+    const techFullName = normalizeSearchValue(`${user.nombre} ${user.apellido}`);
+    const matchTechnician = !normalizedTechnicianTabSearch || techFullName.includes(normalizedTechnicianTabSearch);
+    const userGroupId = groupIdByUser.get(user.id);
+    const matchGroup = technicianTabGroupId === "todos" || userGroupId === technicianTabGroupId;
+    return matchTechnician && matchGroup;
+  });
+
+  const filteredTechPayableReports = filteredTechTabReports.filter(
+    (report) => report.estadoAprobacionLider === "aprobado"
+  );
+
+  const filteredTechSummary = buildTechDisplaySummary(filteredTechUsers, filteredTechTabReports, filteredTechPayableReports, true);
 
   const filteredTechEntries = applyStableTechOrder(Array.from(filteredTechSummary.entries()));
 
-  const filteredGroupReports = liquidablePeriodReports.filter((report) => {
+  const filteredGroupReports = periodReports.filter((report) => {
     const group = groupsById.get(report.grupoId);
     const leader = group?.liderId ? usersById.get(group.liderId) : null;
     const groupName = normalizeSearchValue(group?.nombre);
@@ -581,11 +684,22 @@ export default function LiquidacionPage() {
     return !normalizedGroupTabSearch || groupName.includes(normalizedGroupTabSearch) || leaderName.includes(normalizedGroupTabSearch);
   });
 
-  const filteredGroupSummary = buildGroupSummary(filteredGroupReports, true);
+  const filteredGroups = groups.filter((group) => {
+    const leader = usersById.get(group.liderId);
+    const groupName = normalizeSearchValue(group.nombre);
+    const leaderName = normalizeSearchValue(leader ? `${leader.nombre} ${leader.apellido}` : "");
+    return !normalizedGroupTabSearch || groupName.includes(normalizedGroupTabSearch) || leaderName.includes(normalizedGroupTabSearch);
+  });
+
+  const filteredGroupPayableReports = filteredGroupReports.filter(
+    (report) => report.estadoAprobacionLider === "aprobado"
+  );
+
+  const filteredGroupSummary = buildGroupDisplaySummary(filteredGroups, filteredGroupReports, filteredGroupPayableReports, true);
 
   const filteredGroupEntries = applyStableGroupOrder(Array.from(filteredGroupSummary.entries()));
 
-  const filteredComprobanteReports = liquidablePeriodReports.filter((report) => {
+  const filteredComprobanteReports = periodReports.filter((report) => {
     const tech = usersById.get(report.tecnicoId);
     const techFullName = normalizeSearchValue(tech ? `${tech.nombre} ${tech.apellido}` : "");
     const matchTechnician = !normalizedComprobanteSearch || techFullName.includes(normalizedComprobanteSearch);
@@ -593,7 +707,19 @@ export default function LiquidacionPage() {
     return matchTechnician && matchGroup;
   });
 
-  const filteredComprobanteSummary = buildTechSummary(filteredComprobanteReports, true);
+  const filteredComprobanteUsers = users.filter((user) => {
+    const techFullName = normalizeSearchValue(`${user.nombre} ${user.apellido}`);
+    const matchTechnician = !normalizedComprobanteSearch || techFullName.includes(normalizedComprobanteSearch);
+    const userGroupId = groupIdByUser.get(user.id);
+    const matchGroup = comprobanteGroupId === "todos" || userGroupId === comprobanteGroupId;
+    return matchTechnician && matchGroup;
+  });
+
+  const filteredComprobantePayableReports = filteredComprobanteReports.filter(
+    (report) => report.estadoAprobacionLider === "aprobado"
+  );
+
+  const filteredComprobanteSummary = buildTechDisplaySummary(filteredComprobanteUsers, filteredComprobanteReports, filteredComprobantePayableReports, true);
 
   const filteredComprobanteEntries = applyStableTechOrder(Array.from(filteredComprobanteSummary.entries()));
 
@@ -963,16 +1089,16 @@ export default function LiquidacionPage() {
                     </Select>
                   </div>
                 </div>
-                <Table>
+                <Table className="min-w-245 table-fixed">
                   <TableHeader>
                     <TableRow className="border-border/50 hover:bg-transparent">
-                      <TableHead className="text-muted-foreground">Tipo</TableHead>
-                      <TableHead className="text-muted-foreground">Descripci\u00f3n</TableHead>
-                      <TableHead className="text-muted-foreground">T\u00e9cnico</TableHead>
-                      <TableHead className="text-muted-foreground">Grupo</TableHead>
-                      <TableHead className="text-muted-foreground">Fecha</TableHead>
-                      <TableHead className="text-muted-foreground">Estado</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Valor</TableHead>
+                      <TableHead className="w-36 whitespace-normal text-muted-foreground">Tipo</TableHead>
+                      <TableHead className="w-104 whitespace-normal text-muted-foreground">Descripci\u00f3n</TableHead>
+                      <TableHead className="w-52 whitespace-normal text-muted-foreground">T\u00e9cnico</TableHead>
+                      <TableHead className="w-44 whitespace-normal text-muted-foreground">Grupo</TableHead>
+                      <TableHead className="w-32 whitespace-normal text-muted-foreground">Fecha</TableHead>
+                      <TableHead className="w-32 whitespace-normal text-muted-foreground">Estado</TableHead>
+                      <TableHead className="w-32 whitespace-normal text-right text-muted-foreground">Valor</TableHead>
                       <TableHead className="text-muted-foreground w-12"></TableHead>
                     </TableRow>
                   </TableHeader>
@@ -995,13 +1121,13 @@ export default function LiquidacionPage() {
                               {tipoLabel}
                             </Badge>
                           </TableCell>
-                          <TableCell className="text-sm text-foreground/80 max-w-48 truncate">
+                          <TableCell className="wrap-break-word text-sm leading-5 whitespace-normal text-foreground/80">
                             {r.descripcion || "\u2014"}
                           </TableCell>
-                          <TableCell className="text-sm text-foreground/80">
+                          <TableCell className="text-sm whitespace-normal text-foreground/80">
                             {tech ? `${tech.nombre} ${tech.apellido}` : "\u2014"}
                           </TableCell>
-                          <TableCell className="text-sm text-foreground/80">{group?.nombre || "\u2014"}</TableCell>
+                          <TableCell className="text-sm whitespace-normal text-foreground/80">{group?.nombre || "\u2014"}</TableCell>
                           <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
                           <TableCell>
                             <Badge variant="outline" className={cn(
@@ -1144,7 +1270,8 @@ export default function LiquidacionPage() {
                           </div>
                           <div className="text-right">
                             <p className="text-sm font-bold text-gold">{formatCurrency(data.total)}</p>
-                            <p className="text-[10px] text-muted-foreground">{data.actividades} actividades</p>
+                            <p className="text-[10px] text-muted-foreground">{data.actividadesVisibles} registradas</p>
+                            <p className="text-[10px] text-emerald-400">{data.actividadesAprobadas} aprobadas para pago</p>
                             {data.extraLider > 0 && (
                               <p className="text-[10px] text-violet-400">Extra líder: {formatCurrency(data.extraLider)}</p>
                             )}
@@ -1156,15 +1283,15 @@ export default function LiquidacionPage() {
                       </CardHeader>
                       <CollapsibleContent>
                         <CardContent className="pt-0 border-t border-border/20">
-                          <Table>
+                          <Table className="min-w-215 table-fixed">
                             <TableHeader>
                               <TableRow className="border-border/50 hover:bg-transparent">
-                                <TableHead>Tipo</TableHead>
-                                <TableHead>Descripción</TableHead>
-                                <TableHead>Grupo</TableHead>
-                                <TableHead>Fecha</TableHead>
-                                <TableHead>Estado</TableHead>
-                                <TableHead className="text-right">Valor</TableHead>
+                                <TableHead className="w-36 whitespace-normal">Tipo</TableHead>
+                                <TableHead className="w-96 whitespace-normal">Descripción</TableHead>
+                                <TableHead className="w-44 whitespace-normal">Grupo</TableHead>
+                                <TableHead className="w-32 whitespace-normal">Fecha</TableHead>
+                                <TableHead className="w-32 whitespace-normal">Estado</TableHead>
+                                <TableHead className="w-32 whitespace-normal text-right">Valor</TableHead>
                                 <TableHead className="w-12"></TableHead>
                               </TableRow>
                             </TableHeader>
@@ -1172,8 +1299,8 @@ export default function LiquidacionPage() {
                               {techReports.map((report) => (
                                 <TableRow key={report.id} className="border-border/50 hover:bg-secondary/30">
                                   <TableCell className="text-sm text-foreground/80">{getTipoLabel(report.tipo)}</TableCell>
-                                  <TableCell className="text-sm text-foreground/80 max-w-64 truncate">{report.descripcion || "—"}</TableCell>
-                                  <TableCell className="text-sm text-foreground/80">{groupsById.get(report.grupoId)?.nombre || "—"}</TableCell>
+                                  <TableCell className="wrap-break-word text-sm leading-5 whitespace-normal text-foreground/80">{report.descripcion || "—"}</TableCell>
+                                  <TableCell className="text-sm whitespace-normal text-foreground/80">{groupsById.get(report.grupoId)?.nombre || "—"}</TableCell>
                                   <TableCell className="text-sm text-foreground/80">{report.fecha}</TableCell>
                                   <TableCell>
                                     <Badge variant="outline" className={cn(
@@ -1195,6 +1322,13 @@ export default function LiquidacionPage() {
                                   </TableCell>
                                 </TableRow>
                               ))}
+                              {techReports.length === 0 && (
+                                <TableRow>
+                                  <TableCell colSpan={7} className="py-6 text-center text-sm text-muted-foreground">
+                                    Este usuario no tiene actividades en el período seleccionado.
+                                  </TableCell>
+                                </TableRow>
+                              )}
                             </TableBody>
                           </Table>
                         </CardContent>
@@ -1254,7 +1388,8 @@ export default function LiquidacionPage() {
                           </div>
                           <div className="text-right">
                             <p className="text-sm font-bold text-gold">{formatCurrency(data.total)}</p>
-                            <p className="text-[10px] text-muted-foreground">{data.actividades} actividades</p>
+                            <p className="text-[10px] text-muted-foreground">{data.actividadesVisibles} registradas</p>
+                            <p className="text-[10px] text-emerald-400">{data.actividadesAprobadas} aprobadas para pago</p>
                             {data.extraLider > 0 && (
                               <p className="text-[10px] text-violet-400">Extra líder: {formatCurrency(data.extraLider)}</p>
                             )}
@@ -1266,15 +1401,15 @@ export default function LiquidacionPage() {
                       </CardHeader>
                       <CollapsibleContent>
                         <CardContent className="pt-0 border-t border-border/20">
-                          <Table>
+                          <Table className="min-w-215 table-fixed">
                             <TableHeader>
                               <TableRow className="border-border/50 hover:bg-transparent">
-                                <TableHead>Tipo</TableHead>
-                                <TableHead>Descripción</TableHead>
-                                <TableHead>Técnico</TableHead>
-                                <TableHead>Fecha</TableHead>
-                                <TableHead>Estado</TableHead>
-                                <TableHead className="text-right">Valor</TableHead>
+                                <TableHead className="w-36 whitespace-normal">Tipo</TableHead>
+                                <TableHead className="w-96 whitespace-normal">Descripción</TableHead>
+                                <TableHead className="w-52 whitespace-normal">Técnico</TableHead>
+                                <TableHead className="w-32 whitespace-normal">Fecha</TableHead>
+                                <TableHead className="w-32 whitespace-normal">Estado</TableHead>
+                                <TableHead className="w-32 whitespace-normal text-right">Valor</TableHead>
                                 <TableHead className="w-12"></TableHead>
                               </TableRow>
                             </TableHeader>
@@ -1285,8 +1420,8 @@ export default function LiquidacionPage() {
                                 return (
                                   <TableRow key={report.id} className="border-border/50 hover:bg-secondary/30">
                                     <TableCell className="text-sm text-foreground/80">{getTipoLabel(report.tipo)}</TableCell>
-                                    <TableCell className="text-sm text-foreground/80 max-w-64 truncate">{report.descripcion || "—"}</TableCell>
-                                    <TableCell className="text-sm text-foreground/80">{tech ? `${tech.nombre} ${tech.apellido}` : "—"}</TableCell>
+                                    <TableCell className="wrap-break-word text-sm leading-5 whitespace-normal text-foreground/80">{report.descripcion || "—"}</TableCell>
+                                    <TableCell className="text-sm whitespace-normal text-foreground/80">{tech ? `${tech.nombre} ${tech.apellido}` : "—"}</TableCell>
                                     <TableCell className="text-sm text-foreground/80">{report.fecha}</TableCell>
                                     <TableCell>
                                       <Badge variant="outline" className={cn(
@@ -1309,6 +1444,13 @@ export default function LiquidacionPage() {
                                   </TableRow>
                                 );
                               })}
+                              {groupReports.length === 0 && (
+                                <TableRow>
+                                  <TableCell colSpan={7} className="py-6 text-center text-sm text-muted-foreground">
+                                    Este grupo no tiene actividades en el período seleccionado.
+                                  </TableCell>
+                                </TableRow>
+                              )}
                             </TableBody>
                           </Table>
                         </CardContent>
@@ -1380,7 +1522,8 @@ export default function LiquidacionPage() {
                         <div className="flex items-center justify-between">
                           <div>
                             <p className="font-medium text-foreground">{data.nombre}</p>
-                            <p className="text-xs text-muted-foreground">{data.actividades} actividades</p>
+                            <p className="text-xs text-muted-foreground">{data.actividadesVisibles} registradas</p>
+                            <p className="text-[10px] text-emerald-400">{data.actividadesAprobadas} aprobadas para pago</p>
                           </div>
                           <Printer className="h-5 w-5 text-gold" />
                         </div>
