@@ -72,7 +72,7 @@ import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { getContratos } from "@/lib/supabase/services/contratos";
-import { getCurrentOrLatestPeriodo, getPeriodos } from "@/lib/supabase/services/liquidacion";
+import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
 import { sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
@@ -349,15 +349,30 @@ export default function InformesPage() {
 
   const loadData = async () => {
     setLoading(true);
-    Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion(), getContratos(), getPeriodos()])
-      .then(([r, u, c, g, s, ct, p]) => {
+    Promise.allSettled([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion(), getContratos(), getPeriodos()])
+      .then(([reportsResult, usersResult, clientsResult, groupsResult, settingsResult, contractsResult, periodsResult]) => {
+        const r = reportsResult.status === "fulfilled" ? reportsResult.value : [];
+        const u = usersResult.status === "fulfilled" ? usersResult.value : [];
+        const c = clientsResult.status === "fulfilled" ? clientsResult.value : [];
+        const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
+        const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
+        const ct = contractsResult.status === "fulfilled" ? contractsResult.value : [];
+        const p = periodsResult.status === "fulfilled" ? periodsResult.value : [];
+
+        if (reportsResult.status === "rejected") console.error("Error cargando reportes en informes:", reportsResult.reason);
+        if (usersResult.status === "rejected") console.error("Error cargando usuarios en informes:", usersResult.reason);
+        if (clientsResult.status === "rejected") console.error("Error cargando clientes en informes:", clientsResult.reason);
+        if (groupsResult.status === "rejected") console.error("Error cargando grupos en informes:", groupsResult.reason);
+        if (settingsResult.status === "rejected") console.error("Error cargando configuración en informes:", settingsResult.reason);
+        if (contractsResult.status === "rejected") console.error("Error cargando contratos en informes:", contractsResult.reason);
+        if (periodsResult.status === "rejected") console.error("Error cargando períodos en informes:", periodsResult.reason);
+
         setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setContracts(ct); setPeriods(p);
         setSelectedPeriodId((current) => {
           if (current && p.some((period) => period.id === current)) return current;
-          return getCurrentOrLatestPeriodo(p)?.id || "";
+          return p[0]?.id || "";
         });
       })
-      .catch((err) => console.error("Error cargando informes:", err))
       .finally(() => setLoading(false));
   };
 
@@ -369,9 +384,14 @@ export default function InformesPage() {
     () => periods.find((period) => period.id === selectedPeriodId),
     [periods, selectedPeriodId]
   );
+  const hasSelectedPeriod = !!selectedPeriod;
 
   useEffect(() => {
-    if (!selectedPeriod) return;
+    if (!selectedPeriod) {
+      setViewRangeStart("");
+      setViewRangeEnd("");
+      return;
+    }
 
     setViewRangeStart(selectedPeriod.fechaInicio);
     setViewRangeEnd(selectedPeriod.fechaFin);
@@ -379,7 +399,7 @@ export default function InformesPage() {
   }, [selectedPeriod]);
 
   const periodScopedReports = useMemo(
-    () => selectedPeriodId ? reports.filter((report) => report.periodoId === selectedPeriodId) : reports,
+    () => selectedPeriodId ? reports.filter((report) => report.periodoId === selectedPeriodId) : [],
     [reports, selectedPeriodId]
   );
 
@@ -1567,52 +1587,54 @@ export default function InformesPage() {
     <div>
       <AdminHeader title="Informes Técnicos" />
       <div className="p-6 space-y-6">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-blue-500/10 p-2.5">
-                <Wrench className="h-5 w-5 text-blue-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{preventivos.length}</p>
-                <p className="text-xs text-muted-foreground">Mant. Preventivos</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-cyan-neon/10 p-2.5">
-                <ClipboardCheck className="h-5 w-5 text-cyan-neon" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{visitas.length}</p>
-                <p className="text-xs text-muted-foreground">Visitas Técnicas</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-emerald-500/10 p-2.5">
-                <Route className="h-5 w-5 text-emerald-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{recorridos.length}</p>
-                <p className="text-xs text-muted-foreground">Recorridos</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-purple-500/10 p-2.5">
-                <Users className="h-5 w-5 text-purple-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{grupales.length}</p>
-                <p className="text-xs text-muted-foreground">Act. Grupales</p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+        {hasSelectedPeriod && (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Card className="border-border/50 bg-card/80">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-blue-500/10 p-2.5">
+                  <Wrench className="h-5 w-5 text-blue-400" />
+                </div>
+                <div>
+                  <p className="text-xl font-bold text-foreground">{preventivos.length}</p>
+                  <p className="text-xs text-muted-foreground">Mant. Preventivos</p>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-border/50 bg-card/80">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-cyan-neon/10 p-2.5">
+                  <ClipboardCheck className="h-5 w-5 text-cyan-neon" />
+                </div>
+                <div>
+                  <p className="text-xl font-bold text-foreground">{visitas.length}</p>
+                  <p className="text-xs text-muted-foreground">Visitas Técnicas</p>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-border/50 bg-card/80">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-emerald-500/10 p-2.5">
+                  <Route className="h-5 w-5 text-emerald-400" />
+                </div>
+                <div>
+                  <p className="text-xl font-bold text-foreground">{recorridos.length}</p>
+                  <p className="text-xs text-muted-foreground">Recorridos</p>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-border/50 bg-card/80">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-purple-500/10 p-2.5">
+                  <Users className="h-5 w-5 text-purple-400" />
+                </div>
+                <div>
+                  <p className="text-xl font-bold text-foreground">{grupales.length}</p>
+                  <p className="text-xs text-muted-foreground">Act. Grupales</p>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
 
         <div className="flex items-center gap-3 flex-wrap">
           <div className="relative flex-1 max-w-sm">
@@ -1621,6 +1643,7 @@ export default function InformesPage() {
               placeholder="Buscar..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              disabled={!hasSelectedPeriod}
               className="pl-10 bg-secondary/50 border-border/50"
             />
           </div>
@@ -1641,12 +1664,14 @@ export default function InformesPage() {
               type="date"
               value={viewRangeStart}
               onChange={(event) => setViewRangeStart(event.target.value)}
+              disabled={!hasSelectedPeriod}
               className="w-40 bg-secondary/50 border-border/50"
             />
             <Input
               type="date"
               value={viewRangeEnd}
               onChange={(event) => setViewRangeEnd(event.target.value)}
+              disabled={!hasSelectedPeriod}
               className="w-40 bg-secondary/50 border-border/50"
             />
             <Button
@@ -1654,6 +1679,7 @@ export default function InformesPage() {
               variant="ghost"
               size="sm"
               className="text-muted-foreground"
+              disabled={!hasSelectedPeriod}
               onClick={() => {
                 setViewRangeStart(selectedPeriod?.fechaInicio || "");
                 setViewRangeEnd(selectedPeriod?.fechaFin || "");
@@ -1668,16 +1694,17 @@ export default function InformesPage() {
               type="month"
               value={viewQuincenaMonth}
               onChange={(event) => setViewQuincenaMonth(event.target.value)}
+              disabled={!hasSelectedPeriod}
               className="w-40 bg-secondary/50 border-border/50"
             />
-            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyViewQuincenaRange("primera")}>
+            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyViewQuincenaRange("primera")} disabled={!hasSelectedPeriod}>
               1ra
             </Button>
-            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyViewQuincenaRange("segunda")}>
+            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyViewQuincenaRange("segunda")} disabled={!hasSelectedPeriod}>
               2da
             </Button>
           </div>
-          <Select value={grupoFilter} onValueChange={setGrupoFilter}>
+          <Select value={grupoFilter} onValueChange={setGrupoFilter} disabled={!hasSelectedPeriod}>
             <SelectTrigger className="w-44 bg-secondary/50 border-border/50">
               <SelectValue placeholder="Grupo" />
             </SelectTrigger>
@@ -1689,268 +1716,271 @@ export default function InformesPage() {
             </SelectContent>
           </Select>
           <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
-            {selectedPeriod ? `Período activo: ${formatPeriodLabel(selectedPeriod)}` : "Sin período configurado"}
+            {selectedPeriod ? `Período activo: ${formatPeriodLabel(selectedPeriod)}` : periods.length > 0 ? "Selecciona un período" : "No hay períodos disponibles"}
           </Badge>
         </div>
 
-        <Collapsible open={exportPanelOpen} onOpenChange={setExportPanelOpen}>
-          <Card className="border-border/50 bg-card/80 overflow-hidden">
-            <CollapsibleTrigger asChild>
-              <button type="button" className="w-full text-left">
-                <CardHeader className="pb-4 cursor-pointer hover:bg-secondary/10 transition-colors">
-                  <div className="flex items-center justify-between gap-3 flex-wrap">
-                    <div className="space-y-1">
-                      <CardTitle className="text-lg text-foreground">Reportes Consolidados</CardTitle>
-                      <p className="text-sm text-muted-foreground">
-                        {getExportTitleLabel(exportReportType)} · {selectedExportCountLabel}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Este panel usa solo sus propias fechas y no depende del período ni de los filtros externos.
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
-                        {activeRangeLabel}
-                      </Badge>
-                      <Badge variant="outline" className="border-border/50 bg-secondary/40 text-foreground/80">
-                        {getExportTitleLabel(exportReportType)}
-                      </Badge>
-                      <div className={cn("rounded-full border border-border/50 p-1 transition-transform", exportPanelOpen && "rotate-180")}>
-                        <ChevronDown className="h-4 w-4 text-muted-foreground" />
+        {hasSelectedPeriod && (
+          <Collapsible open={exportPanelOpen} onOpenChange={setExportPanelOpen}>
+            <Card className="border-border/50 bg-card/80 overflow-hidden">
+              <CollapsibleTrigger asChild>
+                <button type="button" className="w-full text-left">
+                  <CardHeader className="pb-4 cursor-pointer hover:bg-secondary/10 transition-colors">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div className="space-y-1">
+                        <CardTitle className="text-lg text-foreground">Reportes Consolidados</CardTitle>
+                        <p className="text-sm text-muted-foreground">
+                          {getExportTitleLabel(exportReportType)} · {selectedExportCountLabel}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Este panel usa solo sus propias fechas y no depende del período ni de los filtros externos.
+                        </p>
                       </div>
-                    </div>
-                  </div>
-                </CardHeader>
-              </button>
-            </CollapsibleTrigger>
-
-            <CollapsibleContent>
-              <CardContent className="space-y-5 pt-0">
-                <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(260px,0.8fr)]">
-                  <div className={cn("grid grid-cols-1 gap-3 sm:grid-cols-2", exportReportType === "mantenimiento_preventivo" ? "xl:grid-cols-4" : "xl:grid-cols-4")}>
-                    <div className="space-y-2 sm:col-span-2 xl:col-span-1">
-                      <p className="text-xs text-muted-foreground">Tipo de reporte</p>
-                      <Select value={exportReportType} onValueChange={(value) => setExportReportType(value as ActivityReport["tipo"])}>
-                        <SelectTrigger className="w-full bg-secondary/50 border-border/50">
-                          <SelectValue placeholder="Tipo" />
-                        </SelectTrigger>
-                        <SelectContent className="bg-card border-border">
-                          <SelectItem value="mantenimiento_preventivo">Mantenimiento preventivo</SelectItem>
-                          <SelectItem value="visita_tecnica">Visitas técnicas</SelectItem>
-                          <SelectItem value="recorrido">Recorridos</SelectItem>
-                          <SelectItem value="actividad_grupal">Actividades grupales</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    {exportReportType === "mantenimiento_preventivo" && (
-                      <div className="space-y-2 sm:col-span-2 xl:col-span-1">
-                        <p className="text-xs text-muted-foreground">Cliente destino</p>
-                        <Popover open={preventiveClientSelectorOpen} onOpenChange={setPreventiveClientSelectorOpen}>
-                          <PopoverTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              className="w-full justify-between border-border/50 bg-secondary/50 text-foreground hover:bg-secondary/70"
-                            >
-                              <span className="truncate text-left">{selectedPreventiveClientLabel}</span>
-                              <ChevronDown className="h-4 w-4 opacity-60" />
-                            </Button>
-                          </PopoverTrigger>
-                          <PopoverContent className="w-[min(24rem,calc(100vw-2rem))] border-border bg-card p-3" align="start">
-                            <div className="space-y-3">
-                              <Input
-                                value={preventiveExportClientSearch}
-                                onChange={(event) => setPreventiveExportClientSearch(event.target.value)}
-                                placeholder="Buscar cliente, edificio o correo"
-                                className="bg-secondary/50 border-border/50"
-                              />
-                              <ScrollArea className="h-56 rounded-md border border-border/50">
-                                <div className="space-y-1 p-2">
-                                  <button
-                                    type="button"
-                                    className={cn(
-                                      "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm hover:bg-secondary/50",
-                                      preventiveExportClientId === "todos" && "bg-gold/10 text-gold"
-                                    )}
-                                    onClick={() => {
-                                      setPreventiveExportClientId("todos");
-                                      setPreventiveClientSelectorOpen(false);
-                                    }}
-                                  >
-                                    <span>Todos los clientes</span>
-                                    {preventiveExportClientId === "todos" && <span className="text-xs">Seleccionado</span>}
-                                  </button>
-                                  {filteredPreventiveExportClients.map((client) => {
-                                    const label = client.edificio || client.nombre;
-                                    const isSelected = preventiveExportClientId === client.id;
-
-                                    return (
-                                      <button
-                                        key={client.id}
-                                        type="button"
-                                        className={cn(
-                                          "flex w-full flex-col rounded-md px-3 py-2 text-left hover:bg-secondary/50",
-                                          isSelected && "bg-gold/10 text-gold"
-                                        )}
-                                        onClick={() => {
-                                          setPreventiveExportClientId(client.id);
-                                          setPreventiveClientSelectorOpen(false);
-                                        }}
-                                      >
-                                        <span className="text-sm font-medium">{label}</span>
-                                        <span className="text-xs text-muted-foreground">{client.nombre}{client.correo ? ` · ${client.correo}` : ""}</span>
-                                      </button>
-                                    );
-                                  })}
-                                  {filteredPreventiveExportClients.length === 0 && (
-                                    <p className="px-3 py-4 text-center text-xs text-muted-foreground">No hay clientes que coincidan con la búsqueda.</p>
-                                  )}
-                                </div>
-                              </ScrollArea>
-                            </div>
-                          </PopoverContent>
-                        </Popover>
-                      </div>
-                    )}
-                    <div className="space-y-2">
-                      <p className="text-xs text-muted-foreground">Fecha inicial</p>
-                      <Input
-                        type="date"
-                        value={exportRangeStart}
-                        onChange={(event) => setExportRangeStart(event.target.value)}
-                        className="bg-secondary/50 border-border/50"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <p className="text-xs text-muted-foreground">Fecha final</p>
-                      <Input
-                        type="date"
-                        value={exportRangeEnd}
-                        onChange={(event) => setExportRangeEnd(event.target.value)}
-                        className="bg-secondary/50 border-border/50"
-                      />
-                    </div>
-                    {exportReportType !== "mantenimiento_preventivo" && (
-                      <div className="space-y-2 sm:col-span-2 xl:col-span-2">
-                        <p className="text-xs text-muted-foreground">Rangos rápidos</p>
-                        <div className="flex flex-wrap gap-2">
-                          <Input
-                            type="month"
-                            value={exportQuincenaMonth}
-                            onChange={(event) => setExportQuincenaMonth(event.target.value)}
-                            className="w-40 bg-secondary/50 border-border/50"
-                          />
-                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyExportQuincenaRange("primera")}>
-                            1ra quincena
-                          </Button>
-                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyExportQuincenaRange("segunda")}>
-                            2da quincena
-                          </Button>
-                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(7)}>
-                            7 días
-                          </Button>
-                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(15)}>
-                            15 días
-                          </Button>
-                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 1)}>
-                            1 mes
-                          </Button>
-                          <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 3)}>
-                            3 meses
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="text-muted-foreground"
-                            onClick={() => {
-                              setExportRangeStart("");
-                              setExportRangeEnd("");
-                            }}
-                          >
-                            Quitar rango
-                          </Button>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
+                          {activeRangeLabel}
+                        </Badge>
+                        <Badge variant="outline" className="border-border/50 bg-secondary/40 text-foreground/80">
+                          {getExportTitleLabel(exportReportType)}
+                        </Badge>
+                        <div className={cn("rounded-full border border-border/50 p-1 transition-transform", exportPanelOpen && "rotate-180")}>
+                          <ChevronDown className="h-4 w-4 text-muted-foreground" />
                         </div>
                       </div>
-                    )}
+                    </div>
+                  </CardHeader>
+                </button>
+              </CollapsibleTrigger>
+
+              <CollapsibleContent>
+                <CardContent className="space-y-5 pt-0">
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(260px,0.8fr)]">
+                    <div className={cn("grid grid-cols-1 gap-3 sm:grid-cols-2", exportReportType === "mantenimiento_preventivo" ? "xl:grid-cols-4" : "xl:grid-cols-4")}>
+                      <div className="space-y-2 sm:col-span-2 xl:col-span-1">
+                        <p className="text-xs text-muted-foreground">Tipo de reporte</p>
+                        <Select value={exportReportType} onValueChange={(value) => setExportReportType(value as ActivityReport["tipo"])}>
+                          <SelectTrigger className="w-full bg-secondary/50 border-border/50">
+                            <SelectValue placeholder="Tipo" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-card border-border">
+                            <SelectItem value="mantenimiento_preventivo">Mantenimiento preventivo</SelectItem>
+                            <SelectItem value="visita_tecnica">Visitas técnicas</SelectItem>
+                            <SelectItem value="recorrido">Recorridos</SelectItem>
+                            <SelectItem value="actividad_grupal">Actividades grupales</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      {exportReportType === "mantenimiento_preventivo" && (
+                        <div className="space-y-2 sm:col-span-2 xl:col-span-1">
+                          <p className="text-xs text-muted-foreground">Cliente destino</p>
+                          <Popover open={preventiveClientSelectorOpen} onOpenChange={setPreventiveClientSelectorOpen}>
+                            <PopoverTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                className="w-full justify-between border-border/50 bg-secondary/50 text-foreground hover:bg-secondary/70"
+                              >
+                                <span className="truncate text-left">{selectedPreventiveClientLabel}</span>
+                                <ChevronDown className="h-4 w-4 opacity-60" />
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-[min(24rem,calc(100vw-2rem))] border-border bg-card p-3" align="start">
+                              <div className="space-y-3">
+                                <Input
+                                  value={preventiveExportClientSearch}
+                                  onChange={(event) => setPreventiveExportClientSearch(event.target.value)}
+                                  placeholder="Buscar cliente, edificio o correo"
+                                  className="bg-secondary/50 border-border/50"
+                                />
+                                <ScrollArea className="h-56 rounded-md border border-border/50">
+                                  <div className="space-y-1 p-2">
+                                    <button
+                                      type="button"
+                                      className={cn(
+                                        "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm hover:bg-secondary/50",
+                                        preventiveExportClientId === "todos" && "bg-gold/10 text-gold"
+                                      )}
+                                      onClick={() => {
+                                        setPreventiveExportClientId("todos");
+                                        setPreventiveClientSelectorOpen(false);
+                                      }}
+                                    >
+                                      <span>Todos los clientes</span>
+                                      {preventiveExportClientId === "todos" && <span className="text-xs">Seleccionado</span>}
+                                    </button>
+                                    {filteredPreventiveExportClients.map((client) => {
+                                      const label = client.edificio || client.nombre;
+                                      const isSelected = preventiveExportClientId === client.id;
+
+                                      return (
+                                        <button
+                                          key={client.id}
+                                          type="button"
+                                          className={cn(
+                                            "flex w-full flex-col rounded-md px-3 py-2 text-left hover:bg-secondary/50",
+                                            isSelected && "bg-gold/10 text-gold"
+                                          )}
+                                          onClick={() => {
+                                            setPreventiveExportClientId(client.id);
+                                            setPreventiveClientSelectorOpen(false);
+                                          }}
+                                        >
+                                          <span className="text-sm font-medium">{label}</span>
+                                          <span className="text-xs text-muted-foreground">{client.nombre}{client.correo ? ` · ${client.correo}` : ""}</span>
+                                        </button>
+                                      );
+                                    })}
+                                    {filteredPreventiveExportClients.length === 0 && (
+                                      <p className="px-3 py-4 text-center text-xs text-muted-foreground">No hay clientes que coincidan con la búsqueda.</p>
+                                    )}
+                                  </div>
+                                </ScrollArea>
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        </div>
+                      )}
+                      <div className="space-y-2">
+                        <p className="text-xs text-muted-foreground">Fecha inicial</p>
+                        <Input
+                          type="date"
+                          value={exportRangeStart}
+                          onChange={(event) => setExportRangeStart(event.target.value)}
+                          className="bg-secondary/50 border-border/50"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <p className="text-xs text-muted-foreground">Fecha final</p>
+                        <Input
+                          type="date"
+                          value={exportRangeEnd}
+                          onChange={(event) => setExportRangeEnd(event.target.value)}
+                          className="bg-secondary/50 border-border/50"
+                        />
+                      </div>
+                      {exportReportType !== "mantenimiento_preventivo" && (
+                        <div className="space-y-2 sm:col-span-2 xl:col-span-2">
+                          <p className="text-xs text-muted-foreground">Rangos rápidos</p>
+                          <div className="flex flex-wrap gap-2">
+                            <Input
+                              type="month"
+                              value={exportQuincenaMonth}
+                              onChange={(event) => setExportQuincenaMonth(event.target.value)}
+                              className="w-40 bg-secondary/50 border-border/50"
+                            />
+                            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyExportQuincenaRange("primera")}>
+                              1ra quincena
+                            </Button>
+                            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyExportQuincenaRange("segunda")}>
+                              2da quincena
+                            </Button>
+                            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(7)}>
+                              7 días
+                            </Button>
+                            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(15)}>
+                              15 días
+                            </Button>
+                            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 1)}>
+                              1 mes
+                            </Button>
+                            <Button type="button" variant="outline" size="sm" className="border-border/50 bg-secondary/40" onClick={() => applyQuickRange(undefined, 3)}>
+                              3 meses
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="text-muted-foreground"
+                              onClick={() => {
+                                setExportRangeStart("");
+                                setExportRangeEnd("");
+                              }}
+                            >
+                              Quitar rango
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
+                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 sm:p-4">
+                        <p className="text-xs text-muted-foreground">Total seleccionado</p>
+                        <p className="text-lg font-semibold text-gold">{formatCurrency(selectedExportTotalDisplay)}</p>
+                        <p className="text-xs text-muted-foreground">{selectedExportCountLabel}</p>
+                      </div>
+                      {exportReportType === "mantenimiento_preventivo" && (
+                        <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 sm:p-4">
+                          <p className="text-xs text-muted-foreground">Total anual contratos</p>
+                          <p className="text-lg font-semibold text-gold">{formatCurrency(selectedPreventiveAnnualTotal)}</p>
+                          <p className="text-xs text-muted-foreground">{selectedPreventiveContractCount} contrato(s) del cliente y año seleccionado</p>
+                        </div>
+                      )}
+                      {exportReportType === "visita_tecnica" && (
+                        <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 sm:p-4">
+                          <p className="text-xs text-muted-foreground">Total costo cliente</p>
+                          <p className="text-lg font-semibold text-gold">{formatCurrency(selectedExportClientTotal)}</p>
+                          <p className="text-xs text-muted-foreground">Solo visitas técnicas</p>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
-                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 sm:p-4">
-                      <p className="text-xs text-muted-foreground">Total seleccionado</p>
-                      <p className="text-lg font-semibold text-gold">{formatCurrency(selectedExportTotalDisplay)}</p>
-                      <p className="text-xs text-muted-foreground">{selectedExportCountLabel}</p>
-                    </div>
-                    {exportReportType === "mantenimiento_preventivo" && (
-                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 sm:p-4">
-                        <p className="text-xs text-muted-foreground">Total anual contratos</p>
-                        <p className="text-lg font-semibold text-gold">{formatCurrency(selectedPreventiveAnnualTotal)}</p>
-                        <p className="text-xs text-muted-foreground">{selectedPreventiveContractCount} contrato(s) del cliente y año seleccionado</p>
-                      </div>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+                    {exportReportType === "mantenimiento_preventivo" ? (
+                      <>
+                        <Button type="button" className="w-full bg-gold text-black hover:bg-gold/90 sm:w-auto" onClick={handleExportPreventiveMonthlySummary} disabled={exportingPreventiveMonthlySummary}>
+                          {exportingPreventiveMonthlySummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                          Reporte mensual
+                        </Button>
+                        <Button type="button" variant="outline" className="w-full border-gold/30 text-gold hover:bg-gold/10 hover:text-gold sm:w-auto" onClick={handleExportPreventiveAnnualSummary} disabled={exportingPreventiveAnnualSummary}>
+                          {exportingPreventiveAnnualSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                          Valor anual
+                        </Button>
+                      </>
+                    ) : (
+                      <Button type="button" className="w-full bg-gold text-black hover:bg-gold/90 sm:w-auto" onClick={handleExportTechnicalSummary} disabled={exportingTechnicalSummary}>
+                        {exportingTechnicalSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        {exportReportType === "visita_tecnica" ? "PDF costos técnicos" : `PDF ${getExportTitleLabel(exportReportType).toLowerCase()}`}
+                      </Button>
                     )}
                     {exportReportType === "visita_tecnica" && (
-                      <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 sm:p-4">
-                        <p className="text-xs text-muted-foreground">Total costo cliente</p>
-                        <p className="text-lg font-semibold text-gold">{formatCurrency(selectedExportClientTotal)}</p>
-                        <p className="text-xs text-muted-foreground">Solo visitas técnicas</p>
-                      </div>
+                      <Button type="button" variant="outline" className="w-full border-gold/30 text-gold hover:bg-gold/10 hover:text-gold sm:w-auto" onClick={handleExportClientSummary} disabled={exportingClientSummary}>
+                        {exportingClientSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        PDF costos cliente
+                      </Button>
                     )}
                   </div>
-                </div>
+                </CardContent>
+              </CollapsibleContent>
+            </Card>
+          </Collapsible>
+        )}
 
-                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-                  {exportReportType === "mantenimiento_preventivo" ? (
-                    <>
-                      <Button type="button" className="w-full bg-gold text-black hover:bg-gold/90 sm:w-auto" onClick={handleExportPreventiveMonthlySummary} disabled={exportingPreventiveMonthlySummary}>
-                        {exportingPreventiveMonthlySummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                        Reporte mensual
-                      </Button>
-                      <Button type="button" variant="outline" className="w-full border-gold/30 text-gold hover:bg-gold/10 hover:text-gold sm:w-auto" onClick={handleExportPreventiveAnnualSummary} disabled={exportingPreventiveAnnualSummary}>
-                        {exportingPreventiveAnnualSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                        Valor anual
-                      </Button>
-                    </>
-                  ) : (
-                    <Button type="button" className="w-full bg-gold text-black hover:bg-gold/90 sm:w-auto" onClick={handleExportTechnicalSummary} disabled={exportingTechnicalSummary}>
-                      {exportingTechnicalSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                      {exportReportType === "visita_tecnica" ? "PDF costos técnicos" : `PDF ${getExportTitleLabel(exportReportType).toLowerCase()}`}
-                    </Button>
-                  )}
-                  {exportReportType === "visita_tecnica" && (
-                    <Button type="button" variant="outline" className="w-full border-gold/30 text-gold hover:bg-gold/10 hover:text-gold sm:w-auto" onClick={handleExportClientSummary} disabled={exportingClientSummary}>
-                      {exportingClientSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                      PDF costos cliente
-                    </Button>
-                  )}
-                </div>
-              </CardContent>
-            </CollapsibleContent>
-          </Card>
-        </Collapsible>
-
-        <Tabs defaultValue="preventivos" className="space-y-4">
-          <TabsList className="bg-secondary/50 border border-border/50">
-            <TabsTrigger value="preventivos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-              <Wrench className="h-4 w-4 mr-2" />
-              Mant. Preventivo
-              <Badge className="ml-1.5 bg-blue-500/20 text-blue-400 text-[10px] border-0 px-1.5">{preventivos.length}</Badge>
-            </TabsTrigger>
-            <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-              <ClipboardCheck className="h-4 w-4 mr-2" />
-              Visitas Técnicas
-              <Badge className="ml-1.5 bg-cyan-neon/20 text-cyan-neon text-[10px] border-0 px-1.5">{visitas.length}</Badge>
-            </TabsTrigger>
-            <TabsTrigger value="recorridos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-              <Route className="h-4 w-4 mr-2" />
-              Recorridos
-              <Badge className="ml-1.5 bg-emerald-500/20 text-emerald-400 text-[10px] border-0 px-1.5">{recorridos.length}</Badge>
-            </TabsTrigger>
-            <TabsTrigger value="grupales" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-              <Users className="h-4 w-4 mr-2" />
-              Act. Grupales
-              <Badge className="ml-1.5 bg-purple-500/20 text-purple-400 text-[10px] border-0 px-1.5">{grupales.length}</Badge>
-            </TabsTrigger>
-          </TabsList>
+        {hasSelectedPeriod ? (
+          <Tabs defaultValue="preventivos" className="space-y-4">
+            <TabsList className="bg-secondary/50 border border-border/50">
+              <TabsTrigger value="preventivos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                <Wrench className="h-4 w-4 mr-2" />
+                Mant. Preventivo
+                <Badge className="ml-1.5 bg-blue-500/20 text-blue-400 text-[10px] border-0 px-1.5">{preventivos.length}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                <ClipboardCheck className="h-4 w-4 mr-2" />
+                Visitas Técnicas
+                <Badge className="ml-1.5 bg-cyan-neon/20 text-cyan-neon text-[10px] border-0 px-1.5">{visitas.length}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="recorridos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                <Route className="h-4 w-4 mr-2" />
+                Recorridos
+                <Badge className="ml-1.5 bg-emerald-500/20 text-emerald-400 text-[10px] border-0 px-1.5">{recorridos.length}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="grupales" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                <Users className="h-4 w-4 mr-2" />
+                Act. Grupales
+                <Badge className="ml-1.5 bg-purple-500/20 text-purple-400 text-[10px] border-0 px-1.5">{grupales.length}</Badge>
+              </TabsTrigger>
+            </TabsList>
 
           <TabsContent value="preventivos">
             <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
@@ -2494,7 +2524,16 @@ export default function InformesPage() {
               </CardContent>
             </Card>
           </TabsContent>
-        </Tabs>
+          </Tabs>
+        ) : (
+          <Card className="border-border/50 bg-card/80">
+            <CardContent className="p-8 text-center text-sm text-muted-foreground">
+              {periods.length > 0
+                ? "Selecciona un período para ver los informes técnicos."
+                : "No hay períodos disponibles para mostrar informes técnicos."}
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       <Dialog

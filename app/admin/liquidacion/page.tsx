@@ -265,9 +265,25 @@ export default function LiquidacionPage() {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([
+    Promise.allSettled([
       getPeriodos(), getUsuarios(), getGrupos(), getAcumulacionesLider(), getReportesActividad(), getConfiguracion(), getLlegadas(),
-    ]).then(([p, u, g, la, ar, s, l]) => {
+    ]).then(([periodsResult, usersResult, groupsResult, accumulationsResult, reportsResult, settingsResult, arrivalsResult]) => {
+      const p = periodsResult.status === "fulfilled" ? periodsResult.value : [];
+      const u = usersResult.status === "fulfilled" ? usersResult.value : [];
+      const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
+      const la = accumulationsResult.status === "fulfilled" ? accumulationsResult.value : [];
+      const ar = reportsResult.status === "fulfilled" ? reportsResult.value : [];
+      const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
+      const l = arrivalsResult.status === "fulfilled" ? arrivalsResult.value : [];
+
+      if (periodsResult.status === "rejected") console.error("Error cargando períodos en liquidación:", periodsResult.reason);
+      if (usersResult.status === "rejected") console.error("Error cargando usuarios en liquidación:", usersResult.reason);
+      if (groupsResult.status === "rejected") console.error("Error cargando grupos en liquidación:", groupsResult.reason);
+      if (accumulationsResult.status === "rejected") console.error("Error cargando acumulaciones en liquidación:", accumulationsResult.reason);
+      if (reportsResult.status === "rejected") console.error("Error cargando reportes en liquidación:", reportsResult.reason);
+      if (settingsResult.status === "rejected") console.error("Error cargando configuración en liquidación:", settingsResult.reason);
+      if (arrivalsResult.status === "rejected") console.error("Error cargando llegadas en liquidación:", arrivalsResult.reason);
+
       setPeriods(p);
       setUsers(u);
       setGroups(g);
@@ -275,9 +291,8 @@ export default function LiquidacionPage() {
       setActReports(ar);
       setArrivalRecords(l);
       setCompanySettings(s);
-      if (p.length > 0) setSelectedPeriodId(p[0].id);
-    }).catch((err) => console.error("Error cargando liquidación:", err))
-      .finally(() => setLoading(false));
+      setSelectedPeriodId((current) => (current && p.some((period) => period.id === current) ? current : p[0]?.id || ""));
+    }).finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
@@ -312,6 +327,7 @@ export default function LiquidacionPage() {
   }
 
   const selectedPeriod = periods.find((p) => p.id === selectedPeriodId);
+  const hasSelectedPeriod = !!selectedPeriod;
 
   const isDateWithinSelectedPeriod = (fecha: string) => {
     if (!selectedPeriod) return false;
@@ -824,7 +840,7 @@ export default function LiquidacionPage() {
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
             <CalendarDays className="h-5 w-5 text-gold" />
-            <Select value={selectedPeriodId} onValueChange={setSelectedPeriodId}>
+            <Select value={selectedPeriodId || undefined} onValueChange={setSelectedPeriodId}>
               <SelectTrigger className="w-72 bg-secondary/50 border-border/50">
                 <SelectValue placeholder="Seleccionar período" />
               </SelectTrigger>
@@ -842,6 +858,7 @@ export default function LiquidacionPage() {
             <Button
               variant="outline"
               className="gap-2 border-border/50 text-foreground/80"
+              disabled={!hasSelectedPeriod}
               onClick={() => {
                 const tipoLabels: Record<string, string> = { mantenimiento_preventivo: "Mant. Preventivo", visita_tecnica: "Visita Técnica", recorrido: "Recorrido", actividad_grupal: "Act. Grupal" };
                 const activityRows = liquidablePeriodReports.map((r) => {
@@ -904,131 +921,133 @@ export default function LiquidacionPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-gold/10 p-2.5">
-                <DollarSign className="h-5 w-5 text-gold" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-gold">{formatCurrency(totalPeriod)}</p>
-                <p className="text-xs text-muted-foreground">Total Período</p>
-                {totalExtraLeaderPeriod > 0 && (
-                  <p className="text-[10px] text-violet-400">Incluye extra líder: {formatCurrency(totalExtraLeaderPeriod)}</p>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-cyan-neon/10 p-2.5">
-                <FileText className="h-5 w-5 text-cyan-neon" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{periodReports.length}</p>
-                <p className="text-xs text-muted-foreground">Actividades Registradas</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-purple-500/10 p-2.5">
-                <Users className="h-5 w-5 text-purple-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{techSummary.size}</p>
-                <p className="text-xs text-muted-foreground">Técnicos Participantes</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-emerald-500/10 p-2.5">
-                <Lock className="h-5 w-5 text-emerald-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground capitalize">
-                  {selectedPeriod?.estado || "—"}
-                </p>
-                <p className="text-xs text-muted-foreground">Estado del Período</p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-lg text-foreground flex items-center gap-2">
-              <CalendarDays className="h-5 w-5 text-gold" />
-              Resumen Quincenal de Pagos
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
+        {hasSelectedPeriod ? (
+          <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-              {(() => {
-                const approvedReports = actReports.filter(
-                  (r) => r.periodoId === selectedPeriodId && r.estadoAprobacionLider === "aprobado"
-                );
-                const pendingReports = actReports.filter(
-                  (r) => r.periodoId === selectedPeriodId && r.estadoAprobacionLider === "pendiente"
-                );
-                const totalAprobado = Array.from(buildTechSummary(approvedReports, true).values()).reduce((s, item) => s + item.total, 0);
-                const totalPendiente = Array.from(buildTechSummary(pendingReports).values()).reduce((s, item) => s + item.total, 0);
-                const recorridos = actReports.filter(
-                  (r) => r.periodoId === selectedPeriodId && r.tipo === "recorrido" && r.estadoAprobacionLider !== "rechazado"
-                );
-                const totalRecorridos = recorridos.reduce((s, r) => s + r.costoActividad, 0);
-
-                return (
-                  <>
-                    <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                        <p className="text-xs font-medium text-emerald-400 uppercase tracking-wide">Aprobado para Pago</p>
-                      </div>
-                      <p className="text-2xl font-bold text-emerald-400">{formatCurrency(totalAprobado)}</p>
-                      <p className="text-xs text-muted-foreground mt-1">{approvedReports.length} actividades aprobadas</p>
-                      {totalExtraLeaderPeriod > 0 && (
-                        <p className="text-[10px] text-violet-400 mt-1">Extra líder aplicado: {formatCurrency(totalExtraLeaderPeriod)}</p>
-                      )}
-                    </div>
-                    <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <Clock className="h-4 w-4 text-amber-400" />
-                        <p className="text-xs font-medium text-amber-400 uppercase tracking-wide">Pendiente de Aprobación</p>
-                      </div>
-                      <p className="text-2xl font-bold text-amber-400">{formatCurrency(totalPendiente)}</p>
-                      <p className="text-xs text-muted-foreground mt-1">{pendingReports.length} actividades pendientes</p>
-                    </div>
-                    <div className="rounded-lg border border-gold/20 bg-gold/5 p-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <DollarSign className="h-4 w-4 text-gold" />
-                        <p className="text-xs font-medium text-gold uppercase tracking-wide">Total Quincena</p>
-                      </div>
-                      <p className="text-2xl font-bold text-gold">{formatCurrency(totalAprobado + totalPendiente)}</p>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Recorridos: {formatCurrency(totalRecorridos)} ({recorridos.length})
-                      </p>
-                      {totalExtraLeaderPeriod > 0 && (
-                        <p className="text-[10px] text-violet-400 mt-1">Incluye extra líder: {formatCurrency(totalExtraLeaderPeriod)}</p>
-                      )}
-                    </div>
-                    <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <Percent className="h-4 w-4 text-red-400" />
-                        <p className="text-xs font-medium text-red-400 uppercase tracking-wide">Descuento por Tardanza</p>
-                      </div>
-                      <p className="text-2xl font-bold text-red-400">-{formatCurrency(totalPenaltyPeriod)}</p>
-                      <p className="text-xs text-muted-foreground mt-1">Aplicado sobre actividades no recorrido del período</p>
-                    </div>
-                  </>
-                );
-              })()}
+              <Card className="border-border/50 bg-card/80">
+                <CardContent className="p-4 flex items-center gap-3">
+                  <div className="rounded-lg bg-gold/10 p-2.5">
+                    <DollarSign className="h-5 w-5 text-gold" />
+                  </div>
+                  <div>
+                    <p className="text-xl font-bold text-gold">{formatCurrency(totalPeriod)}</p>
+                    <p className="text-xs text-muted-foreground">Total Período</p>
+                    {totalExtraLeaderPeriod > 0 && (
+                      <p className="text-[10px] text-violet-400">Incluye extra líder: {formatCurrency(totalExtraLeaderPeriod)}</p>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="border-border/50 bg-card/80">
+                <CardContent className="p-4 flex items-center gap-3">
+                  <div className="rounded-lg bg-cyan-neon/10 p-2.5">
+                    <FileText className="h-5 w-5 text-cyan-neon" />
+                  </div>
+                  <div>
+                    <p className="text-xl font-bold text-foreground">{periodReports.length}</p>
+                    <p className="text-xs text-muted-foreground">Actividades Registradas</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="border-border/50 bg-card/80">
+                <CardContent className="p-4 flex items-center gap-3">
+                  <div className="rounded-lg bg-purple-500/10 p-2.5">
+                    <Users className="h-5 w-5 text-purple-400" />
+                  </div>
+                  <div>
+                    <p className="text-xl font-bold text-foreground">{techSummary.size}</p>
+                    <p className="text-xs text-muted-foreground">Técnicos Participantes</p>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="border-border/50 bg-card/80">
+                <CardContent className="p-4 flex items-center gap-3">
+                  <div className="rounded-lg bg-emerald-500/10 p-2.5">
+                    <Lock className="h-5 w-5 text-emerald-400" />
+                  </div>
+                  <div>
+                    <p className="text-xl font-bold text-foreground capitalize">
+                      {selectedPeriod?.estado || "—"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">Estado del Período</p>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
-          </CardContent>
-        </Card>
 
-        <Tabs defaultValue="actividades" className="space-y-4">
+            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                  <CalendarDays className="h-5 w-5 text-gold" />
+                  Resumen Quincenal de Pagos
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+                  {(() => {
+                    const approvedReports = actReports.filter(
+                      (r) => r.periodoId === selectedPeriodId && r.estadoAprobacionLider === "aprobado"
+                    );
+                    const pendingReports = actReports.filter(
+                      (r) => r.periodoId === selectedPeriodId && r.estadoAprobacionLider === "pendiente"
+                    );
+                    const totalAprobado = Array.from(buildTechSummary(approvedReports, true).values()).reduce((s, item) => s + item.total, 0);
+                    const totalPendiente = Array.from(buildTechSummary(pendingReports).values()).reduce((s, item) => s + item.total, 0);
+                    const recorridos = actReports.filter(
+                      (r) => r.periodoId === selectedPeriodId && r.tipo === "recorrido" && r.estadoAprobacionLider !== "rechazado"
+                    );
+                    const totalRecorridos = recorridos.reduce((s, r) => s + r.costoActividad, 0);
+
+                    return (
+                      <>
+                        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                            <p className="text-xs font-medium text-emerald-400 uppercase tracking-wide">Aprobado para Pago</p>
+                          </div>
+                          <p className="text-2xl font-bold text-emerald-400">{formatCurrency(totalAprobado)}</p>
+                          <p className="text-xs text-muted-foreground mt-1">{approvedReports.length} actividades aprobadas</p>
+                          {totalExtraLeaderPeriod > 0 && (
+                            <p className="text-[10px] text-violet-400 mt-1">Extra líder aplicado: {formatCurrency(totalExtraLeaderPeriod)}</p>
+                          )}
+                        </div>
+                        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Clock className="h-4 w-4 text-amber-400" />
+                            <p className="text-xs font-medium text-amber-400 uppercase tracking-wide">Pendiente de Aprobación</p>
+                          </div>
+                          <p className="text-2xl font-bold text-amber-400">{formatCurrency(totalPendiente)}</p>
+                          <p className="text-xs text-muted-foreground mt-1">{pendingReports.length} actividades pendientes</p>
+                        </div>
+                        <div className="rounded-lg border border-gold/20 bg-gold/5 p-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <DollarSign className="h-4 w-4 text-gold" />
+                            <p className="text-xs font-medium text-gold uppercase tracking-wide">Total Quincena</p>
+                          </div>
+                          <p className="text-2xl font-bold text-gold">{formatCurrency(totalAprobado + totalPendiente)}</p>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Recorridos: {formatCurrency(totalRecorridos)} ({recorridos.length})
+                          </p>
+                          {totalExtraLeaderPeriod > 0 && (
+                            <p className="text-[10px] text-violet-400 mt-1">Incluye extra líder: {formatCurrency(totalExtraLeaderPeriod)}</p>
+                          )}
+                        </div>
+                        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Percent className="h-4 w-4 text-red-400" />
+                            <p className="text-xs font-medium text-red-400 uppercase tracking-wide">Descuento por Tardanza</p>
+                          </div>
+                          <p className="text-2xl font-bold text-red-400">-{formatCurrency(totalPenaltyPeriod)}</p>
+                          <p className="text-xs text-muted-foreground mt-1">Aplicado sobre actividades no recorrido del período</p>
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Tabs defaultValue="actividades" className="space-y-4">
           <TabsList className="bg-secondary/50 border border-border/50">
             <TabsTrigger
               value="actividades"
@@ -1583,7 +1602,17 @@ export default function LiquidacionPage() {
               )}
             </div>
           </TabsContent>
-        </Tabs>
+            </Tabs>
+          </>
+        ) : (
+          <Card className="border-border/50 bg-card/80">
+            <CardContent className="p-8 text-center text-sm text-muted-foreground">
+              {periods.length > 0
+                ? "Selecciona un período para ver la liquidación."
+                : "No hay períodos disponibles para mostrar la liquidación."}
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       <Dialog open={closeDialogOpen} onOpenChange={setCloseDialogOpen}>

@@ -64,7 +64,7 @@ import { getClientes } from "@/lib/supabase/services/clientes";
 import { getGrupos } from "@/lib/supabase/services/grupos";
 import { getConfiguracion, updateConfiguracion } from "@/lib/supabase/services/configuracion";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
-import { getCurrentOrLatestPeriodo, getPeriodos } from "@/lib/supabase/services/liquidacion";
+import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
 import { sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
@@ -254,14 +254,34 @@ export default function AprobacionesPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [r, u, c, g, s, p] = await Promise.all([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion(), getPeriodos()]);
+      const [periodResult, reportsResult, usersResult, clientsResult, groupsResult, settingsResult] = await Promise.allSettled([
+        getPeriodos(),
+        getReportesActividad(),
+        getUsuarios(),
+        getClientes(),
+        getGrupos(),
+        getConfiguracion(),
+      ]);
+
+      const p = periodResult.status === "fulfilled" ? periodResult.value : [];
+      const r = reportsResult.status === "fulfilled" ? reportsResult.value : [];
+      const u = usersResult.status === "fulfilled" ? usersResult.value : [];
+      const c = clientsResult.status === "fulfilled" ? clientsResult.value : [];
+      const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
+      const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
+
+      if (periodResult.status === "rejected") console.error("Error cargando períodos en aprobaciones:", periodResult.reason);
+      if (reportsResult.status === "rejected") console.error("Error cargando reportes en aprobaciones:", reportsResult.reason);
+      if (usersResult.status === "rejected") console.error("Error cargando usuarios en aprobaciones:", usersResult.reason);
+      if (clientsResult.status === "rejected") console.error("Error cargando clientes en aprobaciones:", clientsResult.reason);
+      if (groupsResult.status === "rejected") console.error("Error cargando grupos en aprobaciones:", groupsResult.reason);
+      if (settingsResult.status === "rejected") console.error("Error cargando configuración en aprobaciones:", settingsResult.reason);
+
       setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setPeriods(p);
       setSelectedPeriodId((current) => {
         if (current && p.some((period) => period.id === current)) return current;
-        return getCurrentOrLatestPeriodo(p)?.id || "";
+        return p[0]?.id || "";
       });
-    } catch (err) {
-      console.error("Error cargando aprobaciones:", err);
     } finally {
       setLoading(false);
     }
@@ -378,8 +398,9 @@ export default function AprobacionesPage() {
     () => periods.find((period) => period.id === selectedPeriodId),
     [periods, selectedPeriodId]
   );
+  const hasSelectedPeriod = !!selectedPeriod;
   const periodScopedReports = useMemo(
-    () => selectedPeriodId ? reports.filter((report) => report.periodoId === selectedPeriodId) : reports,
+    () => selectedPeriodId ? reports.filter((report) => report.periodoId === selectedPeriodId) : [],
     [reports, selectedPeriodId]
   );
   const preventivos = useMemo(
@@ -1205,52 +1226,54 @@ export default function AprobacionesPage() {
     <div>
       <AdminHeader title="Aprobaciones de Actividades" />
       <div className="p-6 space-y-6">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-cyan-neon/10 p-2.5">
-                <FileText className="h-5 w-5 text-cyan-neon" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{totalReportes}</p>
-                <p className="text-xs text-muted-foreground">Total Informes</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-emerald-500/10 p-2.5">
-                <CheckCircle2 className="h-5 w-5 text-emerald-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-emerald-400">{aprobados}</p>
-                <p className="text-xs text-muted-foreground">Aprobados por Líder</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-amber-500/10 p-2.5">
-                <Clock className="h-5 w-5 text-amber-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-amber-400">{pendientes}</p>
-                <p className="text-xs text-muted-foreground">Pendientes Aprobación</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-gold/10 p-2.5">
-                <DollarSign className="h-5 w-5 text-gold" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-gold">{formatCurrency(totalValor)}</p>
-                <p className="text-xs text-muted-foreground">Valor Aprobado</p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+        {hasSelectedPeriod && (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Card className="border-border/50 bg-card/80">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-cyan-neon/10 p-2.5">
+                  <FileText className="h-5 w-5 text-cyan-neon" />
+                </div>
+                <div>
+                  <p className="text-xl font-bold text-foreground">{totalReportes}</p>
+                  <p className="text-xs text-muted-foreground">Total Informes</p>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-border/50 bg-card/80">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-emerald-500/10 p-2.5">
+                  <CheckCircle2 className="h-5 w-5 text-emerald-400" />
+                </div>
+                <div>
+                  <p className="text-xl font-bold text-emerald-400">{aprobados}</p>
+                  <p className="text-xs text-muted-foreground">Aprobados por Líder</p>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-border/50 bg-card/80">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-amber-500/10 p-2.5">
+                  <Clock className="h-5 w-5 text-amber-400" />
+                </div>
+                <div>
+                  <p className="text-xl font-bold text-amber-400">{pendientes}</p>
+                  <p className="text-xs text-muted-foreground">Pendientes Aprobación</p>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-border/50 bg-card/80">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-lg bg-gold/10 p-2.5">
+                  <DollarSign className="h-5 w-5 text-gold" />
+                </div>
+                <div>
+                  <p className="text-xl font-bold text-gold">{formatCurrency(totalValor)}</p>
+                  <p className="text-xs text-muted-foreground">Valor Aprobado</p>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
 
         <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
           <CardContent className="flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:justify-between">
@@ -1299,6 +1322,7 @@ export default function AprobacionesPage() {
               placeholder="Buscar por cliente, grupo, descripción o fecha..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              disabled={!hasSelectedPeriod}
               className="pl-10 bg-secondary/50 border-border/50"
             />
           </div>
@@ -1318,15 +1342,17 @@ export default function AprobacionesPage() {
             placeholder="Filtrar por técnico"
             value={tecnicoFilter}
             onChange={(e) => setTecnicoFilter(e.target.value)}
+            disabled={!hasSelectedPeriod}
             className="w-52 bg-secondary/50 border-border/50"
           />
           <Input
             type="date"
             value={dateFilter}
             onChange={(e) => setDateFilter(e.target.value)}
+            disabled={!hasSelectedPeriod}
             className="w-44 bg-secondary/50 border-border/50"
           />
-          <Select value={estadoFilter} onValueChange={setEstadoFilter}>
+          <Select value={estadoFilter} onValueChange={setEstadoFilter} disabled={!hasSelectedPeriod}>
             <SelectTrigger className="w-44 bg-secondary/50 border-border/50">
               <SelectValue placeholder="Estado" />
             </SelectTrigger>
@@ -1337,7 +1363,7 @@ export default function AprobacionesPage() {
               <SelectItem value="rechazado">Rechazado</SelectItem>
             </SelectContent>
           </Select>
-          <Select value={grupoFilter} onValueChange={setGrupoFilter}>
+          <Select value={grupoFilter} onValueChange={setGrupoFilter} disabled={!hasSelectedPeriod}>
             <SelectTrigger className="w-44 bg-secondary/50 border-border/50">
               <SelectValue placeholder="Grupo" />
             </SelectTrigger>
@@ -1349,62 +1375,72 @@ export default function AprobacionesPage() {
             </SelectContent>
           </Select>
           <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
-            {selectedPeriod ? `Período actual: ${formatPeriodLabel(selectedPeriod)}` : "Sin período configurado"}
+            {selectedPeriod ? `Período actual: ${formatPeriodLabel(selectedPeriod)}` : periods.length > 0 ? "Selecciona un período" : "No hay períodos disponibles"}
           </Badge>
         </div>
 
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-          <TabsList className="bg-secondary/50 border border-border/50">
-            <TabsTrigger value="preventivos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-              <Wrench className="mr-2 h-4 w-4" />
-              Mant. Preventivo
-              <Badge className="ml-1.5 border-0 bg-blue-500/20 px-1.5 text-[10px] text-blue-400">{preventivos.length}</Badge>
-            </TabsTrigger>
-            <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-              <ClipboardCheck className="mr-2 h-4 w-4" />
-              Visita Técnica
-              <Badge className="ml-1.5 border-0 bg-cyan-neon/20 px-1.5 text-[10px] text-cyan-neon">{visitas.length}</Badge>
-            </TabsTrigger>
-            <TabsTrigger value="recorridos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-              <Route className="mr-2 h-4 w-4" />
-              Recorrido
-              <Badge className="ml-1.5 border-0 bg-emerald-500/20 px-1.5 text-[10px] text-emerald-400">{recorridos.length}</Badge>
-            </TabsTrigger>
-            <TabsTrigger value="grupales" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-              <Users className="mr-2 h-4 w-4" />
-              Act. Grupal
-              <Badge className="ml-1.5 border-0 bg-purple-500/20 px-1.5 text-[10px] text-purple-400">{grupales.length}</Badge>
-            </TabsTrigger>
-          </TabsList>
+        {hasSelectedPeriod ? (
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+            <TabsList className="bg-secondary/50 border border-border/50">
+              <TabsTrigger value="preventivos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                <Wrench className="mr-2 h-4 w-4" />
+                Mant. Preventivo
+                <Badge className="ml-1.5 border-0 bg-blue-500/20 px-1.5 text-[10px] text-blue-400">{preventivos.length}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                <ClipboardCheck className="mr-2 h-4 w-4" />
+                Visita Técnica
+                <Badge className="ml-1.5 border-0 bg-cyan-neon/20 px-1.5 text-[10px] text-cyan-neon">{visitas.length}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="recorridos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                <Route className="mr-2 h-4 w-4" />
+                Recorrido
+                <Badge className="ml-1.5 border-0 bg-emerald-500/20 px-1.5 text-[10px] text-emerald-400">{recorridos.length}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="grupales" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                <Users className="mr-2 h-4 w-4" />
+                Act. Grupal
+                <Badge className="ml-1.5 border-0 bg-purple-500/20 px-1.5 text-[10px] text-purple-400">{grupales.length}</Badge>
+              </TabsTrigger>
+            </TabsList>
 
-          <TabsContent value="preventivos">
-            {renderReportsTable(
-              "Aprobaciones de Mantenimiento Preventivo",
-              "Informes preventivos pendientes, aprobados o rechazados por líder. Desde aquí puedes validar el valor final y procesar la decisión administrativa."
-            )}
-          </TabsContent>
+            <TabsContent value="preventivos">
+              {renderReportsTable(
+                "Aprobaciones de Mantenimiento Preventivo",
+                "Informes preventivos pendientes, aprobados o rechazados por líder. Desde aquí puedes validar el valor final y procesar la decisión administrativa."
+              )}
+            </TabsContent>
 
-          <TabsContent value="visitas">
-            {renderReportsTable(
-              "Aprobaciones de Visitas Técnicas",
-              "Visitas técnicas registradas desde operación. Aquí puedes revisar el contraste entre default y valor reportado antes de aprobar o rechazar."
-            )}
-          </TabsContent>
+            <TabsContent value="visitas">
+              {renderReportsTable(
+                "Aprobaciones de Visitas Técnicas",
+                "Visitas técnicas registradas desde operación. Aquí puedes revisar el contraste entre default y valor reportado antes de aprobar o rechazar."
+              )}
+            </TabsContent>
 
-          <TabsContent value="recorridos">
-            {renderReportsTable(
-              "Aprobaciones de Recorridos",
-              "Recorridos reportados por el equipo con su modalidad y costo administrable para aprobación por líder."
-            )}
-          </TabsContent>
+            <TabsContent value="recorridos">
+              {renderReportsTable(
+                "Aprobaciones de Recorridos",
+                "Recorridos reportados por el equipo con su modalidad y costo administrable para aprobación por líder."
+              )}
+            </TabsContent>
 
-          <TabsContent value="grupales">
-            {renderReportsTable(
-              "Aprobaciones de Actividades Grupales",
-              "Actividades grupales liquidadas por participante. El valor se revisa desde una base compartida y se recalcula automáticamente según el porcentaje de cada técnico."
-            )}
-          </TabsContent>
-        </Tabs>
+            <TabsContent value="grupales">
+              {renderReportsTable(
+                "Aprobaciones de Actividades Grupales",
+                "Actividades grupales liquidadas por participante. El valor se revisa desde una base compartida y se recalcula automáticamente según el porcentaje de cada técnico."
+              )}
+            </TabsContent>
+          </Tabs>
+        ) : (
+          <Card className="border-border/50 bg-card/80">
+            <CardContent className="p-8 text-center text-sm text-muted-foreground">
+              {periods.length > 0
+                ? "Selecciona un período para ver las aprobaciones."
+                : "No hay períodos disponibles para mostrar aprobaciones."}
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>

@@ -219,6 +219,17 @@ function addOneDay(date: string): string {
   return nextDate.toISOString().split("T")[0];
 }
 
+function chunkArray<T>(items: T[], size: number): T[][] {
+  if (size <= 0) return [items];
+
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
 function parseLegacyGroupActivityReportId(id: string) {
   if (!id.startsWith("reg-")) return null;
 
@@ -731,15 +742,25 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     if (error) throw error;
 
     const reportIds = (data || []).map((row: ReporteActividadRow) => row.id);
-    const { data: fotosData, error: fotosError } = reportIds.length > 0
-      ? await supabase
-        .from("reporte_actividad_fotos")
-        .select("reporte_actividad_id, tipo, url, orden")
-        .in("reporte_actividad_id", reportIds)
-        .order("orden")
-      : { data: [], error: null };
+    let fotosData: ReporteActividadFotoRow[] = [];
 
-    if (fotosError) throw fotosError;
+    if (reportIds.length > 0) {
+      const fotoChunks = chunkArray(reportIds, 120);
+      const fotoResults = await Promise.all(
+        fotoChunks.map(async (chunk) => {
+          const { data: chunkData, error: chunkError } = await supabase
+            .from("reporte_actividad_fotos")
+            .select("reporte_actividad_id, tipo, url, orden")
+            .in("reporte_actividad_id", chunk)
+            .order("orden");
+
+          if (chunkError) throw chunkError;
+          return (chunkData || []) as ReporteActividadFotoRow[];
+        })
+      );
+
+      fotosData = fotoResults.flat();
+    }
 
     const visitReportRows = (data || []).filter((row: ReporteActividadRow) => row.tipo === "visita_tecnica");
     const recorridoReportRows = (data || []).filter((row: ReporteActividadRow) => row.tipo === "recorrido");
