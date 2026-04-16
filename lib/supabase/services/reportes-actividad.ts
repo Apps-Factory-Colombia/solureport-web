@@ -130,8 +130,8 @@ interface ParticipanteRelacionRow {
 }
 
 interface LegacyActivityMirrorMaps {
-  strict: Map<string, ActivityReport>;
-  fallback: Map<string, ActivityReport>;
+  strict: Map<string, ActivityReport[]>;
+  fallback: Map<string, ActivityReport[]>;
 }
 
 interface VisitMirrorRow {
@@ -151,6 +151,22 @@ interface VisitMirrorRow {
 interface VisitMirrorMaps {
   strict: Map<string, VisitMirrorRow>;
   fallback: Map<string, VisitMirrorRow>;
+}
+
+interface VisitLiquidationRow {
+  id: string;
+  tecnico_id: string;
+  fecha: string;
+  periodo_id?: string | null;
+  referencia_id?: string | null;
+  porcentaje?: number | string | null;
+  valor_base?: number | string | null;
+  valor_ganado?: number | string | null;
+}
+
+interface VisitLiquidationMaps {
+  byReferenceId: Map<string, VisitLiquidationRow[]>;
+  byFallback: Map<string, VisitLiquidationRow[]>;
 }
 
 interface RecorridoMirrorRow {
@@ -250,21 +266,100 @@ function calculateGroupParticipantValue(baseValue: number, porcentaje: number) {
   return Math.round(baseValue);
 }
 
+function normalizeActivityMatchText(value?: string | null) {
+  return (value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function buildLegacyActivityMirrorKey(params: {
   tecnicoId: string;
   fecha: string;
   grupoId?: string | null;
   clienteId?: string | null;
+  descripcion?: string | null;
+  especificacion?: string | null;
 }) {
-  return [params.tecnicoId, params.fecha, params.grupoId || "", params.clienteId || ""].join("|");
+  return [
+    params.tecnicoId,
+    params.fecha,
+    params.grupoId || "",
+    params.clienteId || "",
+    normalizeActivityMatchText(params.descripcion),
+    normalizeActivityMatchText(params.especificacion),
+  ].join("|");
 }
 
 function buildLegacyActivityFallbackKey(params: {
   tecnicoId: string;
   fecha: string;
   grupoId?: string | null;
+  clienteId?: string | null;
+  descripcion?: string | null;
 }) {
-  return [params.tecnicoId, params.fecha, params.grupoId || ""].join("|");
+  return [
+    params.tecnicoId,
+    params.fecha,
+    params.grupoId || "",
+    params.clienteId || "",
+    normalizeActivityMatchText(params.descripcion),
+  ].join("|");
+}
+
+function appendLegacyActivityCandidate(
+  map: Map<string, ActivityReport[]>,
+  key: string,
+  report: ActivityReport
+) {
+  const current = map.get(key) || [];
+  current.push(report);
+  map.set(key, current);
+}
+
+function resolveLegacyActivityCandidate(
+  candidates: ActivityReport[] | undefined,
+  target: Pick<ActivityReport, "descripcion" | "especificacion">
+) {
+  if (!candidates || candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0];
+
+  const normalizedDescription = normalizeActivityMatchText(target.descripcion);
+  const normalizedSpecification = normalizeActivityMatchText(target.especificacion);
+
+  let filtered = candidates;
+
+  if (normalizedDescription) {
+    const exactDescriptionMatches = filtered.filter(
+      (candidate) => normalizeActivityMatchText(candidate.descripcion) === normalizedDescription
+    );
+
+    if (exactDescriptionMatches.length === 1) {
+      return exactDescriptionMatches[0];
+    }
+
+    if (exactDescriptionMatches.length > 0) {
+      filtered = exactDescriptionMatches;
+    }
+  }
+
+  if (normalizedSpecification) {
+    const exactSpecificationMatches = filtered.filter(
+      (candidate) => normalizeActivityMatchText(candidate.especificacion) === normalizedSpecification
+    );
+
+    if (exactSpecificationMatches.length === 1) {
+      return exactSpecificationMatches[0];
+    }
+
+    if (exactSpecificationMatches.length > 0) {
+      filtered = exactSpecificationMatches;
+    }
+  }
+
+  return filtered.length === 1 ? filtered[0] : undefined;
 }
 
 function enrichLegacyActivityReport(
@@ -278,14 +373,19 @@ function enrichLegacyActivityReport(
     fecha: report.fecha,
     grupoId: report.grupoId,
     clienteId: report.clienteId,
+    descripcion: report.descripcion,
+    especificacion: report.especificacion,
   });
   const fallbackKey = buildLegacyActivityFallbackKey({
     tecnicoId: report.tecnicoId,
     fecha: report.fecha,
     grupoId: report.grupoId,
+    clienteId: report.clienteId,
+    descripcion: report.descripcion,
   });
 
-  const mirror = mirrors.strict.get(strictKey) || mirrors.fallback.get(fallbackKey);
+  const mirror = resolveLegacyActivityCandidate(mirrors.strict.get(strictKey), report)
+    || resolveLegacyActivityCandidate(mirrors.fallback.get(fallbackKey), report);
 
   if (!mirror) return report;
 
@@ -339,6 +439,83 @@ function buildVisitMirrorFallbackKey(params: {
   return [params.tecnicoId, params.fecha, params.clienteId || ""].join("|");
 }
 
+function buildVisitLiquidationFallbackKey(params: {
+  tecnicoId: string;
+  fecha: string;
+  periodoId?: string | null;
+}) {
+  return [params.tecnicoId, params.fecha, params.periodoId || ""].join("|");
+}
+
+function appendVisitLiquidationCandidate(
+  map: Map<string, VisitLiquidationRow[]>,
+  key: string,
+  row: VisitLiquidationRow
+) {
+  const current = map.get(key) || [];
+  current.push(row);
+  map.set(key, current);
+}
+
+function resolveVisitLiquidationRow(params: {
+  reportId: string;
+  visitId?: string;
+  tecnicoId: string;
+  fecha: string;
+  periodoId?: string | null;
+  maps?: VisitLiquidationMaps;
+}) {
+  if (!params.maps) return undefined;
+
+  const directCandidates = [
+    ...(params.maps.byReferenceId.get(params.reportId) || []),
+    ...(params.visitId ? params.maps.byReferenceId.get(params.visitId) || [] : []),
+  ].filter(
+    (row, index, rows) => rows.findIndex((candidate) => candidate.id === row.id) === index
+  );
+
+  if (directCandidates.length > 0) {
+    return directCandidates[0];
+  }
+
+  const fallbackKey = buildVisitLiquidationFallbackKey({
+    tecnicoId: params.tecnicoId,
+    fecha: params.fecha,
+    periodoId: params.periodoId,
+  });
+
+  return (params.maps.byFallback.get(fallbackKey) || [])[0];
+}
+
+function enrichVisitLiquidationReport(
+  report: ActivityReport,
+  liquidationRow?: VisitLiquidationRow
+): ActivityReport {
+  if (report.tipo !== "visita_tecnica" || !liquidationRow) return report;
+
+  const porcentajeParticipacion = Number(liquidationRow.porcentaje ?? 0) || 0;
+  const defaultParticipantValue = Number(report.costoActividadDefault ?? 0) || 0;
+  const valorBase = Number(liquidationRow.valor_base ?? report.costoActividadDefault ?? report.costoActividad) || 0;
+  const valorGanado = liquidationRow.valor_ganado != null
+    ? Number(liquidationRow.valor_ganado ?? 0) || 0
+    : porcentajeParticipacion > 0
+      ? calculateGroupParticipantValue(valorBase, porcentajeParticipacion)
+      : report.costoActividad;
+  const valorBaseDefaultGlobal = report.valorActividadBaseGlobal != null
+    ? Number(report.valorActividadBaseGlobal ?? 0) || 0
+    : porcentajeParticipacion > 0 && defaultParticipantValue > 0
+      ? Number(((defaultParticipantValue * 100) / porcentajeParticipacion).toFixed(2))
+      : defaultParticipantValue;
+
+  return {
+    ...report,
+    porcentajeParticipacion,
+    costoActividad: valorGanado,
+    valorActividadBaseGlobal: valorBaseDefaultGlobal,
+    valorActividadAplicadoGlobal: valorBase,
+  };
+}
+
 function buildRecorridoMirrorStrictKey(params: {
   tecnicoId: string;
   fecha: string;
@@ -386,7 +563,10 @@ function enrichVisitReport(
   const shouldUseMirrorDefault = !report.costoActividadDefault && mirrorDefaultCost > 0;
   const shouldUseMirrorReason = !report.motivoModificacionValor && !!mirror.motivo_modificacion_valor;
   const shouldUseMirrorModifiedFlag = !report.valorModificado && !!mirror.valor_modificado;
-  const shouldUseMirrorReportedCost = report.costoActividad <= 0 && mirrorReportedCost > 0;
+  const shouldUseMirrorReportedCost = report.costoActividad <= 0
+    && !report.valorModificado
+    && !report.motivoModificacionValor
+    && mirrorReportedCost > 0;
 
   if (!hasMirrorVisitId && !shouldUseMirrorClientCost && !shouldUseMirrorDefault && !shouldUseMirrorReason && !shouldUseMirrorModifiedFlag && !shouldUseMirrorReportedCost) {
     return report;
@@ -558,10 +738,298 @@ async function syncVisitLiquidationFromReport(params: {
   invalidateCachedValue("liquidacion:entries");
 }
 
+async function syncVisitApprovalValue(params: {
+  tecnicoId: string;
+  fecha: string;
+  valor: number;
+  referenceIds?: string[];
+}) {
+  const uniqueReferenceIds = Array.from(new Set((params.referenceIds || []).filter(Boolean)));
+
+  if (uniqueReferenceIds.length > 0) {
+    const { data: matchingItems, error: lookupError } = await supabase
+      .from("items_aprobacion")
+      .select("id")
+      .eq("tipo", "visita_tecnica")
+      .eq("tecnico_id", params.tecnicoId)
+      .in("referencia_id", uniqueReferenceIds);
+    if (lookupError) throw lookupError;
+
+    const matchingIds = (matchingItems || []).map((item: { id: string }) => item.id);
+    if (matchingIds.length > 0) {
+      const { error: updateError } = await supabase
+        .from("items_aprobacion")
+        .update({ valor: params.valor })
+        .in("id", matchingIds);
+      if (updateError) throw updateError;
+      return;
+    }
+  }
+
+  const { error: fallbackError } = await supabase
+    .from("items_aprobacion")
+    .update({ valor: params.valor })
+    .eq("tipo", "visita_tecnica")
+    .eq("tecnico_id", params.tecnicoId)
+    .eq("fecha", params.fecha);
+  if (fallbackError) throw fallbackError;
+}
+
+async function syncVisitLiquidationValue(params: {
+  tecnicoId: string;
+  fecha: string;
+  valorBase: number;
+  valorGanado: number;
+  periodoId?: string | null;
+  referenceIds?: string[];
+}) {
+  const uniqueReferenceIds = Array.from(new Set((params.referenceIds || []).filter(Boolean)));
+
+  if (uniqueReferenceIds.length > 0) {
+    let lookupQuery = supabase
+      .from("items_liquidacion")
+      .select("id")
+      .eq("tipo", "visita_tecnica")
+      .eq("tecnico_id", params.tecnicoId)
+      .in("referencia_id", uniqueReferenceIds);
+
+    if (params.periodoId) {
+      lookupQuery = lookupQuery.eq("periodo_id", params.periodoId);
+    }
+
+    const { data: matchingItems, error: lookupError } = await lookupQuery;
+    if (lookupError) throw lookupError;
+
+    const matchingIds = (matchingItems || []).map((item: { id: string }) => item.id);
+    if (matchingIds.length > 0) {
+      const { error: updateError } = await supabase
+        .from("items_liquidacion")
+        .update({
+          valor_base: params.valorBase,
+          valor_ganado: params.valorGanado,
+        })
+        .in("id", matchingIds);
+      if (updateError) throw updateError;
+      return;
+    }
+  }
+
+  let fallbackQuery = supabase
+    .from("items_liquidacion")
+    .update({
+      valor_base: params.valorBase,
+      valor_ganado: params.valorGanado,
+    })
+    .eq("tipo", "visita_tecnica")
+    .eq("tecnico_id", params.tecnicoId)
+    .eq("fecha", params.fecha);
+
+  if (params.periodoId) {
+    fallbackQuery = fallbackQuery.eq("periodo_id", params.periodoId);
+  }
+
+  const { error: fallbackError } = await fallbackQuery;
+  if (fallbackError) throw fallbackError;
+}
+
+async function resolveSharedVisitParticipants(params: {
+  reportId: string;
+  fecha: string;
+  grupoId: string;
+  clienteId?: string | null;
+  descripcion?: string | null;
+  periodoId?: string | null;
+}) {
+  let relatedReportsQuery = supabase
+    .from("reportes_actividad")
+    .select("id, tecnico_id, periodo_id, costo_actividad, costo_actividad_default")
+    .eq("tipo", "visita_tecnica")
+    .eq("fecha", params.fecha)
+    .eq("grupo_id", params.grupoId);
+
+  if (params.clienteId) {
+    relatedReportsQuery = relatedReportsQuery.eq("cliente_id", params.clienteId);
+  } else {
+    relatedReportsQuery = relatedReportsQuery.is("cliente_id", null);
+  }
+
+  if (params.descripcion) {
+    relatedReportsQuery = relatedReportsQuery.eq("descripcion", params.descripcion);
+  } else {
+    relatedReportsQuery = relatedReportsQuery.is("descripcion", null);
+  }
+
+  const { data: relatedReports, error: relatedReportsError } = await relatedReportsQuery;
+  if (relatedReportsError) throw relatedReportsError;
+
+  const participants = relatedReports || [];
+  if (participants.length <= 1) {
+    return [];
+  }
+
+  const technicalIds = participants.map((participant: { tecnico_id: string }) => participant.tecnico_id).filter(Boolean);
+  const startDate = params.fecha;
+  const endDate = addOneDay(params.fecha);
+
+  let visitQuery = supabase
+    .from("visitas_tecnicas")
+    .select("id, tecnico_id, descripcion, costo_visita_tecnica_default")
+    .in("tecnico_id", technicalIds)
+    .gte("fecha_inicio", startDate)
+    .lt("fecha_inicio", endDate);
+
+  if (params.clienteId) {
+    visitQuery = visitQuery.eq("cliente_id", params.clienteId);
+  } else {
+    visitQuery = visitQuery.is("cliente_id", null);
+  }
+
+  const { data: visitRows, error: visitRowsError } = await visitQuery;
+  if (visitRowsError) throw visitRowsError;
+
+  const { data: liquidationRows, error: liquidationRowsError } = await supabase
+    .from("items_liquidacion")
+    .select("id, tecnico_id, fecha, periodo_id, referencia_id, porcentaje, valor_base, valor_ganado")
+    .eq("tipo", "visita_tecnica")
+    .in("tecnico_id", technicalIds)
+    .eq("fecha", params.fecha);
+  if (liquidationRowsError) throw liquidationRowsError;
+
+  const liquidationMaps: VisitLiquidationMaps = {
+    byReferenceId: new Map<string, VisitLiquidationRow[]>(),
+    byFallback: new Map<string, VisitLiquidationRow[]>(),
+  };
+
+  for (const row of (liquidationRows || []) as VisitLiquidationRow[]) {
+    if (row.referencia_id) {
+      appendVisitLiquidationCandidate(liquidationMaps.byReferenceId, row.referencia_id, row);
+    }
+
+    const fallbackKey = buildVisitLiquidationFallbackKey({
+      tecnicoId: row.tecnico_id,
+      fecha: row.fecha,
+      periodoId: row.periodo_id,
+    });
+    appendVisitLiquidationCandidate(liquidationMaps.byFallback, fallbackKey, row);
+  }
+
+  const currentTotal = participants.reduce(
+    (sum, participant: { costo_actividad?: number | string | null }) => sum + (Number(participant.costo_actividad) || 0),
+    0
+  );
+  const participantsCount = participants.length || 1;
+
+  return participants.map((participant: { id: string; tecnico_id: string; periodo_id?: string | null; costo_actividad?: number | string | null; costo_actividad_default?: number | string | null }) => {
+    const participantVisits = (visitRows || []).filter((visit: { tecnico_id: string; descripcion?: string | null }) => {
+      if (visit.tecnico_id !== participant.tecnico_id) return false;
+      if (!params.descripcion) return !visit.descripcion;
+      return visit.descripcion === params.descripcion;
+    });
+
+    const selectedVisit = participantVisits[0]
+      || (visitRows || []).find((visit: { tecnico_id: string }) => visit.tecnico_id === participant.tecnico_id)
+      || null;
+
+    const liquidationRow = resolveVisitLiquidationRow({
+      reportId: participant.id,
+      visitId: selectedVisit?.id,
+      tecnicoId: participant.tecnico_id,
+      fecha: params.fecha,
+      periodoId: participant.periodo_id || params.periodoId,
+      maps: liquidationMaps,
+    });
+
+    const currentValue = liquidationRow?.valor_ganado != null
+      ? Number(liquidationRow.valor_ganado ?? 0) || 0
+      : Number(participant.costo_actividad ?? 0) || 0;
+    const percentage = Number(liquidationRow?.porcentaje ?? 0) || 0;
+    const derivedPercentage = percentage > 0
+      ? percentage
+      : currentTotal > 0
+        ? Number(((currentValue / currentTotal) * 100).toFixed(2))
+        : Number((100 / participantsCount).toFixed(2));
+
+    return {
+      reportId: participant.id,
+      tecnicoId: participant.tecnico_id,
+      periodoId: participant.periodo_id || params.periodoId,
+      visitId: selectedVisit?.id,
+      visitDefaultCost: Number(selectedVisit?.costo_visita_tecnica_default ?? participant.costo_actividad_default ?? 0) || 0,
+      percentage: derivedPercentage,
+    };
+  });
+}
+
+async function updateSharedVisitCostFromReport(params: {
+  reportId: string;
+  fecha: string;
+  grupoId: string;
+  clienteId?: string | null;
+  descripcion?: string | null;
+  periodoId?: string | null;
+  defaultCost?: number | string | null;
+  costoActividad: number;
+}) {
+  const participants = await resolveSharedVisitParticipants(params);
+  if (participants.length <= 1) {
+    return false;
+  }
+
+  const normalizedBaseValue = Math.max(0, Number(params.costoActividad) || 0);
+  const normalizedDefaultCost = Number(params.defaultCost ?? 0) || 0;
+  const isModified = normalizedBaseValue !== normalizedDefaultCost;
+
+  await Promise.all(
+    participants.map(async (participant) => {
+      const nextTechnicalValue = calculateGroupParticipantValue(normalizedBaseValue, participant.percentage);
+
+      const { error: reportUpdateError } = await supabase
+        .from("reportes_actividad")
+        .update({
+          costo_actividad: nextTechnicalValue,
+          valor_modificado: isModified,
+        })
+        .eq("id", participant.reportId);
+      if (reportUpdateError) throw reportUpdateError;
+
+      if (participant.visitId) {
+        const { error: visitUpdateError } = await supabase
+          .from("visitas_tecnicas")
+          .update({
+            valor_cobrado_cliente: nextTechnicalValue,
+            valor_modificado: normalizedBaseValue !== participant.visitDefaultCost,
+          })
+          .eq("id", participant.visitId);
+        if (visitUpdateError) throw visitUpdateError;
+      }
+
+      await syncVisitApprovalValue({
+        tecnicoId: participant.tecnicoId,
+        fecha: params.fecha,
+        valor: nextTechnicalValue,
+        referenceIds: [participant.reportId, participant.visitId].filter(Boolean) as string[],
+      });
+
+      await syncVisitLiquidationValue({
+        tecnicoId: participant.tecnicoId,
+        fecha: params.fecha,
+        valorBase: normalizedBaseValue,
+        valorGanado: nextTechnicalValue,
+        periodoId: participant.periodoId,
+        referenceIds: [participant.reportId, participant.visitId].filter(Boolean) as string[],
+      });
+    })
+  );
+
+  invalidateCachedValue("visitas:list");
+  invalidateCachedValue("liquidacion:entries");
+  return true;
+}
+
 async function syncVisitCostFromApprovalReport(reportId: string, costoActividad: number): Promise<void> {
   const { data: report, error: reportError } = await supabase
     .from("reportes_actividad")
-    .select("id, tipo, tecnico_id, cliente_id, fecha, descripcion, periodo_id")
+    .select("id, tipo, tecnico_id, cliente_id, fecha, descripcion, periodo_id, costo_actividad_default")
     .eq("id", reportId)
     .single();
   if (reportError) throw reportError;
@@ -573,7 +1041,7 @@ async function syncVisitCostFromApprovalReport(reportId: string, costoActividad:
 
   let visitQuery = supabase
     .from("visitas_tecnicas")
-    .select("id, descripcion")
+    .select("id, descripcion, costo_visita_tecnica_default")
     .eq("tecnico_id", report.tecnico_id)
     .gte("fecha_inicio", startDate)
     .lt("fecha_inicio", endDate);
@@ -588,23 +1056,33 @@ async function syncVisitCostFromApprovalReport(reportId: string, costoActividad:
   if (visitsLookupError) throw visitsLookupError;
 
   let visitIds = (candidateVisits || []).map((visit: { id: string }) => visit.id);
+  let selectedVisits = candidateVisits || [];
 
   if (visitIds.length > 1 && report.descripcion) {
     const exactMatches = (candidateVisits || [])
       .filter((visit: { id: string; descripcion?: string | null }) => visit.descripcion === report.descripcion)
-      .map((visit: { id: string }) => visit.id);
+      .map((visit) => visit);
 
     if (exactMatches.length > 0) {
-      visitIds = exactMatches;
+      selectedVisits = exactMatches;
+      visitIds = exactMatches.map((visit: { id: string }) => visit.id);
     }
   }
 
   if (visitIds.length > 0) {
-    const { error: visitsUpdateError } = await supabase
-      .from("visitas_tecnicas")
-      .update({ valor_cobrado_cliente: costoActividad })
-      .in("id", visitIds);
-    if (visitsUpdateError) throw visitsUpdateError;
+    await Promise.all(
+      selectedVisits.map(async (visit: { id: string; costo_visita_tecnica_default?: number | string | null }) => {
+        const defaultCost = Number(visit.costo_visita_tecnica_default ?? 0) || 0;
+        const { error: visitsUpdateError } = await supabase
+          .from("visitas_tecnicas")
+          .update({
+            valor_cobrado_cliente: costoActividad,
+            valor_modificado: costoActividad !== defaultCost,
+          })
+          .eq("id", visit.id);
+        if (visitsUpdateError) throw visitsUpdateError;
+      })
+    );
 
     const { error: approvalUpdateError } = await supabase
       .from("items_aprobacion")
@@ -641,6 +1119,100 @@ async function syncVisitCostFromApprovalReport(reportId: string, costoActividad:
   }
 
   invalidateCachedValue("visitas:list");
+}
+
+async function syncGroupedActivityApprovalValue(params: {
+  tecnicoId: string;
+  fecha: string;
+  valor: number;
+  referenceIds?: string[];
+}) {
+  const uniqueReferenceIds = Array.from(new Set((params.referenceIds || []).filter(Boolean)));
+
+  if (uniqueReferenceIds.length > 0) {
+    const { data: matchingItems, error: lookupError } = await supabase
+      .from("items_aprobacion")
+      .select("id")
+      .eq("tipo", "actividad")
+      .eq("tecnico_id", params.tecnicoId)
+      .in("referencia_id", uniqueReferenceIds);
+    if (lookupError) throw lookupError;
+
+    const matchingIds = (matchingItems || []).map((item: { id: string }) => item.id);
+    if (matchingIds.length > 0) {
+      const { error: updateError } = await supabase
+        .from("items_aprobacion")
+        .update({ valor: params.valor })
+        .in("id", matchingIds);
+      if (updateError) throw updateError;
+      return;
+    }
+  }
+
+  const { error: fallbackError } = await supabase
+    .from("items_aprobacion")
+    .update({ valor: params.valor })
+    .eq("tipo", "actividad")
+    .eq("tecnico_id", params.tecnicoId)
+    .eq("fecha", params.fecha);
+  if (fallbackError) throw fallbackError;
+}
+
+async function syncGroupedActivityLiquidationValue(params: {
+  tecnicoId: string;
+  fecha: string;
+  valorBase: number;
+  valorGanado: number;
+  periodoId?: string | null;
+  referenceIds?: string[];
+}) {
+  const uniqueReferenceIds = Array.from(new Set((params.referenceIds || []).filter(Boolean)));
+
+  if (uniqueReferenceIds.length > 0) {
+    let lookupQuery = supabase
+      .from("items_liquidacion")
+      .select("id")
+      .eq("tipo", "actividad")
+      .eq("tecnico_id", params.tecnicoId)
+      .in("referencia_id", uniqueReferenceIds);
+
+    if (params.periodoId) {
+      lookupQuery = lookupQuery.eq("periodo_id", params.periodoId);
+    }
+
+    const { data: matchingItems, error: lookupError } = await lookupQuery;
+    if (lookupError) throw lookupError;
+
+    const matchingIds = (matchingItems || []).map((item: { id: string }) => item.id);
+    if (matchingIds.length > 0) {
+      const { error: updateError } = await supabase
+        .from("items_liquidacion")
+        .update({
+          valor_base: params.valorBase,
+          valor_ganado: params.valorGanado,
+        })
+        .in("id", matchingIds);
+      if (updateError) throw updateError;
+      return;
+    }
+  }
+
+  let fallbackQuery = supabase
+    .from("items_liquidacion")
+    .update({
+      valor_base: params.valorBase,
+      valor_ganado: params.valorGanado,
+    })
+    .eq("tipo", "actividad")
+    .eq("tecnico_id", params.tecnicoId)
+    .eq("fecha", params.fecha);
+
+  if (params.periodoId) {
+    fallbackQuery = fallbackQuery.eq("periodo_id", params.periodoId);
+  }
+
+  const { error: fallbackError } = await fallbackQuery;
+  if (fallbackError) throw fallbackError;
 }
 
 async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Promise<ActivityReport[]> {
@@ -795,11 +1367,28 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 
     if (recorridoMirrorError) throw recorridoMirrorError;
 
+    const { data: visitLiquidationData, error: visitLiquidationError } = uniqueVisitTechIds.length > 0 && minVisitDate && maxVisitDate
+      ? await supabase
+        .from("items_liquidacion")
+        .select("id, tecnico_id, fecha, periodo_id, referencia_id, porcentaje, valor_base, valor_ganado")
+        .eq("tipo", "visita_tecnica")
+        .in("tecnico_id", uniqueVisitTechIds)
+        .gte("fecha", minVisitDate)
+        .lte("fecha", maxVisitDate)
+      : { data: [], error: null };
+
+    if (visitLiquidationError) throw visitLiquidationError;
+
     const companySettings = await companySettingsPromise;
 
     const visitMirrors: VisitMirrorMaps = {
       strict: new Map<string, VisitMirrorRow>(),
       fallback: new Map<string, VisitMirrorRow>(),
+    };
+
+    const visitLiquidationMaps: VisitLiquidationMaps = {
+      byReferenceId: new Map<string, VisitLiquidationRow[]>(),
+      byFallback: new Map<string, VisitLiquidationRow[]>(),
     };
 
     const recorridoMirrors: RecorridoMirrorMaps = {
@@ -830,6 +1419,22 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       if (!visitMirrors.fallback.has(fallbackKey)) {
         visitMirrors.fallback.set(fallbackKey, row);
       }
+    }
+
+    for (const row of (visitLiquidationData || []) as VisitLiquidationRow[]) {
+      if (row.referencia_id) {
+        appendVisitLiquidationCandidate(visitLiquidationMaps.byReferenceId, row.referencia_id, row);
+      }
+
+      if (!row.tecnico_id || !row.fecha) continue;
+
+      const fallbackKey = buildVisitLiquidationFallbackKey({
+        tecnicoId: row.tecnico_id,
+        fecha: row.fecha,
+        periodoId: row.periodo_id,
+      });
+
+      appendVisitLiquidationCandidate(visitLiquidationMaps.byFallback, fallbackKey, row);
     }
 
     for (const row of (recorridoMirrorData || []) as RecorridoMirrorRow[]) {
@@ -866,16 +1471,29 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 
     const reports: ActivityReport[] = [];
     const legacyActivityMirrors: LegacyActivityMirrorMaps = {
-      strict: new Map<string, ActivityReport>(),
-      fallback: new Map<string, ActivityReport>(),
+      strict: new Map<string, ActivityReport[]>(),
+      fallback: new Map<string, ActivityReport[]>(),
     };
 
     for (const row of data || []) {
       const fotos = fotosByReporte.get(row.id) || [];
       const fotosAntes = fotos.filter((f) => f.tipo === "antes").map((f) => f.url);
       const fotosDespues = fotos.filter((f) => f.tipo === "despues").map((f) => f.url);
+      const visitEnrichedReport = enrichVisitReport(mapReport(row, fotosAntes, fotosDespues), visitMirrors);
       const mappedReport = enrichRecorridoReport(
-        enrichVisitReport(mapReport(row, fotosAntes, fotosDespues), visitMirrors),
+        enrichVisitLiquidationReport(
+          visitEnrichedReport,
+          visitEnrichedReport.tipo === "visita_tecnica"
+            ? resolveVisitLiquidationRow({
+              reportId: visitEnrichedReport.id,
+              visitId: visitEnrichedReport.visitaTecnicaId,
+              tecnicoId: visitEnrichedReport.tecnicoId,
+              fecha: visitEnrichedReport.fecha,
+              periodoId: visitEnrichedReport.periodoId,
+              maps: visitLiquidationMaps,
+            })
+            : undefined
+        ),
         recorridoMirrors,
         {
           costoRecorridoNormal: companySettings.costoRecorridoNormal,
@@ -889,20 +1507,19 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           fecha: mappedReport.fecha,
           grupoId: mappedReport.grupoId,
           clienteId: mappedReport.clienteId,
+          descripcion: mappedReport.descripcion,
+          especificacion: mappedReport.especificacion,
         });
         const fallbackKey = buildLegacyActivityFallbackKey({
           tecnicoId: mappedReport.tecnicoId,
           fecha: mappedReport.fecha,
           grupoId: mappedReport.grupoId,
+          clienteId: mappedReport.clienteId,
+          descripcion: mappedReport.descripcion,
         });
 
-        if (!legacyActivityMirrors.strict.has(strictKey)) {
-          legacyActivityMirrors.strict.set(strictKey, mappedReport);
-        }
-
-        if (!legacyActivityMirrors.fallback.has(fallbackKey)) {
-          legacyActivityMirrors.fallback.set(fallbackKey, mappedReport);
-        }
+        appendLegacyActivityCandidate(legacyActivityMirrors.strict, strictKey, mappedReport);
+        appendLegacyActivityCandidate(legacyActivityMirrors.fallback, fallbackKey, mappedReport);
       }
 
       reports.push(mappedReport);
@@ -910,8 +1527,9 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 
     try {
       const registroReports = await getRegistrosComoReports(legacyActivityMirrors);
-      const registroReportsByStrictKey = new Map<string, ActivityReport>();
-      const registroReportsByFallbackKey = new Map<string, ActivityReport>();
+      const registroReportsByStrictKey = new Map<string, ActivityReport[]>();
+      const registroReportsByFallbackKey = new Map<string, ActivityReport[]>();
+      const matchedRegistroReportIds = new Set<string>();
 
       for (const registroReport of registroReports) {
         const strictKey = buildLegacyActivityMirrorKey({
@@ -919,20 +1537,19 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           fecha: registroReport.fecha,
           grupoId: registroReport.grupoId,
           clienteId: registroReport.clienteId,
+          descripcion: registroReport.descripcion,
+          especificacion: registroReport.especificacion,
         });
         const fallbackKey = buildLegacyActivityFallbackKey({
           tecnicoId: registroReport.tecnicoId,
           fecha: registroReport.fecha,
           grupoId: registroReport.grupoId,
+          clienteId: registroReport.clienteId,
+          descripcion: registroReport.descripcion,
         });
 
-        if (!registroReportsByStrictKey.has(strictKey)) {
-          registroReportsByStrictKey.set(strictKey, registroReport);
-        }
-
-        if (!registroReportsByFallbackKey.has(fallbackKey)) {
-          registroReportsByFallbackKey.set(fallbackKey, registroReport);
-        }
+        appendLegacyActivityCandidate(registroReportsByStrictKey, strictKey, registroReport);
+        appendLegacyActivityCandidate(registroReportsByFallbackKey, fallbackKey, registroReport);
       }
 
       for (let index = 0; index < reports.length; index += 1) {
@@ -944,27 +1561,28 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           fecha: report.fecha,
           grupoId: report.grupoId,
           clienteId: report.clienteId,
+          descripcion: report.descripcion,
+          especificacion: report.especificacion,
         });
         const fallbackKey = buildLegacyActivityFallbackKey({
           tecnicoId: report.tecnicoId,
           fecha: report.fecha,
           grupoId: report.grupoId,
+          clienteId: report.clienteId,
+          descripcion: report.descripcion,
         });
-        const relatedReport = registroReportsByStrictKey.get(strictKey) || registroReportsByFallbackKey.get(fallbackKey);
+        const relatedReport = resolveLegacyActivityCandidate(registroReportsByStrictKey.get(strictKey), report)
+          || resolveLegacyActivityCandidate(registroReportsByFallbackKey.get(fallbackKey), report);
 
         if (relatedReport) {
           reports[index] = mergeGroupActivityMetadata(report, relatedReport);
+          matchedRegistroReportIds.add(relatedReport.id);
         }
       }
 
-      const existingKeys = new Set(
-        reports.map((r) => `${r.tecnicoId}|${r.fecha}|${r.clienteId || ""}`)
-      );
       for (const rr of registroReports) {
-        const key = `${rr.tecnicoId}|${rr.fecha}|${rr.clienteId || ""}`;
-        if (!existingKeys.has(key)) {
+        if (!matchedRegistroReportIds.has(rr.id)) {
           reports.push(rr);
-          existingKeys.add(key);
         }
       }
     } catch (err) {
@@ -993,16 +1611,41 @@ export async function updateCostoActividadAdmin(id: string, costoActividad: numb
 
   const { data: report, error: reportLookupError } = await supabase
     .from("reportes_actividad")
-    .select("id, tipo, tecnico_id, fecha, punto_partida, punto_llegada, tipo_recorrido, periodo_id")
+    .select("id, tipo, tecnico_id, grupo_id, cliente_id, descripcion, fecha, punto_partida, punto_llegada, tipo_recorrido, periodo_id, costo_actividad_default")
     .eq("id", id)
     .single();
   if (reportLookupError) throw reportLookupError;
+
+  if (report?.tipo === "visita_tecnica") {
+    const wasSharedVisitUpdated = await updateSharedVisitCostFromReport({
+      reportId: report.id,
+      fecha: report.fecha,
+      grupoId: report.grupo_id,
+      clienteId: report.cliente_id,
+      descripcion: report.descripcion,
+      periodoId: report.periodo_id,
+      defaultCost: report.costo_actividad_default,
+      costoActividad,
+    });
+
+    if (wasSharedVisitUpdated) {
+      invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+      return;
+    }
+  }
+
+  const normalizedDefaultCost = Number(report?.costo_actividad_default ?? 0) || 0;
+  const isVisitValueModified = report?.tipo === "visita_tecnica"
+    ? costoActividad !== normalizedDefaultCost
+    : undefined;
 
   const { error } = await supabase
     .from("reportes_actividad")
     .update({
       costo_actividad: costoActividad,
-      valor_modificado: report?.tipo === "recorrido" ? true : undefined,
+      valor_modificado: report?.tipo === "recorrido"
+        ? true
+        : isVisitValueModified,
     })
     .eq("id", id);
   if (error) throw error;
@@ -1071,7 +1714,11 @@ export async function updateCostoActividadAdmin(id: string, costoActividad: numb
   invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
 }
 
-export async function updateActividadGrupalBaseAdmin(id: string, valorBase: number): Promise<void> {
+export async function updateActividadGrupalBaseAdmin(
+  id: string,
+  valorBase: number,
+  options?: { sourceReportId?: string }
+): Promise<void> {
   const legacyGroupActivity = parseLegacyGroupActivityReportId(id);
   const registroId = legacyGroupActivity?.registroId || id;
 
@@ -1079,21 +1726,21 @@ export async function updateActividadGrupalBaseAdmin(id: string, valorBase: numb
 
   const { data: registro, error: registroError } = await supabase
     .from("registros_actividades")
-    .select("id, fecha, grupo_id, cliente_id, valor_actividad_base")
+    .select("id, fecha, grupo_id, cliente_id, periodo_id, valor_actividad_base")
     .eq("id", registroId)
     .maybeSingle();
 
   if (registroError || !registro) {
     const { data: sourceReport, error: sourceReportError } = await supabase
       .from("reportes_actividad")
-      .select("id, fecha, grupo_id, cliente_id, descripcion")
+      .select("id, fecha, grupo_id, cliente_id, descripcion, periodo_id")
       .eq("id", id)
       .single();
     if (sourceReportError) throw sourceReportError;
 
     let relatedReportsQuery = supabase
       .from("reportes_actividad")
-      .select("id, tecnico_id, costo_actividad")
+      .select("id, tecnico_id, costo_actividad, periodo_id")
       .in("tipo", ["actividad", "actividad_grupal"])
       .eq("fecha", sourceReport.fecha)
       .eq("grupo_id", sourceReport.grupo_id);
@@ -1121,7 +1768,7 @@ export async function updateActividadGrupalBaseAdmin(id: string, valorBase: numb
     );
 
     await Promise.all(
-      participants.map(async (participant: { id: string; tecnico_id: string; costo_actividad?: number | string | null }) => {
+      participants.map(async (participant: { id: string; tecnico_id: string; costo_actividad?: number | string | null; periodo_id?: string | null }) => {
         const currentValue = Number(participant.costo_actividad) || 0;
         const percentage = currentTotal > 0 ? currentValue / currentTotal : 1 / participantsCount;
         const nextTechnicalValue = Math.round(normalizedBaseValue * percentage);
@@ -1135,30 +1782,40 @@ export async function updateActividadGrupalBaseAdmin(id: string, valorBase: numb
           .eq("id", participant.id);
         if (reportUpdateError) throw reportUpdateError;
 
-        const { error: approvalSyncError } = await supabase
-          .from("items_aprobacion")
-          .update({ valor: nextTechnicalValue })
-          .eq("tecnico_id", participant.tecnico_id)
-          .eq("fecha", sourceReport.fecha)
-          .eq("tipo", "actividad");
-        if (approvalSyncError) throw approvalSyncError;
+        await syncGroupedActivityApprovalValue({
+          tecnicoId: participant.tecnico_id,
+          fecha: sourceReport.fecha,
+          valor: nextTechnicalValue,
+          referenceIds: [participant.id],
+        });
 
-        const { error: liquidationSyncError } = await supabase
-          .from("items_liquidacion")
-          .update({
-            valor_base: normalizedBaseValue,
-            valor_ganado: nextTechnicalValue,
-          })
-          .eq("tecnico_id", participant.tecnico_id)
-          .eq("fecha", sourceReport.fecha)
-          .eq("tipo", "actividad");
-        if (liquidationSyncError) throw liquidationSyncError;
+        await syncGroupedActivityLiquidationValue({
+          tecnicoId: participant.tecnico_id,
+          fecha: sourceReport.fecha,
+          valorBase: normalizedBaseValue,
+          valorGanado: nextTechnicalValue,
+          periodoId: participant.periodo_id || sourceReport.periodo_id,
+          referenceIds: [participant.id],
+        });
       })
     );
 
     invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
     invalidateCachedValue("liquidacion:entries");
     return;
+  }
+
+  let sourceReportDescription: string | null = null;
+
+  if (options?.sourceReportId && !options.sourceReportId.startsWith("reg-")) {
+    const { data: sourceReport, error: sourceReportError } = await supabase
+      .from("reportes_actividad")
+      .select("descripcion")
+      .eq("id", options.sourceReportId)
+      .maybeSingle();
+    if (sourceReportError) throw sourceReportError;
+
+    sourceReportDescription = sourceReport?.descripcion || null;
   }
 
   const { data: participantes, error: participantesError } = await supabase
@@ -1171,7 +1828,7 @@ export async function updateActividadGrupalBaseAdmin(id: string, valorBase: numb
 
   let mirroredReportsQuery = supabase
     .from("reportes_actividad")
-    .select("id, tecnico_id")
+    .select("id, tecnico_id, periodo_id")
     .in("tipo", ["actividad", "actividad_grupal"])
     .eq("fecha", registro.fecha)
     .eq("grupo_id", registro.grupo_id);
@@ -1184,6 +1841,10 @@ export async function updateActividadGrupalBaseAdmin(id: string, valorBase: numb
 
   if (participantIds.length > 0) {
     mirroredReportsQuery = mirroredReportsQuery.in("tecnico_id", participantIds);
+  }
+
+  if (sourceReportDescription) {
+    mirroredReportsQuery = mirroredReportsQuery.eq("descripcion", sourceReportDescription);
   }
 
   const { data: mirroredReports, error: mirroredReportsError } = await mirroredReportsQuery;
@@ -1212,9 +1873,10 @@ export async function updateActividadGrupalBaseAdmin(id: string, valorBase: numb
         .eq("tecnico_id", participante.tecnico_id);
       if (error) throw error;
 
-      const mirroredReportIds = (mirroredReports || [])
-        .filter((report: { id: string; tecnico_id: string }) => report.tecnico_id === participante.tecnico_id)
-        .map((report: { id: string }) => report.id);
+      const mirroredReportsForParticipant = (mirroredReports || [])
+        .filter((report: { id: string; tecnico_id: string; periodo_id?: string | null }) => report.tecnico_id === participante.tecnico_id);
+      const mirroredReportIds = mirroredReportsForParticipant.map((report: { id: string }) => report.id);
+      const participantPeriodoId = mirroredReportsForParticipant[0]?.periodo_id || registro.periodo_id;
 
       if (mirroredReportIds.length > 0) {
         const { error: mirroredUpdateError } = await supabase
@@ -1227,24 +1889,21 @@ export async function updateActividadGrupalBaseAdmin(id: string, valorBase: numb
         if (mirroredUpdateError) throw mirroredUpdateError;
       }
 
-      const { error: approvalSyncError } = await supabase
-        .from("items_aprobacion")
-        .update({ valor: valorCalculado })
-        .eq("tecnico_id", participante.tecnico_id)
-        .eq("fecha", registro.fecha)
-        .eq("tipo", "actividad");
-      if (approvalSyncError) throw approvalSyncError;
+      await syncGroupedActivityApprovalValue({
+        tecnicoId: participante.tecnico_id,
+        fecha: registro.fecha,
+        valor: valorCalculado,
+        referenceIds: [registroId, ...mirroredReportIds],
+      });
 
-      const { error: liquidationSyncError } = await supabase
-        .from("items_liquidacion")
-        .update({
-          valor_base: normalizedBaseValue,
-          valor_ganado: valorCalculado,
-        })
-        .eq("tecnico_id", participante.tecnico_id)
-        .eq("fecha", registro.fecha)
-        .eq("tipo", "actividad");
-      if (liquidationSyncError) throw liquidationSyncError;
+      await syncGroupedActivityLiquidationValue({
+        tecnicoId: participante.tecnico_id,
+        fecha: registro.fecha,
+        valorBase: normalizedBaseValue,
+        valorGanado: valorCalculado,
+        periodoId: participantPeriodoId,
+        referenceIds: [registroId, ...mirroredReportIds],
+      });
     })
   );
 

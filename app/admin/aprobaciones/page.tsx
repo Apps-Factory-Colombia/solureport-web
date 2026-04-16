@@ -113,6 +113,16 @@ function isGroupActivity(report: ActivityReport) {
   return report.tipo === "actividad_grupal";
 }
 
+function isSharedVisit(report: ActivityReport) {
+  return report.tipo === "visita_tecnica"
+    && ((report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal) != null
+      || Number(report.porcentajeParticipacion ?? 0) > 0);
+}
+
+function usesSharedBasePricing(report: ActivityReport) {
+  return isGroupActivity(report) || isSharedVisit(report);
+}
+
 function getGroupActivityIdentity(report: ActivityReport) {
   if (!isGroupActivity(report)) return report.id;
 
@@ -130,28 +140,62 @@ function getGroupActivityIdentity(report: ActivityReport) {
   ].join("|");
 }
 
+function getSharedPricingIdentity(report: ActivityReport) {
+  if (isGroupActivity(report)) {
+    return getGroupActivityIdentity(report);
+  }
+
+  if (isSharedVisit(report)) {
+    return [
+      "shared-visit",
+      report.fecha,
+      report.periodoId || "sin-periodo",
+      report.grupoId,
+      report.clienteId || "sin-cliente",
+      normalizeSearchValue(report.descripcion),
+    ].join("|");
+  }
+
+  return report.id;
+}
+
 function getSharedGroupBaseValue(report: ActivityReport) {
   return report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal ?? report.costoActividad;
 }
 
 function getSharedGroupReferenceBaseValue(report: ActivityReport) {
+  if (isSharedVisit(report)) {
+    if ((Number(report.valorActividadBaseGlobal ?? 0) || 0) > 0) {
+      return Number(report.valorActividadBaseGlobal ?? 0) || 0;
+    }
+
+    const participantDefaultValue = Number(report.costoActividadDefault ?? 0) || 0;
+    const percentage = Number(report.porcentajeParticipacion ?? 0) || 0;
+
+    if (participantDefaultValue > 0 && percentage > 0) {
+      return Number(((participantDefaultValue * 100) / percentage).toFixed(2));
+    }
+
+    return participantDefaultValue;
+  }
+
   return report.valorActividadBaseGlobal ?? getSharedGroupBaseValue(report);
 }
 
 function getCostDraftKey(report: ActivityReport) {
-  return isGroupActivity(report) ? getGroupActivityIdentity(report) : report.id;
+  return usesSharedBasePricing(report) ? getSharedPricingIdentity(report) : report.id;
 }
 
 function getComparisonReferenceValue(report: ActivityReport, defaultCost: number) {
-  return isGroupActivity(report) ? getSharedGroupReferenceBaseValue(report) : defaultCost;
+  return usesSharedBasePricing(report) ? getSharedGroupReferenceBaseValue(report) : defaultCost;
 }
 
 function getComparisonCurrentValue(report: ActivityReport) {
-  return isGroupActivity(report) ? getSharedGroupBaseValue(report) : report.costoActividad;
+  return usesSharedBasePricing(report) ? getSharedGroupBaseValue(report) : report.costoActividad;
 }
 
 function getComparisonCurrentLabel(report: ActivityReport) {
-  return isGroupActivity(report) ? "Base aplicada" : "Valor reportado";
+  return usesSharedBasePricing(report) ? "Base aplicada" : "Valor reportado";
 }
 
 function shouldShowValueChange(report: ActivityReport, referenceValue: number, currentValue: number) {
@@ -287,23 +331,23 @@ export default function AprobacionesPage() {
     }
   }, []);
 
-  const groupActivityStats = useMemo(() => {
+  const sharedActivityStats = useMemo(() => {
     const totalByKey = new Map<string, number>();
     const countByKey = new Map<string, number>();
     const percentageByReportId = new Map<string, number>();
 
     reports.forEach((report) => {
-      if (!isGroupActivity(report)) return;
+      if (!usesSharedBasePricing(report)) return;
 
-      const key = getGroupActivityIdentity(report);
+      const key = getSharedPricingIdentity(report);
       totalByKey.set(key, (totalByKey.get(key) ?? 0) + (Number(report.costoActividad) || 0));
       countByKey.set(key, (countByKey.get(key) ?? 0) + 1);
     });
 
     reports.forEach((report) => {
-      if (!isGroupActivity(report)) return;
+      if (!usesSharedBasePricing(report)) return;
 
-      const key = getGroupActivityIdentity(report);
+      const key = getSharedPricingIdentity(report);
       const total = totalByKey.get(key) ?? 0;
       const explicitPercentage = Number(report.porcentajeParticipacion ?? 0) || 0;
 
@@ -326,23 +370,28 @@ export default function AprobacionesPage() {
 
   const getActivityTotalForReport = useCallback(
     (report: ActivityReport) => {
-      if (!isGroupActivity(report)) return report.costoActividad;
-      return groupActivityStats.totalByKey.get(getGroupActivityIdentity(report)) ?? getSharedGroupBaseValue(report);
+      if (!usesSharedBasePricing(report)) return report.costoActividad;
+
+      if (isSharedVisit(report)) {
+        return getSharedGroupBaseValue(report);
+      }
+
+      return sharedActivityStats.totalByKey.get(getSharedPricingIdentity(report)) ?? getSharedGroupBaseValue(report);
     },
-    [groupActivityStats.totalByKey]
+    [sharedActivityStats.totalByKey]
   );
 
   const getParticipationPercentageForReport = useCallback(
     (report: ActivityReport) => {
-      if (!isGroupActivity(report)) return 100;
-      return groupActivityStats.percentageByReportId.get(report.id) ?? 100;
+      if (!usesSharedBasePricing(report)) return 100;
+      return sharedActivityStats.percentageByReportId.get(report.id) ?? 100;
     },
-    [groupActivityStats.percentageByReportId]
+    [sharedActivityStats.percentageByReportId]
   );
 
   const calculateTechnicalCostForReport = useCallback(
     (report: ActivityReport, activityTotal: number) => {
-      if (!isGroupActivity(report)) return Math.round(activityTotal);
+      if (!usesSharedBasePricing(report)) return Math.round(activityTotal);
 
       const percentage = getParticipationPercentageForReport(report);
       return Math.round((activityTotal * percentage) / 100);
@@ -352,11 +401,16 @@ export default function AprobacionesPage() {
 
   const getEditableValueForReport = useCallback(
     (report: ActivityReport) => {
-      if (isGroupActivity(report)) {
+      if (usesSharedBasePricing(report)) {
         return getActivityTotalForReport(report);
       }
 
-      if (report.tipo === "visita_tecnica" && report.costoActividad <= 0) {
+      if (
+        report.tipo === "visita_tecnica"
+        && report.costoActividad <= 0
+        && !report.valorModificado
+        && !report.motivoModificacionValor
+      ) {
         return companySettings?.costoVisitaTecnicaDefault || 0;
       }
 
@@ -440,7 +494,7 @@ export default function AprobacionesPage() {
     [companySettings]
   );
   const applySharedGroupBaseToReport = useCallback((report: ActivityReport, nextBaseValue: number) => {
-    if (!isGroupActivity(report)) return report;
+    if (!usesSharedBasePricing(report)) return report;
 
     const previousTotal = getActivityTotalForReport(report);
     const derivedPercentage = getParticipationPercentageForReport(report);
@@ -645,15 +699,21 @@ export default function AprobacionesPage() {
   }, [getReportEmailContext]);
 
   const persistCost = useCallback(async (report: ActivityReport, nextCost: number) => {
-    if (isGroupActivity(report)) {
-      const groupKey = getGroupActivityIdentity(report);
-      await updateActividadGrupalBaseAdmin(report.registroActividadId || report.id, nextCost);
+    if (usesSharedBasePricing(report)) {
+      const sharedKey = getSharedPricingIdentity(report);
+
+      if (isGroupActivity(report)) {
+        await updateActividadGrupalBaseAdmin(report.registroActividadId || report.id, nextCost, { sourceReportId: report.id });
+      } else {
+        await updateCostoActividadAdmin(report.id, nextCost);
+      }
+
       setReports((prev) => prev.map((item) => {
-        if (!isGroupActivity(item) || getGroupActivityIdentity(item) !== groupKey) return item;
+        if (!usesSharedBasePricing(item) || getSharedPricingIdentity(item) !== sharedKey) return item;
         return applySharedGroupBaseToReport(item, nextCost);
       }));
       setSelectedReport((prev) => {
-        if (!prev || !isGroupActivity(prev) || getGroupActivityIdentity(prev) !== groupKey) return prev;
+        if (!prev || !usesSharedBasePricing(prev) || getSharedPricingIdentity(prev) !== sharedKey) return prev;
         return applySharedGroupBaseToReport(prev, nextCost);
       });
       setInlineCostDrafts((prev) => {
@@ -667,8 +727,23 @@ export default function AprobacionesPage() {
     }
 
     await updateCostoActividadAdmin(report.id, nextCost);
-    setReports((prev) => prev.map((item) => item.id === report.id ? { ...item, costoActividad: nextCost } : item));
-    setSelectedReport((prev) => prev && prev.id === report.id ? { ...prev, costoActividad: nextCost } : prev);
+    const nextVisitModifiedFlag = report.tipo === "visita_tecnica"
+      ? nextCost !== getDefaultCostForReport(report)
+      : report.valorModificado;
+    setReports((prev) => prev.map((item) => item.id === report.id
+      ? {
+        ...item,
+        costoActividad: nextCost,
+        valorModificado: item.tipo === "visita_tecnica" ? nextVisitModifiedFlag : item.valorModificado,
+      }
+      : item));
+    setSelectedReport((prev) => prev && prev.id === report.id
+      ? {
+        ...prev,
+        costoActividad: nextCost,
+        valorModificado: prev.tipo === "visita_tecnica" ? nextVisitModifiedFlag : prev.valorModificado,
+      }
+      : prev);
     setInlineCostDrafts((prev) => {
       const draftKey = getCostDraftKey(report);
       if (!(draftKey in prev)) return prev;
@@ -676,7 +751,7 @@ export default function AprobacionesPage() {
       delete next[draftKey];
       return next;
     });
-  }, [applySharedGroupBaseToReport]);
+  }, [applySharedGroupBaseToReport, getDefaultCostForReport]);
 
   const updateReportStatusInState = useCallback((reportId: string, estado: ActivityReport["estadoAprobacionLider"]) => {
     const nextApprovalDate = estado === "aprobado" ? new Date().toISOString().split("T")[0] : undefined;
@@ -929,7 +1004,7 @@ export default function AprobacionesPage() {
       </CardHeader>
       <CardContent className="p-0">
         {(() => {
-          const showGroupColumns = activeTab === "grupales";
+          const showSharedColumns = activeTab === "grupales" || activeTab === "visitas";
 
           return (
             <Table>
@@ -941,15 +1016,15 @@ export default function AprobacionesPage() {
                   <TableHead>Cliente / Proyecto</TableHead>
                   <TableHead>Estado Lider</TableHead>
                   <TableHead className="text-right">Costo actividad</TableHead>
-                  {showGroupColumns && <TableHead className="text-right">Costo técnico</TableHead>}
-                  {showGroupColumns && <TableHead className="text-right">Porcentaje</TableHead>}
+                  {showSharedColumns && <TableHead className="text-right">Costo técnico</TableHead>}
+                  {showSharedColumns && <TableHead className="text-right">Porcentaje</TableHead>}
                   <TableHead className="text-right">Acciones</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {currentReports.length === 0 ? (
                   <TableRow className="border-border/50">
-                    <TableCell colSpan={showGroupColumns ? 9 : 7} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={showSharedColumns ? 9 : 7} className="py-10 text-center text-sm text-muted-foreground">
                       No hay registros para esta sección con los filtros actuales.
                     </TableCell>
                   </TableRow>
@@ -961,7 +1036,7 @@ export default function AprobacionesPage() {
                   const tipo = getTipoConfig(String(report.tipo));
                   const estado = estadoAprobacionConfig[report.estadoAprobacionLider];
                   const TipoIcon = tipo.icon;
-                  const isSharedGroup = isGroupActivity(report);
+                  const isSharedPricing = usesSharedBasePricing(report);
                   const inlineCostValue = getInlineCostValue(report);
                   const inlineCost = Number(inlineCostValue || 0);
                   const currentEditableValue = getEditableValueForReport(report);
@@ -974,12 +1049,14 @@ export default function AprobacionesPage() {
                   const hasTechnicianChange = shouldShowValueChange(report, comparisonReferenceValue, comparisonCurrentValue);
                   const costDelta = comparisonCurrentValue - comparisonReferenceValue;
                   const participationPercentage = getParticipationPercentageForReport(report);
-                  const participantPreviewValue = isSharedGroup
+                  const currentActivityCost = isSharedPricing ? getActivityTotalForReport(report) : report.costoActividad;
+                  const participantPreviewValue = isSharedPricing
                     ? calculateTechnicalCostForReport(report, inlineCost)
                     : inlineCost;
-                  const currentTechnicalCost = report.costoActividad;
+                  const currentTechnicalCost = isSharedPricing
+                    ? calculateTechnicalCostForReport(report, currentActivityCost)
+                    : report.costoActividad;
                   const displayedTechnicalCost = isInlineCostDirty ? participantPreviewValue : currentTechnicalCost;
-                  const currentActivityCost = isSharedGroup ? getActivityTotalForReport(report) : report.costoActividad;
 
                   return (
                     <TableRow
@@ -1063,9 +1140,9 @@ export default function AprobacionesPage() {
                           )}
                         </div>
                         <p className="mt-1 text-xs text-muted-foreground">
-                          {isSharedGroup ? `Total actual ${formatCurrency(currentActivityCost)}` : `${formatCurrency(currentActivityCost)} actual`}
+                          {isSharedPricing ? `Total actual ${formatCurrency(currentActivityCost)}` : `${formatCurrency(currentActivityCost)} actual`}
                         </p>
-                        {isSharedGroup && (
+                        {isSharedPricing && (
                           <p className="text-xs text-muted-foreground">Suma de todos los involucrados en la actividad.</p>
                         )}
                         {hasTechnicianChange && (
@@ -1074,7 +1151,7 @@ export default function AprobacionesPage() {
                           </p>
                         )}
                       </TableCell>
-                      {showGroupColumns && (
+                      {showSharedColumns && (
                         <TableCell className="text-right">
                           <p className="text-sm font-semibold text-gold">{formatCurrency(displayedTechnicalCost)}</p>
                           <p className="mt-1 text-xs text-muted-foreground">Valor individual del técnico</p>
@@ -1088,7 +1165,7 @@ export default function AprobacionesPage() {
                           )}
                         </TableCell>
                       )}
-                      {showGroupColumns && (
+                      {showSharedColumns && (
                         <TableCell className="text-right">
                           <p className="text-sm font-semibold text-foreground">{participationPercentage}%</p>
                           <p className="mt-1 text-xs text-muted-foreground">Participación asignada</p>
@@ -1457,14 +1534,14 @@ export default function AprobacionesPage() {
               : null;
             const tipo = getTipoConfig(String(selectedReport.tipo));
             const estado = estadoAprobacionConfig[selectedReport.estadoAprobacionLider];
-            const isSharedGroup = isGroupActivity(selectedReport);
+            const isSharedPricing = usesSharedBasePricing(selectedReport);
             const defaultCost = getDefaultCostForReport(selectedReport);
             const comparisonReferenceValue = getComparisonReferenceValue(selectedReport, defaultCost);
             const comparisonCurrentValue = getComparisonCurrentValue(selectedReport);
             const hasTechnicianChange = shouldShowValueChange(selectedReport, comparisonReferenceValue, comparisonCurrentValue);
             const costDelta = comparisonCurrentValue - comparisonReferenceValue;
             const participationPercentage = getParticipationPercentageForReport(selectedReport);
-            const participantPreviewValue = isSharedGroup
+            const participantPreviewValue = isSharedPricing
               ? calculateTechnicalCostForReport(selectedReport, costDraft)
               : costDraft;
             const isDeleting = deletingReportId === selectedReport.id;
@@ -1661,7 +1738,7 @@ export default function AprobacionesPage() {
 
                 <div className="flex items-center justify-between rounded-lg border border-gold/20 bg-gold/5 p-4">
                   <div className="flex-1">
-                    <p className="text-xs text-muted-foreground">{isSharedGroup ? "Costo actividad" : "Costo de la actividad"}</p>
+                    <p className="text-xs text-muted-foreground">{isSharedPricing ? "Costo actividad" : "Costo de la actividad"}</p>
                     <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
                       <div className="relative w-full max-w-xs">
                         <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
@@ -1692,11 +1769,11 @@ export default function AprobacionesPage() {
                       </Button>
                     </div>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      {isSharedGroup
+                      {isSharedPricing
                         ? "Al cambiar el costo actividad se recalculan automáticamente todos los participantes según el porcentaje que les corresponde."
                         : "El admin puede ajustar este valor incluso si la actividad está pendiente o ya fue aprobada."}
                     </p>
-                    {isSharedGroup && (
+                    {isSharedPricing && (
                       <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
                         <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
                           <p className="text-xs text-muted-foreground">Costo actividad registrado</p>

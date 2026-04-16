@@ -164,6 +164,34 @@ function formatCurrency(value: number) {
   }).format(value);
 }
 
+function normalizeSearchValue(value?: string | null) {
+  return (value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function isSharedVisit(report: ActivityReport) {
+  return report.tipo === "visita_tecnica"
+    && ((report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal) != null
+      || Number(report.porcentajeParticipacion ?? 0) > 0);
+}
+
+function getSharedVisitIdentity(report: ActivityReport) {
+  if (!isSharedVisit(report)) return report.id;
+
+  return [
+    "shared-visit",
+    report.fecha,
+    report.periodoId || "sin-periodo",
+    report.grupoId,
+    report.clienteId || "sin-cliente",
+    normalizeSearchValue(report.descripcion),
+  ].join("|");
+}
+
 function parseClientCostInput(value: string): number | null {
   if (!value.trim()) return 0;
 
@@ -421,7 +449,17 @@ export default function InformesPage() {
   }, [getConfiguredRecorridoCost]);
 
   useEffect(() => {
-    setEditableTechnicalCost(selectedReport ? String(getEffectiveTechnicalCost(selectedReport)) : "");
+    const initialTechnicalCost = selectedReport
+      ? String(
+        isSharedVisit(selectedReport)
+          ? (selectedReport.valorActividadAplicadoGlobal
+            ?? selectedReport.valorActividadBaseGlobal
+            ?? (Number(selectedReport.costoActividad ?? 0) || 0))
+          : getEffectiveTechnicalCost(selectedReport)
+      )
+      : "";
+
+    setEditableTechnicalCost(initialTechnicalCost);
     setEditableClientCost(
       selectedReport?.tipo === "visita_tecnica"
         ? String(selectedReport.costoCliente ?? 0)
@@ -469,9 +507,81 @@ export default function InformesPage() {
   const usersById = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
   const clientsById = useMemo(() => new Map(clients.map((client) => [client.id, client])), [clients]);
   const groupsById = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
+
+  const sharedVisitStats = useMemo(() => {
+    const totalByKey = new Map<string, number>();
+    const countByKey = new Map<string, number>();
+    const percentageByReportId = new Map<string, number>();
+
+    reports.forEach((report) => {
+      if (!isSharedVisit(report)) return;
+
+      const key = getSharedVisitIdentity(report);
+      totalByKey.set(key, (totalByKey.get(key) ?? 0) + (Number(report.costoActividad) || 0));
+      countByKey.set(key, (countByKey.get(key) ?? 0) + 1);
+    });
+
+    reports.forEach((report) => {
+      if (!isSharedVisit(report)) return;
+
+      const explicitPercentage = Number(report.porcentajeParticipacion ?? 0) || 0;
+      if (explicitPercentage > 0) {
+        percentageByReportId.set(report.id, explicitPercentage);
+        return;
+      }
+
+      const key = getSharedVisitIdentity(report);
+      const total = totalByKey.get(key) ?? 0;
+      if (total > 0) {
+        percentageByReportId.set(report.id, Number((((Number(report.costoActividad) || 0) / total) * 100).toFixed(2)));
+        return;
+      }
+
+      const count = countByKey.get(key) ?? 1;
+      percentageByReportId.set(report.id, Number((100 / count).toFixed(2)));
+    });
+
+    return { totalByKey, percentageByReportId };
+  }, [reports]);
+
+  const getSharedVisitBaseValue = useCallback(
+    (report: ActivityReport) => {
+      if (!isSharedVisit(report)) return getEffectiveTechnicalCost(report);
+      return report.valorActividadAplicadoGlobal
+        ?? report.valorActividadBaseGlobal
+        ?? sharedVisitStats.totalByKey.get(getSharedVisitIdentity(report))
+        ?? getEffectiveTechnicalCost(report);
+    },
+    [getEffectiveTechnicalCost, sharedVisitStats.totalByKey]
+  );
+
+  const getVisitParticipationPercentage = useCallback(
+    (report: ActivityReport) => {
+      if (!isSharedVisit(report)) return 100;
+      return sharedVisitStats.percentageByReportId.get(report.id) ?? 100;
+    },
+    [sharedVisitStats.percentageByReportId]
+  );
+
+  const getEditableTechnicalCost = useCallback(
+    (report: ActivityReport) => {
+      if (isSharedVisit(report)) {
+        return getSharedVisitBaseValue(report);
+      }
+
+      return getEffectiveTechnicalCost(report);
+    },
+    [getEffectiveTechnicalCost, getSharedVisitBaseValue]
+  );
+
+  const getTechnicalCostDraftKey = useCallback(
+    (report: ActivityReport) => isSharedVisit(report) ? getSharedVisitIdentity(report) : report.id,
+    []
+  );
+
   const getInlineTechnicalCostValue = useCallback(
-    (report: ActivityReport) => inlineTechnicalCostDrafts[report.id] ?? String(getEffectiveTechnicalCost(report)),
-    [getEffectiveTechnicalCost, inlineTechnicalCostDrafts]
+    (report: ActivityReport) => inlineTechnicalCostDrafts[getTechnicalCostDraftKey(report)] ?? String(getEditableTechnicalCost(report)),
+    [getEditableTechnicalCost, getTechnicalCostDraftKey, inlineTechnicalCostDrafts]
   );
 
   const getInlineClientCostValue = useCallback(
@@ -481,23 +591,61 @@ export default function InformesPage() {
 
   const persistTechnicalCost = useCallback(async (report: ActivityReport, nextCost: number) => {
     await updateCostoActividadAdmin(report.id, nextCost);
-    setReports((current) => current.map((item) => item.id === report.id ? {
-      ...item,
-      costoActividad: nextCost,
-      valorModificado: item.tipo === "recorrido" ? nextCost !== getConfiguredRecorridoCost(item) : item.valorModificado,
-    } : item));
-    setSelectedReport((current) => current && current.id === report.id ? {
-      ...current,
-      costoActividad: nextCost,
-      valorModificado: current.tipo === "recorrido" ? nextCost !== getConfiguredRecorridoCost(current) : current.valorModificado,
-    } : current);
+
+    if (isSharedVisit(report)) {
+      const sharedKey = getSharedVisitIdentity(report);
+
+      setReports((current) => current.map((item) => {
+        if (!isSharedVisit(item) || getSharedVisitIdentity(item) !== sharedKey) return item;
+
+        const percentage = getVisitParticipationPercentage(item);
+        const technicalCost = Math.round((nextCost * percentage) / 100);
+
+        return {
+          ...item,
+          costoActividad: technicalCost,
+          valorActividadAplicadoGlobal: nextCost,
+          valorActividadBaseGlobal: item.valorActividadBaseGlobal ?? getSharedVisitBaseValue(item),
+          porcentajeParticipacion: percentage,
+          valorModificado: nextCost !== (item.valorActividadBaseGlobal ?? getSharedVisitBaseValue(item)),
+        };
+      }));
+      setSelectedReport((current) => {
+        if (!current || !isSharedVisit(current) || getSharedVisitIdentity(current) !== sharedKey) return current;
+
+        const percentage = getVisitParticipationPercentage(current);
+        const technicalCost = Math.round((nextCost * percentage) / 100);
+
+        return {
+          ...current,
+          costoActividad: technicalCost,
+          valorActividadAplicadoGlobal: nextCost,
+          valorActividadBaseGlobal: current.valorActividadBaseGlobal ?? getSharedVisitBaseValue(current),
+          porcentajeParticipacion: percentage,
+          valorModificado: nextCost !== (current.valorActividadBaseGlobal ?? getSharedVisitBaseValue(current)),
+        };
+      });
+    } else {
+      setReports((current) => current.map((item) => item.id === report.id ? {
+        ...item,
+        costoActividad: nextCost,
+        valorModificado: item.tipo === "recorrido" ? nextCost !== getConfiguredRecorridoCost(item) : item.valorModificado,
+      } : item));
+      setSelectedReport((current) => current && current.id === report.id ? {
+        ...current,
+        costoActividad: nextCost,
+        valorModificado: current.tipo === "recorrido" ? nextCost !== getConfiguredRecorridoCost(current) : current.valorModificado,
+      } : current);
+    }
+
     setInlineTechnicalCostDrafts((current) => {
-      if (!(report.id in current)) return current;
+      const draftKey = getTechnicalCostDraftKey(report);
+      if (!(draftKey in current)) return current;
       const next = { ...current };
-      delete next[report.id];
+      delete next[draftKey];
       return next;
     });
-  }, [getConfiguredRecorridoCost]);
+  }, [getConfiguredRecorridoCost, getSharedVisitBaseValue, getTechnicalCostDraftKey, getVisitParticipationPercentage]);
 
   const persistVisitClientCost = useCallback(async (report: ActivityReport, nextCost: number | null) => {
     await updateCostoClienteVisitaAdmin(report.id, nextCost, report.visitaTecnicaId);
@@ -515,13 +663,13 @@ export default function InformesPage() {
   const handleInlineSaveTechnicalCost = async (report: ActivityReport) => {
     let nextCost: number;
     try {
-      nextCost = parseTechnicalCostInput(inlineTechnicalCostDrafts[report.id] ?? String(getEffectiveTechnicalCost(report)));
+      nextCost = parseTechnicalCostInput(inlineTechnicalCostDrafts[getTechnicalCostDraftKey(report)] ?? String(getEditableTechnicalCost(report)));
     } catch (err) {
       alert(err instanceof Error ? err.message : "No se pudo interpretar el costo tecnico.");
       return;
     }
 
-    if (nextCost === getEffectiveTechnicalCost(report)) return;
+    if (nextCost === getEditableTechnicalCost(report)) return;
 
     setSavingInlineTechnicalCostId(report.id);
     try {
@@ -591,7 +739,7 @@ export default function InformesPage() {
       return;
     }
 
-    if (nextCost === getEffectiveTechnicalCost(selectedReport)) return;
+    if (nextCost === getEditableTechnicalCost(selectedReport)) return;
 
     setSavingTechnicalCost(true);
     try {
@@ -1982,548 +2130,563 @@ export default function InformesPage() {
               </TabsTrigger>
             </TabsList>
 
-          <TabsContent value="preventivos">
-            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="text-lg text-foreground flex items-center gap-2">
-                  <Wrench className="h-5 w-5 text-blue-400" />
-                  Informes de Mantenimiento Preventivo
-                </CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Reportes generados desde el aplicativo para los mantenimientos programados desde la web. Incluyen firma del receptor, bitácora obligatoria y fotos.
-                </p>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-border/50 hover:bg-transparent">
-                      <TableHead className="text-muted-foreground">Técnico</TableHead>
-                      <TableHead className="text-muted-foreground">Cliente</TableHead>
-                      <TableHead className="text-muted-foreground">Fecha</TableHead>
-                      <TableHead className="text-muted-foreground">Receptor</TableHead>
-                      <TableHead className="text-muted-foreground">Bitácora</TableHead>
-                      <TableHead className="text-muted-foreground">Fotos</TableHead>
-                      <TableHead className="text-muted-foreground">Líder</TableHead>
-                      <TableHead className="text-muted-foreground">Aprobación</TableHead>
-                      <TableHead className="text-muted-foreground">Correo</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-32"></TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {paginatedPreventivos.items.map((r) => {
-                      const tech = usersById.get(r.tecnicoId);
-                      const client = r.clienteId ? clientsById.get(r.clienteId) : null;
-                      const leader = usersById.get(r.liderGrupoId);
-                      return (
-                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
-                          <TableCell className="text-sm font-medium text-foreground">
-                            {tech?.nombre} {tech?.apellido}
-                          </TableCell>
-                          <TableCell>
-                            <p className="text-sm text-foreground/80">{client?.edificio}</p>
-                            {r.especificacion && (
-                              <p className="text-xs text-muted-foreground truncate">
-                                Especificación: {r.especificacion}
-                              </p>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
-                          <TableCell>
-                            {r.datosReceptor ? (
-                              <div className="flex items-center gap-1.5">
-                                <PenLine className="h-3.5 w-3.5 text-gold" />
-                                <div>
-                                  <p className="text-xs text-foreground">{r.datosReceptor.nombre}</p>
-                                  <p className="text-[10px] text-muted-foreground">{r.datosReceptor.cargo}</p>
+            <TabsContent value="preventivos">
+              <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                    <Wrench className="h-5 w-5 text-blue-400" />
+                    Informes de Mantenimiento Preventivo
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground">
+                    Reportes generados desde el aplicativo para los mantenimientos programados desde la web. Incluyen firma del receptor, bitácora obligatoria y fotos.
+                  </p>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="border-border/50 hover:bg-transparent">
+                        <TableHead className="text-muted-foreground">Técnico</TableHead>
+                        <TableHead className="text-muted-foreground">Cliente</TableHead>
+                        <TableHead className="text-muted-foreground">Fecha</TableHead>
+                        <TableHead className="text-muted-foreground">Receptor</TableHead>
+                        <TableHead className="text-muted-foreground">Bitácora</TableHead>
+                        <TableHead className="text-muted-foreground">Fotos</TableHead>
+                        <TableHead className="text-muted-foreground">Líder</TableHead>
+                        <TableHead className="text-muted-foreground">Aprobación</TableHead>
+                        <TableHead className="text-muted-foreground">Correo</TableHead>
+                        <TableHead className="text-muted-foreground text-right">Costo</TableHead>
+                        <TableHead className="text-muted-foreground w-32"></TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {paginatedPreventivos.items.map((r) => {
+                        const tech = usersById.get(r.tecnicoId);
+                        const client = r.clienteId ? clientsById.get(r.clienteId) : null;
+                        const leader = usersById.get(r.liderGrupoId);
+                        return (
+                          <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                            <TableCell className="text-sm font-medium text-foreground">
+                              {tech?.nombre} {tech?.apellido}
+                            </TableCell>
+                            <TableCell>
+                              <p className="text-sm text-foreground/80">{client?.edificio}</p>
+                              {r.especificacion && (
+                                <p className="text-xs text-muted-foreground truncate">
+                                  Especificación: {r.especificacion}
+                                </p>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
+                            <TableCell>
+                              {r.datosReceptor ? (
+                                <div className="flex items-center gap-1.5">
+                                  <PenLine className="h-3.5 w-3.5 text-gold" />
+                                  <div>
+                                    <p className="text-xs text-foreground">{r.datosReceptor.nombre}</p>
+                                    <p className="text-[10px] text-muted-foreground">{r.datosReceptor.cargo}</p>
+                                  </div>
                                 </div>
-                              </div>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {r.bitacora ? (
-                              <Badge variant="outline" className="text-[10px] bg-emerald-500/10 text-emerald-400 border-emerald-500/20">
-                                <BookOpen className="h-3 w-3 mr-0.5" />
-                                Sí
-                              </Badge>
-                            ) : (
-                              <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
-                                No
-                              </Badge>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                              <Image className="h-3 w-3" />
-                              {getEvidenceCount(r)}
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-xs text-foreground/80">
-                            {leader?.nombre} {leader?.apellido}
-                          </TableCell>
-                          <TableCell>
-                            <Badge
-                              variant="outline"
-                              className={cn(
-                                "text-[10px]",
-                                r.estadoAprobacionLider === "aprobado"
-                                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                                  : "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                              )}
-                            >
-                              {r.estadoAprobacionLider === "aprobado" ? (
-                                <><CheckCircle2 className="h-3 w-3 mr-0.5" />Aprobado</>
                               ) : (
-                                <><Clock className="h-3 w-3 mr-0.5" />Pendiente</>
+                                <span className="text-xs text-muted-foreground">—</span>
                               )}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>{renderEmailStatusBadge(r)}</TableCell>
-                          <TableCell className="text-right font-semibold text-gold text-sm">
-                            {formatCurrency(r.costoActividad)}
-                          </TableCell>
-                          <TableCell>{renderActionButtons(r)}</TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-                {renderTablePagination("preventivos", paginatedPreventivos.currentPage, paginatedPreventivos.totalPages)}
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="visitas">
-            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="text-lg text-foreground flex items-center gap-2">
-                  <ClipboardCheck className="h-5 w-5 text-cyan-neon" />
-                  Informes de Visitas Técnicas
-                </CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Visitas del día a día: imprevistos, garantías y emergencias. Al ser aprobada por el líder se convierte automáticamente en actividad y se reporta aquí.
-                </p>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-border/50 hover:bg-transparent">
-                      <TableHead className="text-muted-foreground">Técnico</TableHead>
-                      <TableHead className="text-muted-foreground">Cliente</TableHead>
-                      <TableHead className="text-muted-foreground">Categoría</TableHead>
-                      <TableHead className="text-muted-foreground">Fecha</TableHead>
-                      <TableHead className="text-muted-foreground">Descripción</TableHead>
-                      <TableHead className="text-muted-foreground">Fotos</TableHead>
-                      <TableHead className="text-muted-foreground">Aprobación Líder</TableHead>
-                      <TableHead className="text-muted-foreground">Correo</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Costo técnico</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Costo cliente</TableHead>
-                      <TableHead className="text-muted-foreground w-32"></TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {paginatedVisitas.items.map((r) => {
-                      const tech = usersById.get(r.tecnicoId);
-                      const client = r.clienteId ? clientsById.get(r.clienteId) : null;
-                      const inlineTechnicalCostValue = getInlineTechnicalCostValue(r);
-                      const normalizedCurrentTechnicalCost = r.costoActividad ?? 0;
-                      const normalizedDraftTechnicalCost = inlineTechnicalCostValue.trim() ? Number(inlineTechnicalCostValue) : 0;
-                      const isInlineTechnicalCostDirty = normalizedDraftTechnicalCost !== normalizedCurrentTechnicalCost;
-                      const isInlineTechnicalCostSaving = savingInlineTechnicalCostId === r.id;
-                      const inlineClientCostValue = getInlineClientCostValue(r);
-                      const normalizedCurrentClientCost = r.costoCliente ?? 0;
-                      const normalizedDraftClientCost = inlineClientCostValue.trim() ? Number(inlineClientCostValue) : 0;
-                      const isInlineClientCostDirty = normalizedDraftClientCost !== normalizedCurrentClientCost;
-                      const isInlineClientCostSaving = savingInlineClientCostId === r.id;
-                      return (
-                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
-                          <TableCell className="text-sm font-medium text-foreground">
-                            {tech?.nombre} {tech?.apellido}
-                          </TableCell>
-                          <TableCell className="text-sm text-foreground/80">
-                            {client?.edificio || "—"}
-                          </TableCell>
-                          <TableCell>
-                            <Badge
-                              variant="outline"
-                              className={cn(
-                                "text-[10px]",
-                                r.tipoVisita === "garantia"
-                                  ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                                  : r.tipoVisita === "emergencia"
-                                    ? "bg-red-500/10 text-red-400 border-red-500/20"
-                                    : "bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20"
-                              )}
-                            >
-                              {getVisitCategoryLabel(r.tipoVisita)}
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
-                          <TableCell className="text-sm text-foreground/80 max-w-56 truncate">
-                            <div>
-                              <p className="truncate">{r.descripcion}</p>
-                              {r.especificacion && (
-                                <p className="text-xs text-muted-foreground truncate">
-                                  Especificación: {r.especificacion}
-                                </p>
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                              <Image className="h-3 w-3" />
-                              {getEvidenceCount(r)}
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <Badge
-                              variant="outline"
-                              className={cn(
-                                "text-[10px]",
-                                r.estadoAprobacionLider === "aprobado"
-                                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                                  : "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                              )}
-                            >
-                              {r.estadoAprobacionLider === "aprobado" ? (
-                                <><CheckCircle2 className="h-3 w-3 mr-0.5" />Aprobado → Actividad</>
+                            </TableCell>
+                            <TableCell>
+                              {r.bitacora ? (
+                                <Badge variant="outline" className="text-[10px] bg-emerald-500/10 text-emerald-400 border-emerald-500/20">
+                                  <BookOpen className="h-3 w-3 mr-0.5" />
+                                  Sí
+                                </Badge>
                               ) : (
-                                <><Clock className="h-3 w-3 mr-0.5" />Pendiente</>
+                                <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
+                                  No
+                                </Badge>
                               )}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>{renderEmailStatusBadge(r)}</TableCell>
-                          <TableCell className="text-right">
-                            <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
-                              <div className="relative w-24 sm:w-28">
-                                <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
-                                <Input
-                                  type="number"
-                                  min="0"
-                                  value={inlineTechnicalCostValue}
-                                  onClick={(event) => event.stopPropagation()}
-                                  onChange={(event) =>
-                                    setInlineTechnicalCostDrafts((current) => ({
-                                      ...current,
-                                      [r.id]: event.target.value,
-                                    }))
-                                  }
-                                  className={cn(
-                                    "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
-                                    isInlineTechnicalCostDirty && "border-gold/50 bg-gold/5"
-                                  )}
-                                />
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <Image className="h-3 w-3" />
+                                {getEvidenceCount(r)}
                               </div>
-                              {isInlineTechnicalCostDirty && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    handleInlineSaveTechnicalCost(r);
-                                  }}
-                                  disabled={isInlineTechnicalCostSaving}
-                                >
-                                  {isInlineTechnicalCostSaving ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                  ) : (
-                                    <Save className="h-4 w-4" />
-                                  )}
-                                </Button>
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
-                              <div className="relative w-24 sm:w-28">
-                                <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
-                                <Input
-                                  type="number"
-                                  min="0"
-                                  value={inlineClientCostValue}
-                                  onClick={(event) => event.stopPropagation()}
-                                  onChange={(event) =>
-                                    setInlineClientCostDrafts((current) => ({
-                                      ...current,
-                                      [r.id]: event.target.value,
-                                    }))
-                                  }
-                                  className={cn(
-                                    "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
-                                    isInlineClientCostDirty && "border-gold/50 bg-gold/5"
-                                  )}
-                                />
-                              </div>
-                              {isInlineClientCostDirty && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    handleInlineSaveVisitClientCost(r);
-                                  }}
-                                  disabled={isInlineClientCostSaving}
-                                >
-                                  {isInlineClientCostSaving ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                  ) : (
-                                    <Save className="h-4 w-4" />
-                                  )}
-                                </Button>
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell>{renderActionButtons(r)}</TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-                {renderTablePagination("visitas", paginatedVisitas.currentPage, paginatedVisitas.totalPages)}
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="recorridos">
-            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="text-lg text-foreground flex items-center gap-2">
-                  <Route className="h-5 w-5 text-emerald-400" />
-                  Informes de Recorridos
-                </CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Recorridos reportados desde el aplicativo. Incluyen punto de partida, punto de llegada, modalidad (normal o con herramienta) y foto obligatoria de herramienta cuando aplica.
-                </p>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-border/50 hover:bg-transparent">
-                      <TableHead className="text-muted-foreground">Técnico</TableHead>
-                      <TableHead className="text-muted-foreground">Fecha</TableHead>
-                      <TableHead className="text-muted-foreground">Partida</TableHead>
-                      <TableHead className="text-muted-foreground">Llegada</TableHead>
-                      <TableHead className="text-muted-foreground">Modalidad</TableHead>
-                      <TableHead className="text-muted-foreground">Herramienta</TableHead>
-                      <TableHead className="text-muted-foreground">Aprobación</TableHead>
-                      <TableHead className="text-muted-foreground">Correo</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-32"></TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {paginatedRecorridos.items.map((r) => {
-                      const tech = usersById.get(r.tecnicoId);
-                      const inlineTechnicalCostValue = getInlineTechnicalCostValue(r);
-                      const normalizedCurrentTechnicalCost = getEffectiveTechnicalCost(r);
-                      const normalizedDraftTechnicalCost = inlineTechnicalCostValue.trim() ? Number(inlineTechnicalCostValue) : 0;
-                      const isInlineTechnicalCostDirty = normalizedDraftTechnicalCost !== normalizedCurrentTechnicalCost;
-                      const isInlineTechnicalCostSaving = savingInlineTechnicalCostId === r.id;
-                      return (
-                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
-                          <TableCell className="text-sm font-medium text-foreground">
-                            {tech?.nombre} {tech?.apellido}
-                          </TableCell>
-                          <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1.5 max-w-40">
-                              <MapPin className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-                              <span className="text-xs text-foreground/80 truncate">{r.puntoPartida}</span>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1.5 max-w-40">
-                              <MapPin className="h-3.5 w-3.5 text-gold shrink-0" />
-                              <span className="text-xs text-foreground/80 truncate">{r.puntoLlegada}</span>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <Badge
-                              variant="outline"
-                              className={cn(
-                                "text-[10px]",
-                                r.tipoRecorrido === "con_herramienta"
-                                  ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                                  : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                              )}
-                            >
-                              {r.tipoRecorrido === "con_herramienta" ? (
-                                <><Package className="h-3 w-3 mr-0.5" />Con Herram.</>
-                              ) : (
-                                <><Route className="h-3 w-3 mr-0.5" />Normal</>
-                              )}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>
-                            {r.fotoHerramienta ? (
-                              <span className="text-xs text-foreground/80 flex items-center gap-1">
-                                <Image className="h-3 w-3 text-amber-400" /> Adjunta
-                              </span>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <Badge
-                              variant="outline"
-                              className={cn(
-                                "text-[10px]",
-                                r.estadoAprobacionLider === "aprobado"
-                                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                                  : "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                              )}
-                            >
-                              {r.estadoAprobacionLider === "aprobado" ? "Aprobado" : "Pendiente"}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>{renderEmailStatusBadge(r)}</TableCell>
-                          <TableCell className="text-right">
-                            <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
-                              <div className="relative w-24 sm:w-28">
-                                <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
-                                <Input
-                                  type="number"
-                                  min="0"
-                                  value={inlineTechnicalCostValue}
-                                  onClick={(event) => event.stopPropagation()}
-                                  onChange={(event) =>
-                                    setInlineTechnicalCostDrafts((current) => ({
-                                      ...current,
-                                      [r.id]: event.target.value,
-                                    }))
-                                  }
-                                  className={cn(
-                                    "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
-                                    isInlineTechnicalCostDirty && "border-gold/50 bg-gold/5"
-                                  )}
-                                />
-                              </div>
-                              {isInlineTechnicalCostDirty && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    handleInlineSaveTechnicalCost(r);
-                                  }}
-                                  disabled={isInlineTechnicalCostSaving}
-                                >
-                                  {isInlineTechnicalCostSaving ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                  ) : (
-                                    <Save className="h-4 w-4" />
-                                  )}
-                                </Button>
-                              )}
-                            </div>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              Configuración actual: {formatCurrency(getConfiguredRecorridoCost(r))}
-                            </p>
-                          </TableCell>
-                          <TableCell>{renderActionButtons(r)}</TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-                {renderTablePagination("recorridos", paginatedRecorridos.currentPage, paginatedRecorridos.totalPages)}
-              </CardContent>
-            </Card>
-          </TabsContent>
-          <TabsContent value="grupales">
-            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="text-lg text-foreground flex items-center gap-2">
-                  <Users className="h-5 w-5 text-purple-400" />
-                  Actividades Grupales
-                </CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Actividades registradas por el líder desde el aplicativo móvil. Cada participante tiene su propio registro con porcentaje y valor calculado.
-                </p>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="border-border/50 hover:bg-transparent">
-                      <TableHead className="text-muted-foreground">Técnico</TableHead>
-                      <TableHead className="text-muted-foreground">Grupo</TableHead>
-                      <TableHead className="text-muted-foreground">Fecha</TableHead>
-                      <TableHead className="text-muted-foreground">Descripción</TableHead>
-                      <TableHead className="text-muted-foreground">Líder</TableHead>
-                      <TableHead className="text-muted-foreground">Aprobación</TableHead>
-                      <TableHead className="text-muted-foreground">Correo</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Costo</TableHead>
-                      <TableHead className="text-muted-foreground w-32"></TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {paginatedGrupales.items.map((r) => {
-                      const tech = usersById.get(r.tecnicoId);
-                      const group = groupsById.get(r.grupoId);
-                      const leader = usersById.get(r.liderGrupoId);
-                      return (
-                        <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
-                          <TableCell className="text-sm font-medium text-foreground">
-                            {tech?.nombre} {tech?.apellido}
-                          </TableCell>
-                          <TableCell className="text-sm text-foreground/80">{group?.nombre || "—"}</TableCell>
-                          <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
-                          <TableCell className="text-sm text-foreground/80 max-w-48 truncate">
-                            <div>
-                              <p className="truncate">{r.descripcion}</p>
-                              {r.especificacion && (
-                                <p className="text-xs text-muted-foreground truncate">
-                                  Especificación: {r.especificacion}
-                                </p>
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-xs text-foreground/80">
-                            {leader?.nombre} {leader?.apellido}
-                          </TableCell>
-                          <TableCell>
-                            <Badge
-                              variant="outline"
-                              className={cn(
-                                "text-[10px]",
-                                r.estadoAprobacionLider === "aprobado"
-                                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                                  : r.estadoAprobacionLider === "rechazado"
-                                    ? "bg-red-500/10 text-red-400 border-red-500/20"
+                            </TableCell>
+                            <TableCell className="text-xs text-foreground/80">
+                              {leader?.nombre} {leader?.apellido}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-[10px]",
+                                  r.estadoAprobacionLider === "aprobado"
+                                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
                                     : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                )}
+                              >
+                                {r.estadoAprobacionLider === "aprobado" ? (
+                                  <><CheckCircle2 className="h-3 w-3 mr-0.5" />Aprobado</>
+                                ) : (
+                                  <><Clock className="h-3 w-3 mr-0.5" />Pendiente</>
+                                )}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>{renderEmailStatusBadge(r)}</TableCell>
+                            <TableCell className="text-right font-semibold text-gold text-sm">
+                              {formatCurrency(r.costoActividad)}
+                            </TableCell>
+                            <TableCell>{renderActionButtons(r)}</TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                  {renderTablePagination("preventivos", paginatedPreventivos.currentPage, paginatedPreventivos.totalPages)}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="visitas">
+              <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                    <ClipboardCheck className="h-5 w-5 text-cyan-neon" />
+                    Informes de Visitas Técnicas
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground">
+                    Visitas del día a día: imprevistos, garantías y emergencias. Al ser aprobada por el líder se convierte automáticamente en actividad y se reporta aquí.
+                  </p>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="border-border/50 hover:bg-transparent">
+                        <TableHead className="text-muted-foreground">Técnico</TableHead>
+                        <TableHead className="text-muted-foreground">Cliente</TableHead>
+                        <TableHead className="text-muted-foreground">Categoría</TableHead>
+                        <TableHead className="text-muted-foreground">Fecha</TableHead>
+                        <TableHead className="text-muted-foreground">Descripción</TableHead>
+                        <TableHead className="text-muted-foreground">Fotos</TableHead>
+                        <TableHead className="text-muted-foreground">Aprobación Líder</TableHead>
+                        <TableHead className="text-muted-foreground">Correo</TableHead>
+                        <TableHead className="text-muted-foreground text-right">Costo técnico</TableHead>
+                        <TableHead className="text-muted-foreground text-right">Costo cliente</TableHead>
+                        <TableHead className="text-muted-foreground w-32"></TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {paginatedVisitas.items.map((r) => {
+                        const tech = usersById.get(r.tecnicoId);
+                        const client = r.clienteId ? clientsById.get(r.clienteId) : null;
+                        const isSharedPricing = isSharedVisit(r);
+                        const participationPercentage = getVisitParticipationPercentage(r);
+                        const inlineTechnicalCostValue = getInlineTechnicalCostValue(r);
+                        const normalizedCurrentTechnicalCost = getEditableTechnicalCost(r);
+                        const normalizedDraftTechnicalCost = inlineTechnicalCostValue.trim() ? Number(inlineTechnicalCostValue) : 0;
+                        const isInlineTechnicalCostDirty = normalizedDraftTechnicalCost !== normalizedCurrentTechnicalCost;
+                        const isInlineTechnicalCostSaving = savingInlineTechnicalCostId === r.id;
+                        const previewTechnicalCost = isSharedPricing
+                          ? Math.round((normalizedDraftTechnicalCost * participationPercentage) / 100)
+                          : normalizedDraftTechnicalCost;
+                        const inlineClientCostValue = getInlineClientCostValue(r);
+                        const normalizedCurrentClientCost = r.costoCliente ?? 0;
+                        const normalizedDraftClientCost = inlineClientCostValue.trim() ? Number(inlineClientCostValue) : 0;
+                        const isInlineClientCostDirty = normalizedDraftClientCost !== normalizedCurrentClientCost;
+                        const isInlineClientCostSaving = savingInlineClientCostId === r.id;
+                        return (
+                          <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                            <TableCell className="text-sm font-medium text-foreground">
+                              {tech?.nombre} {tech?.apellido}
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">
+                              {client?.edificio || "—"}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-[10px]",
+                                  r.tipoVisita === "garantia"
+                                    ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                    : r.tipoVisita === "emergencia"
+                                      ? "bg-red-500/10 text-red-400 border-red-500/20"
+                                      : "bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20"
+                                )}
+                              >
+                                {getVisitCategoryLabel(r.tipoVisita)}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
+                            <TableCell className="text-sm text-foreground/80 max-w-56 truncate">
+                              <div>
+                                <p className="truncate">{r.descripcion}</p>
+                                {r.especificacion && (
+                                  <p className="text-xs text-muted-foreground truncate">
+                                    Especificación: {r.especificacion}
+                                  </p>
+                                )}
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <Image className="h-3 w-3" />
+                                {getEvidenceCount(r)}
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-[10px]",
+                                  r.estadoAprobacionLider === "aprobado"
+                                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                    : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                )}
+                              >
+                                {r.estadoAprobacionLider === "aprobado" ? (
+                                  <><CheckCircle2 className="h-3 w-3 mr-0.5" />Aprobado → Actividad</>
+                                ) : (
+                                  <><Clock className="h-3 w-3 mr-0.5" />Pendiente</>
+                                )}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>{renderEmailStatusBadge(r)}</TableCell>
+                            <TableCell className="text-right">
+                              <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
+                                <div className="relative w-24 sm:w-28">
+                                  <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    value={inlineTechnicalCostValue}
+                                    onClick={(event) => event.stopPropagation()}
+                                    onChange={(event) =>
+                                      setInlineTechnicalCostDrafts((current) => ({
+                                        ...current,
+                                        [getTechnicalCostDraftKey(r)]: event.target.value,
+                                      }))
+                                    }
+                                    className={cn(
+                                      "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
+                                      isInlineTechnicalCostDirty && "border-gold/50 bg-gold/5"
+                                    )}
+                                  />
+                                </div>
+                                {isInlineTechnicalCostDirty && (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      handleInlineSaveTechnicalCost(r);
+                                    }}
+                                    disabled={isInlineTechnicalCostSaving}
+                                  >
+                                    {isInlineTechnicalCostSaving ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Save className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                )}
+                              </div>
+                              {isSharedPricing && (
+                                <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+                                  <p>Base actual: {formatCurrency(getSharedVisitBaseValue(r))}</p>
+                                  <p>Participación: {participationPercentage}%</p>
+                                  <p>Costo técnico: {formatCurrency(r.costoActividad ?? 0)}</p>
+                                  {isInlineTechnicalCostDirty && previewTechnicalCost !== (r.costoActividad ?? 0) && (
+                                    <p className="text-cyan-neon">Nuevo costo técnico: {formatCurrency(previewTechnicalCost)}</p>
+                                  )}
+                                </div>
                               )}
-                            >
-                              {r.estadoAprobacionLider === "aprobado" ? (
-                                <><CheckCircle2 className="h-3 w-3 mr-0.5" />Aprobado</>
-                              ) : r.estadoAprobacionLider === "rechazado" ? (
-                                <>Rechazado</>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
+                                <div className="relative w-24 sm:w-28">
+                                  <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    value={inlineClientCostValue}
+                                    onClick={(event) => event.stopPropagation()}
+                                    onChange={(event) =>
+                                      setInlineClientCostDrafts((current) => ({
+                                        ...current,
+                                        [r.id]: event.target.value,
+                                      }))
+                                    }
+                                    className={cn(
+                                      "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
+                                      isInlineClientCostDirty && "border-gold/50 bg-gold/5"
+                                    )}
+                                  />
+                                </div>
+                                {isInlineClientCostDirty && (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      handleInlineSaveVisitClientCost(r);
+                                    }}
+                                    disabled={isInlineClientCostSaving}
+                                  >
+                                    {isInlineClientCostSaving ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Save className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                )}
+                              </div>
+                            </TableCell>
+                            <TableCell>{renderActionButtons(r)}</TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                  {renderTablePagination("visitas", paginatedVisitas.currentPage, paginatedVisitas.totalPages)}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="recorridos">
+              <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                    <Route className="h-5 w-5 text-emerald-400" />
+                    Informes de Recorridos
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground">
+                    Recorridos reportados desde el aplicativo. Incluyen punto de partida, punto de llegada, modalidad (normal o con herramienta) y foto obligatoria de herramienta cuando aplica.
+                  </p>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="border-border/50 hover:bg-transparent">
+                        <TableHead className="text-muted-foreground">Técnico</TableHead>
+                        <TableHead className="text-muted-foreground">Fecha</TableHead>
+                        <TableHead className="text-muted-foreground">Partida</TableHead>
+                        <TableHead className="text-muted-foreground">Llegada</TableHead>
+                        <TableHead className="text-muted-foreground">Modalidad</TableHead>
+                        <TableHead className="text-muted-foreground">Herramienta</TableHead>
+                        <TableHead className="text-muted-foreground">Aprobación</TableHead>
+                        <TableHead className="text-muted-foreground">Correo</TableHead>
+                        <TableHead className="text-muted-foreground text-right">Costo</TableHead>
+                        <TableHead className="text-muted-foreground w-32"></TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {paginatedRecorridos.items.map((r) => {
+                        const tech = usersById.get(r.tecnicoId);
+                        const inlineTechnicalCostValue = getInlineTechnicalCostValue(r);
+                        const normalizedCurrentTechnicalCost = getEffectiveTechnicalCost(r);
+                        const normalizedDraftTechnicalCost = inlineTechnicalCostValue.trim() ? Number(inlineTechnicalCostValue) : 0;
+                        const isInlineTechnicalCostDirty = normalizedDraftTechnicalCost !== normalizedCurrentTechnicalCost;
+                        const isInlineTechnicalCostSaving = savingInlineTechnicalCostId === r.id;
+                        return (
+                          <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                            <TableCell className="text-sm font-medium text-foreground">
+                              {tech?.nombre} {tech?.apellido}
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1.5 max-w-40">
+                                <MapPin className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                                <span className="text-xs text-foreground/80 truncate">{r.puntoPartida}</span>
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1.5 max-w-40">
+                                <MapPin className="h-3.5 w-3.5 text-gold shrink-0" />
+                                <span className="text-xs text-foreground/80 truncate">{r.puntoLlegada}</span>
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-[10px]",
+                                  r.tipoRecorrido === "con_herramienta"
+                                    ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                    : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                )}
+                              >
+                                {r.tipoRecorrido === "con_herramienta" ? (
+                                  <><Package className="h-3 w-3 mr-0.5" />Con Herram.</>
+                                ) : (
+                                  <><Route className="h-3 w-3 mr-0.5" />Normal</>
+                                )}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>
+                              {r.fotoHerramienta ? (
+                                <span className="text-xs text-foreground/80 flex items-center gap-1">
+                                  <Image className="h-3 w-3 text-amber-400" /> Adjunta
+                                </span>
                               ) : (
-                                <><Clock className="h-3 w-3 mr-0.5" />Pendiente</>
+                                <span className="text-xs text-muted-foreground">—</span>
                               )}
-                            </Badge>
-                          </TableCell>
-                          <TableCell>{renderEmailStatusBadge(r)}</TableCell>
-                          <TableCell className="text-right font-semibold text-gold text-sm">
-                            {formatCurrency(r.costoActividad)}
-                          </TableCell>
-                          <TableCell>{renderActionButtons(r)}</TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-                {renderTablePagination("grupales", paginatedGrupales.currentPage, paginatedGrupales.totalPages)}
-              </CardContent>
-            </Card>
-          </TabsContent>
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-[10px]",
+                                  r.estadoAprobacionLider === "aprobado"
+                                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                    : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                )}
+                              >
+                                {r.estadoAprobacionLider === "aprobado" ? "Aprobado" : "Pendiente"}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>{renderEmailStatusBadge(r)}</TableCell>
+                            <TableCell className="text-right">
+                              <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
+                                <div className="relative w-24 sm:w-28">
+                                  <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    value={inlineTechnicalCostValue}
+                                    onClick={(event) => event.stopPropagation()}
+                                    onChange={(event) =>
+                                      setInlineTechnicalCostDrafts((current) => ({
+                                        ...current,
+                                        [r.id]: event.target.value,
+                                      }))
+                                    }
+                                    className={cn(
+                                      "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
+                                      isInlineTechnicalCostDirty && "border-gold/50 bg-gold/5"
+                                    )}
+                                  />
+                                </div>
+                                {isInlineTechnicalCostDirty && (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      handleInlineSaveTechnicalCost(r);
+                                    }}
+                                    disabled={isInlineTechnicalCostSaving}
+                                  >
+                                    {isInlineTechnicalCostSaving ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Save className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                )}
+                              </div>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                Configuración actual: {formatCurrency(getConfiguredRecorridoCost(r))}
+                              </p>
+                            </TableCell>
+                            <TableCell>{renderActionButtons(r)}</TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                  {renderTablePagination("recorridos", paginatedRecorridos.currentPage, paginatedRecorridos.totalPages)}
+                </CardContent>
+              </Card>
+            </TabsContent>
+            <TabsContent value="grupales">
+              <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+                <CardHeader>
+                  <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                    <Users className="h-5 w-5 text-purple-400" />
+                    Actividades Grupales
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground">
+                    Actividades registradas por el líder desde el aplicativo móvil. Cada participante tiene su propio registro con porcentaje y valor calculado.
+                  </p>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="border-border/50 hover:bg-transparent">
+                        <TableHead className="text-muted-foreground">Técnico</TableHead>
+                        <TableHead className="text-muted-foreground">Grupo</TableHead>
+                        <TableHead className="text-muted-foreground">Fecha</TableHead>
+                        <TableHead className="text-muted-foreground">Descripción</TableHead>
+                        <TableHead className="text-muted-foreground">Líder</TableHead>
+                        <TableHead className="text-muted-foreground">Aprobación</TableHead>
+                        <TableHead className="text-muted-foreground">Correo</TableHead>
+                        <TableHead className="text-muted-foreground text-right">Costo</TableHead>
+                        <TableHead className="text-muted-foreground w-32"></TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {paginatedGrupales.items.map((r) => {
+                        const tech = usersById.get(r.tecnicoId);
+                        const group = groupsById.get(r.grupoId);
+                        const leader = usersById.get(r.liderGrupoId);
+                        return (
+                          <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                            <TableCell className="text-sm font-medium text-foreground">
+                              {tech?.nombre} {tech?.apellido}
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">{group?.nombre || "—"}</TableCell>
+                            <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
+                            <TableCell className="text-sm text-foreground/80 max-w-48 truncate">
+                              <div>
+                                <p className="truncate">{r.descripcion}</p>
+                                {r.especificacion && (
+                                  <p className="text-xs text-muted-foreground truncate">
+                                    Especificación: {r.especificacion}
+                                  </p>
+                                )}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-xs text-foreground/80">
+                              {leader?.nombre} {leader?.apellido}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-[10px]",
+                                  r.estadoAprobacionLider === "aprobado"
+                                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                                    : r.estadoAprobacionLider === "rechazado"
+                                      ? "bg-red-500/10 text-red-400 border-red-500/20"
+                                      : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                )}
+                              >
+                                {r.estadoAprobacionLider === "aprobado" ? (
+                                  <><CheckCircle2 className="h-3 w-3 mr-0.5" />Aprobado</>
+                                ) : r.estadoAprobacionLider === "rechazado" ? (
+                                  <>Rechazado</>
+                                ) : (
+                                  <><Clock className="h-3 w-3 mr-0.5" />Pendiente</>
+                                )}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>{renderEmailStatusBadge(r)}</TableCell>
+                            <TableCell className="text-right font-semibold text-gold text-sm">
+                              {formatCurrency(r.costoActividad)}
+                            </TableCell>
+                            <TableCell>{renderActionButtons(r)}</TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                  {renderTablePagination("grupales", paginatedGrupales.currentPage, paginatedGrupales.totalPages)}
+                </CardContent>
+              </Card>
+            </TabsContent>
           </Tabs>
         ) : (
           <Card className="border-border/50 bg-card/80">
@@ -2556,6 +2719,12 @@ export default function InformesPage() {
             const client = selectedReport.clienteId ? clientsById.get(selectedReport.clienteId) : null;
             const group = groupsById.get(selectedReport.grupoId);
             const totalFotos = getEvidenceCount(selectedReport);
+            const isSharedPricing = isSharedVisit(selectedReport);
+            const participationPercentage = getVisitParticipationPercentage(selectedReport);
+            const editableTechnicalBase = getEditableTechnicalCost(selectedReport);
+            const technicalPreviewValue = isSharedPricing
+              ? Math.round(((editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) * participationPercentage) / 100)
+              : (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0);
 
             return (
               <div className="space-y-5">
@@ -2653,13 +2822,19 @@ export default function InformesPage() {
                       <div>
                         <p className="text-xs text-muted-foreground">Resumen economico</p>
                         <p className="text-sm text-foreground/80">
-                          El costo tecnico corresponde al valor interno del servicio. El costo cliente se define manualmente desde administracion para esta visita.
+                          {isSharedPricing
+                            ? "Esta visita comparte una base global entre varios participantes. El costo técnico del registro se calcula automáticamente según el porcentaje asignado al técnico."
+                            : "El costo tecnico corresponde al valor interno del servicio. El costo cliente se define manualmente desde administracion para esta visita."}
                         </p>
                       </div>
                       <div className="rounded-lg border border-border/50 bg-background/40 p-3 space-y-3">
                         <div className="space-y-1">
-                          <p className="text-xs text-muted-foreground">Editar costo tecnico</p>
-                          <p className="text-xs text-foreground/70">Este valor afecta el costo interno y los reportes asociados.</p>
+                          <p className="text-xs text-muted-foreground">{isSharedPricing ? "Editar costo base" : "Editar costo tecnico"}</p>
+                          <p className="text-xs text-foreground/70">
+                            {isSharedPricing
+                              ? "Al guardar, se recalculan todos los técnicos de esta visita según su porcentaje."
+                              : "Este valor afecta el costo interno y los reportes asociados."}
+                          </p>
                         </div>
                         <div className="relative max-w-40">
                           <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
@@ -2670,24 +2845,32 @@ export default function InformesPage() {
                             onChange={(event) => setEditableTechnicalCost(event.target.value)}
                             className={cn(
                               "pl-9 bg-background/70 border-border/50 text-gold font-semibold",
-                              (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) !== (selectedReport.costoActividad ?? 0)
+                              (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) !== editableTechnicalBase
                               && "border-gold shadow-[0_0_0_1px_rgba(234,179,8,0.25)]"
                             )}
                           />
                         </div>
+                        {isSharedPricing && (
+                          <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 text-xs text-muted-foreground space-y-1">
+                            <p>Base actual: {formatCurrency(getSharedVisitBaseValue(selectedReport))}</p>
+                            <p>Participación: {participationPercentage}%</p>
+                            <p>Costo técnico actual: {formatCurrency(selectedReport.costoActividad ?? 0)}</p>
+                            <p>Vista previa técnico: {formatCurrency(technicalPreviewValue)}</p>
+                          </div>
+                        )}
                         <Button
                           type="button"
                           variant="outline"
                           className="w-full gap-2 border-border/50 text-foreground hover:bg-secondary/40"
                           onClick={handleSaveSelectedTechnicalCost}
-                          disabled={savingTechnicalCost || (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) === (selectedReport.costoActividad ?? 0)}
+                          disabled={savingTechnicalCost || (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) === editableTechnicalBase}
                         >
                           {savingTechnicalCost ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
                           ) : (
                             <Save className="h-4 w-4" />
                           )}
-                          {savingTechnicalCost ? "Guardando..." : "Guardar costo tecnico"}
+                          {savingTechnicalCost ? "Guardando..." : isSharedPricing ? "Guardar costo base" : "Guardar costo tecnico"}
                         </Button>
                       </div>
                     </div>
