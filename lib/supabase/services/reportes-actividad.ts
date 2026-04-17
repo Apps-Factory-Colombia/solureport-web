@@ -82,9 +82,11 @@ interface PeriodoLiquidacionRow {
 }
 
 interface ItemAprobacionRow {
+  id?: string;
   tecnico_id: string;
   fecha: string;
   tipo: string;
+  referencia_id?: string | null;
   estado?: string | null;
   fecha_aprobacion?: string | null;
 }
@@ -185,6 +187,16 @@ interface RecorridoMirrorMaps {
   fallback: Map<string, RecorridoMirrorRow>;
 }
 
+interface SharedParticipantOverride {
+  reportId?: string;
+  tecnicoId: string;
+  percentage: number;
+  valorGanado?: number;
+  periodoId?: string | null;
+  visitId?: string;
+  defaultCost?: number;
+}
+
 function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues: string[]): ActivityReport {
   const normalizedTipo: ActivityReport["tipo"] =
     row.tipo === "actividad"
@@ -264,6 +276,42 @@ function calculateGroupParticipantValue(baseValue: number, porcentaje: number) {
   }
 
   return Math.round(baseValue);
+}
+
+function resolveSharedParticipantOverride(
+  overrides: SharedParticipantOverride[] | undefined,
+  params: { reportId?: string; tecnicoId: string }
+) {
+  if (!overrides || overrides.length === 0) return undefined;
+
+  return overrides.find((candidate) => {
+    if (params.reportId && candidate.reportId && candidate.reportId === params.reportId) {
+      return true;
+    }
+
+    return candidate.tecnicoId === params.tecnicoId;
+  });
+}
+
+function dedupeSharedParticipantOverrides(overrides: SharedParticipantOverride[] | undefined) {
+  if (!overrides || overrides.length === 0) return [];
+
+  const overridesByTechnician = new Map<string, SharedParticipantOverride>();
+
+  overrides.forEach((override) => {
+    const current = overridesByTechnician.get(override.tecnicoId);
+
+    if (!current) {
+      overridesByTechnician.set(override.tecnicoId, override);
+      return;
+    }
+
+    if (!(override.reportId || "").startsWith("reg-") && (current.reportId || "").startsWith("reg-")) {
+      overridesByTechnician.set(override.tecnicoId, override);
+    }
+  });
+
+  return Array.from(overridesByTechnician.values());
 }
 
 function normalizeActivityMatchText(value?: string | null) {
@@ -362,6 +410,23 @@ function resolveLegacyActivityCandidate(
   return filtered.length === 1 ? filtered[0] : undefined;
 }
 
+function resolveLegacyActivityByBaseIdentity(
+  candidates: ActivityReport[] | undefined,
+  target: Pick<ActivityReport, "fecha" | "grupoId" | "clienteId" | "tecnicoId">
+) {
+  if (!candidates || candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0];
+
+  const exactMatches = candidates.filter((candidate) => (
+    candidate.fecha === target.fecha
+    && candidate.grupoId === target.grupoId
+    && (candidate.clienteId || "") === (target.clienteId || "")
+    && candidate.tecnicoId === target.tecnicoId
+  ));
+
+  return exactMatches.length === 1 ? exactMatches[0] : undefined;
+}
+
 function enrichLegacyActivityReport(
   report: ActivityReport,
   mirrors?: LegacyActivityMirrorMaps
@@ -385,7 +450,9 @@ function enrichLegacyActivityReport(
   });
 
   const mirror = resolveLegacyActivityCandidate(mirrors.strict.get(strictKey), report)
-    || resolveLegacyActivityCandidate(mirrors.fallback.get(fallbackKey), report);
+    || resolveLegacyActivityCandidate(mirrors.fallback.get(fallbackKey), report)
+    || resolveLegacyActivityByBaseIdentity(mirrors.strict.get(strictKey), report)
+    || resolveLegacyActivityByBaseIdentity(mirrors.fallback.get(fallbackKey), report);
 
   if (!mirror) return report;
 
@@ -780,10 +847,16 @@ async function syncVisitLiquidationValue(params: {
   fecha: string;
   valorBase: number;
   valorGanado: number;
+  porcentaje?: number;
   periodoId?: string | null;
   referenceIds?: string[];
 }) {
   const uniqueReferenceIds = Array.from(new Set((params.referenceIds || []).filter(Boolean)));
+  const updateData = {
+    valor_base: params.valorBase,
+    valor_ganado: params.valorGanado,
+    ...(params.porcentaje != null ? { porcentaje: params.porcentaje } : {}),
+  };
 
   if (uniqueReferenceIds.length > 0) {
     let lookupQuery = supabase
@@ -804,10 +877,7 @@ async function syncVisitLiquidationValue(params: {
     if (matchingIds.length > 0) {
       const { error: updateError } = await supabase
         .from("items_liquidacion")
-        .update({
-          valor_base: params.valorBase,
-          valor_ganado: params.valorGanado,
-        })
+        .update(updateData)
         .in("id", matchingIds);
       if (updateError) throw updateError;
       return;
@@ -816,10 +886,7 @@ async function syncVisitLiquidationValue(params: {
 
   let fallbackQuery = supabase
     .from("items_liquidacion")
-    .update({
-      valor_base: params.valorBase,
-      valor_ganado: params.valorGanado,
-    })
+    .update(updateData)
     .eq("tipo", "visita_tecnica")
     .eq("tecnico_id", params.tecnicoId)
     .eq("fecha", params.fecha);
@@ -969,25 +1036,44 @@ async function updateSharedVisitCostFromReport(params: {
   periodoId?: string | null;
   defaultCost?: number | string | null;
   costoActividad: number;
+  participantOverrides?: SharedParticipantOverride[];
 }) {
-  const participants = await resolveSharedVisitParticipants(params);
+  const participants: Array<{
+    reportId: string;
+    tecnicoId: string;
+    periodoId?: string | null;
+    visitId?: string;
+    visitDefaultCost: number;
+    percentage: number;
+    valorGanado?: number;
+  }> = params.participantOverrides?.length
+    ? params.participantOverrides.map((participant) => ({
+      reportId: participant.reportId || params.reportId,
+      tecnicoId: participant.tecnicoId,
+      periodoId: participant.periodoId || params.periodoId,
+      visitId: participant.visitId,
+      visitDefaultCost: Number(participant.defaultCost ?? 0) || 0,
+      percentage: Number(participant.percentage ?? 0) || 0,
+      valorGanado: participant.valorGanado,
+    }))
+    : await resolveSharedVisitParticipants(params);
+
   if (participants.length <= 1) {
     return false;
   }
 
   const normalizedBaseValue = Math.max(0, Number(params.costoActividad) || 0);
-  const normalizedDefaultCost = Number(params.defaultCost ?? 0) || 0;
-  const isModified = normalizedBaseValue !== normalizedDefaultCost;
 
   await Promise.all(
     participants.map(async (participant) => {
-      const nextTechnicalValue = calculateGroupParticipantValue(normalizedBaseValue, participant.percentage);
+      const nextTechnicalValue = participant.valorGanado
+        ?? calculateGroupParticipantValue(normalizedBaseValue, participant.percentage);
 
       const { error: reportUpdateError } = await supabase
         .from("reportes_actividad")
         .update({
           costo_actividad: nextTechnicalValue,
-          valor_modificado: isModified,
+          valor_modificado: nextTechnicalValue !== participant.visitDefaultCost,
         })
         .eq("id", participant.reportId);
       if (reportUpdateError) throw reportUpdateError;
@@ -997,7 +1083,7 @@ async function updateSharedVisitCostFromReport(params: {
           .from("visitas_tecnicas")
           .update({
             valor_cobrado_cliente: nextTechnicalValue,
-            valor_modificado: normalizedBaseValue !== participant.visitDefaultCost,
+            valor_modificado: nextTechnicalValue !== participant.visitDefaultCost,
           })
           .eq("id", participant.visitId);
         if (visitUpdateError) throw visitUpdateError;
@@ -1015,6 +1101,7 @@ async function updateSharedVisitCostFromReport(params: {
         fecha: params.fecha,
         valorBase: normalizedBaseValue,
         valorGanado: nextTechnicalValue,
+        porcentaje: participant.percentage,
         periodoId: participant.periodoId,
         referenceIds: [participant.reportId, participant.visitId].filter(Boolean) as string[],
       });
@@ -1163,10 +1250,16 @@ async function syncGroupedActivityLiquidationValue(params: {
   fecha: string;
   valorBase: number;
   valorGanado: number;
+  porcentaje?: number;
   periodoId?: string | null;
   referenceIds?: string[];
 }) {
   const uniqueReferenceIds = Array.from(new Set((params.referenceIds || []).filter(Boolean)));
+  const updateData = {
+    valor_base: params.valorBase,
+    valor_ganado: params.valorGanado,
+    ...(params.porcentaje != null ? { porcentaje: params.porcentaje } : {}),
+  };
 
   if (uniqueReferenceIds.length > 0) {
     let lookupQuery = supabase
@@ -1187,10 +1280,7 @@ async function syncGroupedActivityLiquidationValue(params: {
     if (matchingIds.length > 0) {
       const { error: updateError } = await supabase
         .from("items_liquidacion")
-        .update({
-          valor_base: params.valorBase,
-          valor_ganado: params.valorGanado,
-        })
+        .update(updateData)
         .in("id", matchingIds);
       if (updateError) throw updateError;
       return;
@@ -1199,10 +1289,7 @@ async function syncGroupedActivityLiquidationValue(params: {
 
   let fallbackQuery = supabase
     .from("items_liquidacion")
-    .update({
-      valor_base: params.valorBase,
-      valor_ganado: params.valorGanado,
-    })
+    .update(updateData)
     .eq("tipo", "actividad")
     .eq("tecnico_id", params.tecnicoId)
     .eq("fecha", params.fecha);
@@ -1572,7 +1659,9 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           descripcion: report.descripcion,
         });
         const relatedReport = resolveLegacyActivityCandidate(registroReportsByStrictKey.get(strictKey), report)
-          || resolveLegacyActivityCandidate(registroReportsByFallbackKey.get(fallbackKey), report);
+          || resolveLegacyActivityCandidate(registroReportsByFallbackKey.get(fallbackKey), report)
+          || resolveLegacyActivityByBaseIdentity(registroReportsByStrictKey.get(strictKey), report)
+          || resolveLegacyActivityByBaseIdentity(registroReportsByFallbackKey.get(fallbackKey), report);
 
         if (relatedReport) {
           reports[index] = mergeGroupActivityMetadata(report, relatedReport);
@@ -1594,7 +1683,13 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
   });
 }
 
-export async function updateCostoActividadAdmin(id: string, costoActividad: number): Promise<void> {
+export async function updateCostoActividadAdmin(
+  id: string,
+  costoActividad: number,
+  options?: { sharedVisitParticipants?: SharedParticipantOverride[] }
+): Promise<void> {
+  const normalizedSharedVisitParticipants = dedupeSharedParticipantOverrides(options?.sharedVisitParticipants);
+
   const legacyGroupActivity = parseLegacyGroupActivityReportId(id);
   if (legacyGroupActivity) {
     const { tecnicoId, registroId } = legacyGroupActivity;
@@ -1626,6 +1721,7 @@ export async function updateCostoActividadAdmin(id: string, costoActividad: numb
       periodoId: report.periodo_id,
       defaultCost: report.costo_actividad_default,
       costoActividad,
+      participantOverrides: normalizedSharedVisitParticipants,
     });
 
     if (wasSharedVisitUpdated) {
@@ -1717,26 +1813,34 @@ export async function updateCostoActividadAdmin(id: string, costoActividad: numb
 export async function updateActividadGrupalBaseAdmin(
   id: string,
   valorBase: number,
-  options?: { sourceReportId?: string }
+  options?: { sourceReportId?: string; participantOverrides?: SharedParticipantOverride[] }
 ): Promise<void> {
+  const normalizedParticipantOverrides = dedupeSharedParticipantOverrides(options?.participantOverrides);
   const legacyGroupActivity = parseLegacyGroupActivityReportId(id);
+  const sourceReportLookupId = options?.sourceReportId && !options.sourceReportId.startsWith("reg-")
+    ? options.sourceReportId
+    : (!id.startsWith("reg-") ? id : undefined);
+  const shouldUseReportFlow = !!sourceReportLookupId || normalizedParticipantOverrides.some((override) => {
+    const reportId = override.reportId || "";
+    return !!reportId && !reportId.startsWith("reg-");
+  });
   const registroId = legacyGroupActivity?.registroId || id;
 
   const normalizedBaseValue = Math.max(0, Number(valorBase) || 0);
 
-  const { data: registro, error: registroError } = await supabase
-    .from("registros_actividades")
-    .select("id, fecha, grupo_id, cliente_id, periodo_id, valor_actividad_base")
-    .eq("id", registroId)
-    .maybeSingle();
-
-  if (registroError || !registro) {
+  if (shouldUseReportFlow) {
+    if (!sourceReportLookupId) {
+      throw new Error(`No se encontró una fuente válida para la actividad grupal: ${id}`);
+    }
     const { data: sourceReport, error: sourceReportError } = await supabase
       .from("reportes_actividad")
       .select("id, fecha, grupo_id, cliente_id, descripcion, periodo_id")
-      .eq("id", id)
-      .single();
+      .eq("id", sourceReportLookupId)
+      .maybeSingle();
     if (sourceReportError) throw sourceReportError;
+    if (!sourceReport) {
+      throw new Error(`No se encontró el reporte fuente para la actividad grupal: ${sourceReportLookupId}`);
+    }
 
     let relatedReportsQuery = supabase
       .from("reportes_actividad")
@@ -1770,8 +1874,17 @@ export async function updateActividadGrupalBaseAdmin(
     await Promise.all(
       participants.map(async (participant: { id: string; tecnico_id: string; costo_actividad?: number | string | null; periodo_id?: string | null }) => {
         const currentValue = Number(participant.costo_actividad) || 0;
-        const percentage = currentTotal > 0 ? currentValue / currentTotal : 1 / participantsCount;
-        const nextTechnicalValue = Math.round(normalizedBaseValue * percentage);
+        const participantOverride = resolveSharedParticipantOverride(normalizedParticipantOverrides, {
+          reportId: participant.id,
+          tecnicoId: participant.tecnico_id,
+        });
+        const percentage = participantOverride
+          ? Number(participantOverride.percentage ?? 0) || 0
+          : currentTotal > 0
+            ? Number(((currentValue / currentTotal) * 100).toFixed(2))
+            : Number((100 / participantsCount).toFixed(2));
+        const nextTechnicalValue = participantOverride?.valorGanado
+          ?? calculateGroupParticipantValue(normalizedBaseValue, percentage);
 
         const { error: reportUpdateError } = await supabase
           .from("reportes_actividad")
@@ -1794,7 +1907,8 @@ export async function updateActividadGrupalBaseAdmin(
           fecha: sourceReport.fecha,
           valorBase: normalizedBaseValue,
           valorGanado: nextTechnicalValue,
-          periodoId: participant.periodo_id || sourceReport.periodo_id,
+          porcentaje: percentage,
+          periodoId: participantOverride?.periodoId || participant.periodo_id || sourceReport.periodo_id,
           referenceIds: [participant.id],
         });
       })
@@ -1804,6 +1918,13 @@ export async function updateActividadGrupalBaseAdmin(
     invalidateCachedValue("liquidacion:entries");
     return;
   }
+
+  const { data: registro, error: registroError } = await supabase
+    .from("registros_actividades")
+    .select("id, fecha, grupo_id, cliente_id, periodo_id, valor_actividad_base")
+    .eq("id", registroId)
+    .maybeSingle();
+  if (registroError || !registro) throw registroError || new Error(`No se encontró el registro de actividad grupal: ${registroId}`);
 
   let sourceReportDescription: string | null = null;
 
@@ -1863,12 +1984,18 @@ export async function updateActividadGrupalBaseAdmin(
 
   await Promise.all(
     (participantes || []).map(async (participante: { tecnico_id: string; porcentaje?: number | string | null }) => {
-      const porcentaje = Number(participante.porcentaje ?? 0) || 0;
-      const valorCalculado = calculateGroupParticipantValue(normalizedBaseValue, porcentaje);
+      const participantOverride = resolveSharedParticipantOverride(normalizedParticipantOverrides, {
+        tecnicoId: participante.tecnico_id,
+      });
+      const porcentaje = participantOverride
+        ? Number(participantOverride.percentage ?? 0) || 0
+        : Number(participante.porcentaje ?? 0) || 0;
+      const valorCalculado = participantOverride?.valorGanado
+        ?? calculateGroupParticipantValue(normalizedBaseValue, porcentaje);
 
       const { error } = await supabase
         .from("actividad_participantes")
-        .update({ valor_calculado: valorCalculado })
+        .update({ porcentaje, valor_calculado: valorCalculado })
         .eq("registro_actividad_id", registroId)
         .eq("tecnico_id", participante.tecnico_id);
       if (error) throw error;
@@ -1876,7 +2003,7 @@ export async function updateActividadGrupalBaseAdmin(
       const mirroredReportsForParticipant = (mirroredReports || [])
         .filter((report: { id: string; tecnico_id: string; periodo_id?: string | null }) => report.tecnico_id === participante.tecnico_id);
       const mirroredReportIds = mirroredReportsForParticipant.map((report: { id: string }) => report.id);
-      const participantPeriodoId = mirroredReportsForParticipant[0]?.periodo_id || registro.periodo_id;
+      const participantPeriodoId = participantOverride?.periodoId || mirroredReportsForParticipant[0]?.periodo_id || registro.periodo_id;
 
       if (mirroredReportIds.length > 0) {
         const { error: mirroredUpdateError } = await supabase
@@ -1901,6 +2028,7 @@ export async function updateActividadGrupalBaseAdmin(
         fecha: registro.fecha,
         valorBase: normalizedBaseValue,
         valorGanado: valorCalculado,
+        porcentaje,
         periodoId: participantPeriodoId,
         referenceIds: [registroId, ...mirroredReportIds],
       });
@@ -1931,29 +2059,71 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
         : estado === "rechazado"
           ? "rechazada"
           : "pendiente";
-      const { error: approvalError } = await supabase
+      const { data: approvalItemsByReference, error: approvalLookupError } = await supabase
         .from("items_aprobacion")
-        .update({
-          estado: estadoDB,
-          fecha_aprobacion: estado === "aprobado" ? new Date().toISOString() : null,
-        })
+        .select("id")
         .eq("tecnico_id", tecnicoId)
-        .eq("fecha", registro.fecha)
-        .eq("tipo", "actividad");
+        .eq("tipo", "actividad")
+        .eq("referencia_id", registroId);
+      if (approvalLookupError) throw approvalLookupError;
+
+      const approvalPayload = {
+        estado: estadoDB,
+        fecha_aprobacion: estado === "aprobado" ? new Date().toISOString() : null,
+      };
+      const approvalItemIds = (approvalItemsByReference || []).map((item: { id: string }) => item.id);
+      const approvalUpdate = approvalItemIds.length > 0
+        ? supabase
+          .from("items_aprobacion")
+          .update(approvalPayload)
+          .in("id", approvalItemIds)
+        : supabase
+          .from("items_aprobacion")
+          .update(approvalPayload)
+          .eq("tecnico_id", tecnicoId)
+          .eq("fecha", registro.fecha)
+          .eq("tipo", "actividad");
+
+      const { error: approvalError } = await approvalUpdate;
       if (approvalError) throw approvalError;
 
       // También actualizar items_liquidacion
       const estadoLiq = estado === "aprobado" ? "aprobado" : "pendiente";
-      await supabase
+      const { data: liquidationItemsByReference, error: liquidationLookupError } = await supabase
         .from("items_liquidacion")
-        .update({ estado: estadoLiq })
+        .select("id")
         .eq("tecnico_id", tecnicoId)
-        .eq("fecha", registro.fecha)
-        .eq("tipo", "actividad");
+        .eq("tipo", "actividad")
+        .eq("referencia_id", registroId);
+      if (liquidationLookupError) throw liquidationLookupError;
+
+      const liquidationItemIds = (liquidationItemsByReference || []).map((item: { id: string }) => item.id);
+      const liquidationUpdate = liquidationItemIds.length > 0
+        ? supabase
+          .from("items_liquidacion")
+          .update({ estado: estadoLiq })
+          .in("id", liquidationItemIds)
+        : supabase
+          .from("items_liquidacion")
+          .update({ estado: estadoLiq })
+          .eq("tecnico_id", tecnicoId)
+          .eq("fecha", registro.fecha)
+          .eq("tipo", "actividad");
+
+      const { error: liquidationError } = await liquidationUpdate;
+      if (liquidationError) throw liquidationError;
     }
     invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
     return;
   }
+
+  const { data: report, error: reportLookupError } = await supabase
+    .from("reportes_actividad")
+    .select("id, tipo, tecnico_id, fecha, periodo_id")
+    .eq("id", id)
+    .maybeSingle();
+  if (reportLookupError) throw reportLookupError;
+  if (!report) throw new Error(`No se encontró el reporte de actividad: ${id}`);
 
   const { error } = await supabase
     .from("reportes_actividad")
@@ -1963,6 +2133,72 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
     })
     .eq("id", id);
   if (error) throw error;
+
+  if (report.tipo === "actividad_grupal" || report.tipo === "actividad") {
+    const estadoDB = estado === "aprobado"
+      ? "aprobada"
+      : estado === "rechazado"
+        ? "rechazada"
+        : "pendiente";
+    const estadoLiq = estado === "aprobado" ? "aprobado" : "pendiente";
+
+    const { data: approvalItemsByReference, error: approvalLookupError } = await supabase
+      .from("items_aprobacion")
+      .select("id")
+      .eq("tecnico_id", report.tecnico_id)
+      .eq("tipo", "actividad")
+      .eq("referencia_id", report.id);
+    if (approvalLookupError) throw approvalLookupError;
+
+    const approvalPayload = {
+      estado: estadoDB,
+      fecha_aprobacion: estado === "aprobado" ? new Date().toISOString() : null,
+    };
+    const approvalItemIds = (approvalItemsByReference || []).map((item: { id: string }) => item.id);
+    const approvalUpdate = approvalItemIds.length > 0
+      ? supabase
+        .from("items_aprobacion")
+        .update(approvalPayload)
+        .in("id", approvalItemIds)
+      : supabase
+        .from("items_aprobacion")
+        .update(approvalPayload)
+        .eq("tecnico_id", report.tecnico_id)
+        .eq("fecha", report.fecha)
+        .eq("tipo", "actividad");
+
+    const { error: approvalError } = await approvalUpdate;
+    if (approvalError) throw approvalError;
+
+    const { data: liquidationItemsByReference, error: liquidationLookupError } = await supabase
+      .from("items_liquidacion")
+      .select("id")
+      .eq("tecnico_id", report.tecnico_id)
+      .eq("tipo", "actividad")
+      .eq("referencia_id", report.id);
+    if (liquidationLookupError) throw liquidationLookupError;
+
+    const liquidationItemIds = (liquidationItemsByReference || []).map((item: { id: string }) => item.id);
+    let liquidationUpdate = liquidationItemIds.length > 0
+      ? supabase
+        .from("items_liquidacion")
+        .update({ estado: estadoLiq })
+        .in("id", liquidationItemIds)
+      : supabase
+        .from("items_liquidacion")
+        .update({ estado: estadoLiq })
+        .eq("tecnico_id", report.tecnico_id)
+        .eq("fecha", report.fecha)
+        .eq("tipo", "actividad");
+
+    if (report.periodo_id) {
+      liquidationUpdate = liquidationUpdate.eq("periodo_id", report.periodo_id);
+    }
+
+    const { error: liquidationError } = await liquidationUpdate;
+    if (liquidationError) throw liquidationError;
+  }
+
   invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
 }
 

@@ -140,6 +140,31 @@ function getGroupActivityIdentity(report: ActivityReport) {
   ].join("|");
 }
 
+function getVisualActivityIdentity(report: ActivityReport) {
+  if (isGroupActivity(report)) {
+    return [
+      "group-visual",
+      report.fecha,
+      report.periodoId || "sin-periodo",
+      report.grupoId,
+      report.clienteId || "sin-cliente",
+    ].join("|");
+  }
+
+  if (isSharedVisit(report)) {
+    return [
+      "shared-visit-visual",
+      report.fecha,
+      report.periodoId || "sin-periodo",
+      report.grupoId,
+      report.clienteId || "sin-cliente",
+      normalizeSearchValue(report.descripcion),
+    ].join("|");
+  }
+
+  return report.id;
+}
+
 function getSharedPricingIdentity(report: ActivityReport) {
   if (isGroupActivity(report)) {
     return getGroupActivityIdentity(report);
@@ -180,10 +205,6 @@ function getSharedGroupReferenceBaseValue(report: ActivityReport) {
   }
 
   return report.valorActividadBaseGlobal ?? getSharedGroupBaseValue(report);
-}
-
-function getCostDraftKey(report: ActivityReport) {
-  return usesSharedBasePricing(report) ? getSharedPricingIdentity(report) : report.id;
 }
 
 function getComparisonReferenceValue(report: ActivityReport, defaultCost: number) {
@@ -265,6 +286,53 @@ const estadoAprobacionConfig = {
   rechazado: { label: "Rechazado", color: "bg-red-500/10 text-red-400 border-red-500/20", icon: XCircle },
 };
 
+interface ApprovalTableRow {
+  id: string;
+  report: ActivityReport;
+  reports: ActivityReport[];
+  tipo: ActivityReport["tipo"];
+  estadoAprobacionLider: ActivityReport["estadoAprobacionLider"];
+  fechaAprobacionLider?: string;
+  costoActividad: number;
+  participantCount: number;
+  participantNames: string[];
+  isShared: boolean;
+}
+
+interface SharedParticipantDraft {
+  reportId: string;
+  tecnicoId: string;
+  nombre: string;
+  percentage: string;
+  amount: string;
+  periodoId?: string;
+  visitId?: string;
+  defaultCost: number;
+}
+
+function dedupeSharedParticipantDrafts(drafts: SharedParticipantDraft[]) {
+  const draftsByTechnician = new Map<string, SharedParticipantDraft>();
+
+  drafts.forEach((draft) => {
+    const current = draftsByTechnician.get(draft.tecnicoId);
+
+    if (!current) {
+      draftsByTechnician.set(draft.tecnicoId, draft);
+      return;
+    }
+
+    if (!draft.reportId.startsWith("reg-") && current.reportId.startsWith("reg-")) {
+      draftsByTechnician.set(draft.tecnicoId, draft);
+    }
+  });
+
+  return Array.from(draftsByTechnician.values());
+}
+
+function isLegacyGroupDraftReportId(reportId: string) {
+  return reportId.startsWith("reg-");
+}
+
 export default function AprobacionesPage() {
   const [reports, setReports] = useState<ActivityReport[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -284,11 +352,11 @@ export default function AprobacionesPage() {
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [editableCost, setEditableCost] = useState("");
+  const [sharedParticipantDrafts, setSharedParticipantDrafts] = useState<SharedParticipantDraft[]>([]);
   const [savingCost, setSavingCost] = useState(false);
+  const [savingParticipantSplit, setSavingParticipantSplit] = useState(false);
   const [defaultVisitCost, setDefaultVisitCost] = useState("");
   const [savingDefaultVisitCost, setSavingDefaultVisitCost] = useState(false);
-  const [inlineCostDrafts, setInlineCostDrafts] = useState<Record<string, string>>({});
-  const [savingInlineCostId, setSavingInlineCostId] = useState<string | null>(null);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
 
   // Paginación
@@ -422,15 +490,6 @@ export default function AprobacionesPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   useEffect(() => {
-    if (!selectedReport) {
-      setEditableCost("");
-      return;
-    }
-
-    setEditableCost(String(getEditableValueForReport(selectedReport)));
-  }, [getEditableValueForReport, selectedReport]);
-
-  useEffect(() => {
     setDefaultVisitCost(companySettings ? String(companySettings.costoVisitaTecnicaDefault) : "");
   }, [companySettings]);
 
@@ -448,6 +507,15 @@ export default function AprobacionesPage() {
     () => new Map(groups.map((group) => [group.id, group])),
     [groups]
   );
+  const getParticipantName = useCallback((tecnicoId: string) => {
+    const tech = usersById.get(tecnicoId);
+    return [tech?.nombre, tech?.apellido].filter(Boolean).join(" ") || "Técnico sin nombre";
+  }, [usersById]);
+  const getSharedReportsForReport = useCallback((report: ActivityReport) => {
+    if (!usesSharedBasePricing(report)) return [report];
+    const sharedKey = getVisualActivityIdentity(report);
+    return reports.filter((item) => usesSharedBasePricing(item) && getVisualActivityIdentity(item) === sharedKey);
+  }, [reports]);
   const selectedPeriod = useMemo(
     () => periods.find((period) => period.id === selectedPeriodId),
     [periods, selectedPeriodId]
@@ -456,33 +524,6 @@ export default function AprobacionesPage() {
   const periodScopedReports = useMemo(
     () => selectedPeriodId ? reports.filter((report) => report.periodoId === selectedPeriodId) : [],
     [reports, selectedPeriodId]
-  );
-  const preventivos = useMemo(
-    () => periodScopedReports.filter((report) => report.tipo === "mantenimiento_preventivo"),
-    [periodScopedReports]
-  );
-  const visitas = useMemo(
-    () => periodScopedReports.filter((report) => report.tipo === "visita_tecnica"),
-    [periodScopedReports]
-  );
-  const recorridos = useMemo(
-    () => periodScopedReports.filter((report) => report.tipo === "recorrido"),
-    [periodScopedReports]
-  );
-  const grupales = useMemo(
-    () => periodScopedReports.filter((report) => report.tipo === "actividad_grupal"),
-    [periodScopedReports]
-  );
-  const getInlineCostValue = useCallback(
-    (report: ActivityReport) => inlineCostDrafts[getCostDraftKey(report)] ?? String(getEditableValueForReport(report)),
-    [getEditableValueForReport, inlineCostDrafts]
-  );
-  const getNextCostForReport = useCallback(
-    (report: ActivityReport) => {
-      if (selectedReport?.id === report.id) return costDraft;
-      return Number((inlineCostDrafts[getCostDraftKey(report)] ?? String(getEditableValueForReport(report))) || 0);
-    },
-    [costDraft, getEditableValueForReport, inlineCostDrafts, selectedReport]
   );
   const getDefaultCostForReport = useCallback(
     (report: ActivityReport) => {
@@ -493,6 +534,109 @@ export default function AprobacionesPage() {
     },
     [companySettings]
   );
+  const buildSharedParticipantDrafts = useCallback((report: ActivityReport) => {
+    const sharedReports = getSharedReportsForReport(report);
+    return dedupeSharedParticipantDrafts(sharedReports.map((item) => ({
+      reportId: item.id,
+      tecnicoId: item.tecnicoId,
+      nombre: getParticipantName(item.tecnicoId),
+      percentage: String(getParticipationPercentageForReport(item)),
+      amount: String(item.costoActividad),
+      periodoId: item.periodoId,
+      visitId: item.visitaTecnicaId,
+      defaultCost: getDefaultCostForReport(item),
+    })));
+  }, [getDefaultCostForReport, getParticipantName, getParticipationPercentageForReport, getSharedReportsForReport]);
+  const syncParticipantDraftAmounts = useCallback((nextDrafts: SharedParticipantDraft[]) => {
+    const normalized = nextDrafts.map((draft) => ({
+      ...draft,
+      amount: String(Math.max(0, Number(draft.amount || 0))),
+    }));
+    const totalAmount = normalized.reduce((sum, draft) => sum + (Number(draft.amount || 0) || 0), 0);
+
+    return normalized.map((draft, index) => {
+      const amountValue = Math.max(0, Number(draft.amount || 0) || 0);
+      const normalizedPercentage = totalAmount > 0
+        ? index === normalized.length - 1
+          ? Number((100 - normalized.slice(0, index).reduce((sum, item) => {
+            const currentAmount = Math.max(0, Number(item.amount || 0) || 0);
+            return sum + Number(((currentAmount / totalAmount) * 100).toFixed(2));
+          }, 0)).toFixed(2))
+          : Number(((amountValue / totalAmount) * 100).toFixed(2))
+        : Number((100 / Math.max(normalized.length, 1)).toFixed(2));
+
+      return {
+        ...draft,
+        percentage: String(Math.max(0, normalizedPercentage)),
+        amount: String(amountValue),
+      };
+    });
+  }, []);
+  const getNormalizedSharedParticipantDrafts = useCallback(() => {
+    return syncParticipantDraftAmounts(sharedParticipantDrafts).map((draft) => ({
+      ...draft,
+      percentage: Number(draft.percentage || 0) || 0,
+      amount: Number(draft.amount || 0) || 0,
+    }));
+  }, [sharedParticipantDrafts, syncParticipantDraftAmounts]);
+  const handleSharedParticipantAmountChange = useCallback((reportId: string, value: string) => {
+    setSharedParticipantDrafts((current) => syncParticipantDraftAmounts(
+      current.map((draft) => {
+        if (draft.reportId !== reportId) return draft;
+        return {
+          ...draft,
+          amount: String(Math.max(0, Number(value || 0))),
+        };
+      })
+    ));
+  }, [syncParticipantDraftAmounts]);
+  useEffect(() => {
+    if (!selectedReport || !usesSharedBasePricing(selectedReport) || sharedParticipantDrafts.length === 0) return;
+    setSharedParticipantDrafts((current) => syncParticipantDraftAmounts(current));
+  }, [costDraft, selectedReport, sharedParticipantDrafts.length, syncParticipantDraftAmounts]);
+  useEffect(() => {
+    if (!selectedReport) {
+      setEditableCost("");
+      setSharedParticipantDrafts([]);
+      return;
+    }
+
+    setEditableCost(String(getEditableValueForReport(selectedReport)));
+    setSharedParticipantDrafts(usesSharedBasePricing(selectedReport)
+      ? buildSharedParticipantDrafts(selectedReport)
+      : []);
+  }, [buildSharedParticipantDrafts, getEditableValueForReport, selectedReport]);
+  const isSharedParticipantDraftDirty = useMemo(() => {
+    if (!selectedReport || !usesSharedBasePricing(selectedReport)) return false;
+
+    const currentDrafts = syncParticipantDraftAmounts(buildSharedParticipantDrafts(selectedReport));
+    const nextDrafts = syncParticipantDraftAmounts(sharedParticipantDrafts);
+
+    if (currentDrafts.length !== nextDrafts.length) return true;
+
+    return nextDrafts.some((draft) => {
+      const currentDraft = currentDrafts.find((item) => item.reportId === draft.reportId);
+      if (!currentDraft) return true;
+
+      return currentDraft.percentage !== draft.percentage || currentDraft.amount !== draft.amount;
+    });
+  }, [buildSharedParticipantDrafts, selectedReport, sharedParticipantDrafts, syncParticipantDraftAmounts]);
+  const sharedParticipantsDraftSummary = useMemo(() => {
+    const participants = getNormalizedSharedParticipantDrafts();
+    const totalAmount = participants.reduce((sum, participant) => sum + participant.amount, 0);
+    const totalPercentage = Number(participants.reduce((sum, participant) => sum + participant.percentage, 0).toFixed(2));
+    const isAmountBalanced = totalAmount === costDraft;
+    const isPercentageBalanced = Math.abs(totalPercentage - 100) <= 0.05;
+
+    return {
+      participants,
+      totalAmount,
+      totalPercentage,
+      isAmountBalanced,
+      isPercentageBalanced,
+      canSave: participants.length > 0 && isAmountBalanced && isPercentageBalanced,
+    };
+  }, [costDraft, getNormalizedSharedParticipantDrafts]);
   const applySharedGroupBaseToReport = useCallback((report: ActivityReport, nextBaseValue: number) => {
     if (!usesSharedBasePricing(report)) return report;
 
@@ -698,30 +842,77 @@ export default function AprobacionesPage() {
     }
   }, [getReportEmailContext]);
 
-  const persistCost = useCallback(async (report: ActivityReport, nextCost: number) => {
+  const persistCost = useCallback(async (
+    report: ActivityReport,
+    nextCost: number,
+    options?: {
+      sharedParticipants?: Array<{
+        reportId: string;
+        tecnicoId: string;
+        percentage: number;
+        amount: number;
+        periodoId?: string;
+        visitId?: string;
+        defaultCost: number;
+      }>;
+    }
+  ) => {
     if (usesSharedBasePricing(report)) {
-      const sharedKey = getSharedPricingIdentity(report);
+      const sharedKey = getVisualActivityIdentity(report);
 
       if (isGroupActivity(report)) {
-        await updateActividadGrupalBaseAdmin(report.registroActividadId || report.id, nextCost, { sourceReportId: report.id });
+        const realSourceParticipant = options?.sharedParticipants?.find((participant) => !isLegacyGroupDraftReportId(participant.reportId));
+        const sourceReportId = !report.id.startsWith("reg-")
+          ? report.id
+          : realSourceParticipant?.reportId;
+
+        await updateActividadGrupalBaseAdmin(report.registroActividadId || sourceReportId || report.id, nextCost, {
+          sourceReportId,
+          participantOverrides: options?.sharedParticipants?.map((participant) => ({
+            reportId: participant.reportId,
+            tecnicoId: participant.tecnicoId,
+            percentage: participant.percentage,
+            valorGanado: participant.amount,
+            periodoId: participant.periodoId,
+          })),
+        });
       } else {
-        await updateCostoActividadAdmin(report.id, nextCost);
+        await updateCostoActividadAdmin(report.id, nextCost, {
+          sharedVisitParticipants: options?.sharedParticipants?.map((participant) => ({
+            reportId: participant.reportId,
+            tecnicoId: participant.tecnicoId,
+            percentage: participant.percentage,
+            valorGanado: participant.amount,
+            periodoId: participant.periodoId,
+            visitId: participant.visitId,
+            defaultCost: participant.defaultCost,
+          })),
+        });
       }
 
       setReports((prev) => prev.map((item) => {
-        if (!usesSharedBasePricing(item) || getSharedPricingIdentity(item) !== sharedKey) return item;
-        return applySharedGroupBaseToReport(item, nextCost);
+        if (!usesSharedBasePricing(item) || getVisualActivityIdentity(item) !== sharedKey) return item;
+        const participantOverride = options?.sharedParticipants?.find((participant) => participant.reportId === item.id);
+        const nextReport = applySharedGroupBaseToReport(item, nextCost);
+        return participantOverride
+          ? {
+            ...nextReport,
+            costoActividad: participantOverride.amount,
+            porcentajeParticipacion: participantOverride.percentage,
+          }
+          : nextReport;
       }));
       setSelectedReport((prev) => {
-        if (!prev || !usesSharedBasePricing(prev) || getSharedPricingIdentity(prev) !== sharedKey) return prev;
-        return applySharedGroupBaseToReport(prev, nextCost);
-      });
-      setInlineCostDrafts((prev) => {
-        const draftKey = getCostDraftKey(report);
-        if (!(draftKey in prev)) return prev;
-        const next = { ...prev };
-        delete next[draftKey];
-        return next;
+        if (!prev || !usesSharedBasePricing(prev) || getVisualActivityIdentity(prev) !== sharedKey) return prev;
+        const participantOverride = options?.sharedParticipants?.find((participant) => participant.reportId === prev.id);
+        const nextReport = applySharedGroupBaseToReport(prev, nextCost);
+        return participantOverride
+          ? {
+            ...nextReport,
+            costoActividad: participantOverride.amount,
+            porcentajeParticipacion: participantOverride.percentage,
+          }
+          : nextReport;
       });
       return;
     }
@@ -744,13 +935,6 @@ export default function AprobacionesPage() {
         valorModificado: prev.tipo === "visita_tecnica" ? nextVisitModifiedFlag : prev.valorModificado,
       }
       : prev);
-    setInlineCostDrafts((prev) => {
-      const draftKey = getCostDraftKey(report);
-      if (!(draftKey in prev)) return prev;
-      const next = { ...prev };
-      delete next[draftKey];
-      return next;
-    });
   }, [applySharedGroupBaseToReport, getDefaultCostForReport]);
 
   const updateReportStatusInState = useCallback((reportId: string, estado: ActivityReport["estadoAprobacionLider"]) => {
@@ -775,9 +959,38 @@ export default function AprobacionesPage() {
 
   const handleSaveCost = async () => {
     if (!selectedReport) return;
+    if (usesSharedBasePricing(selectedReport) && !sharedParticipantsDraftSummary.canSave) {
+      alert("El reparto técnico debe coincidir con el costo total y sumar 100% antes de guardar.");
+      return;
+    }
     setSavingCost(true);
     try {
-      await persistCost(selectedReport, costDraft);
+      const sharedParticipants = usesSharedBasePricing(selectedReport)
+        ? sharedParticipantsDraftSummary.participants.map((participant) => ({
+          reportId: participant.reportId,
+          tecnicoId: participant.tecnicoId,
+          percentage: participant.percentage,
+          amount: participant.amount,
+          periodoId: participant.periodoId,
+          visitId: participant.visitId,
+          defaultCost: participant.defaultCost,
+        }))
+        : undefined;
+      await persistCost(selectedReport, costDraft, { sharedParticipants });
+      if (usesSharedBasePricing(selectedReport)) {
+        setSharedParticipantDrafts(syncParticipantDraftAmounts(
+          (sharedParticipants || []).map((participant) => ({
+            reportId: participant.reportId,
+            tecnicoId: participant.tecnicoId,
+            nombre: getParticipantName(participant.tecnicoId),
+            percentage: String(participant.percentage),
+            amount: String(participant.amount),
+            periodoId: participant.periodoId,
+            visitId: participant.visitId,
+            defaultCost: participant.defaultCost,
+          }))
+        ));
+      }
     } catch (err) {
       console.error("Error actualizando costo de actividad:", err);
     } finally {
@@ -785,17 +998,43 @@ export default function AprobacionesPage() {
     }
   };
 
-  const handleInlineSaveCost = async (report: ActivityReport) => {
-    const nextCost = Number((inlineCostDrafts[getCostDraftKey(report)] ?? String(getEditableValueForReport(report))) || 0);
-    if (nextCost === getEditableValueForReport(report)) return;
+  const handleSaveParticipantSplit = async () => {
+    if (!selectedReport || !usesSharedBasePricing(selectedReport)) return;
+    if (!sharedParticipantsDraftSummary.canSave) {
+      alert("La suma del reparto debe coincidir con el costo total y los porcentajes deben sumar 100%.");
+      return;
+    }
 
-    setSavingInlineCostId(report.id);
+    setSavingParticipantSplit(true);
     try {
-      await persistCost(report, nextCost);
+      const sharedParticipants = sharedParticipantsDraftSummary.participants.map((participant) => ({
+        reportId: participant.reportId,
+        tecnicoId: participant.tecnicoId,
+        percentage: participant.percentage,
+        amount: participant.amount,
+        periodoId: participant.periodoId,
+        visitId: participant.visitId,
+        defaultCost: participant.defaultCost,
+      }));
+
+      await persistCost(selectedReport, costDraft, { sharedParticipants });
+      setSharedParticipantDrafts(syncParticipantDraftAmounts(
+        sharedParticipants.map((participant) => ({
+          reportId: participant.reportId,
+          tecnicoId: participant.tecnicoId,
+          nombre: getParticipantName(participant.tecnicoId),
+          percentage: String(participant.percentage),
+          amount: String(participant.amount),
+          periodoId: participant.periodoId,
+          visitId: participant.visitId,
+          defaultCost: participant.defaultCost,
+        }))
+      ));
     } catch (err) {
-      console.error("Error actualizando costo de actividad desde la tabla:", err);
+      console.error("Error guardando reparto técnico:", JSON.stringify(err, Object.getOwnPropertyNames(err || {})));
+      alert("No se pudo guardar el reparto técnico. Revisa la consola para más detalle.");
     } finally {
-      setSavingInlineCostId(null);
+      setSavingParticipantSplit(false);
     }
   };
 
@@ -818,28 +1057,46 @@ export default function AprobacionesPage() {
   const handleApprove = useCallback(async (report: ActivityReport) => {
     setProcessing(true);
     try {
-      const nextCost = getNextCostForReport(report);
+      if (usesSharedBasePricing(report) && selectedReport?.id === report.id && !sharedParticipantsDraftSummary.canSave) {
+        alert("Antes de aprobar, el reparto técnico debe sumar el 100% y coincidir con el costo total.");
+        return;
+      }
+      const sharedParticipants = usesSharedBasePricing(report)
+        ? sharedParticipantsDraftSummary.participants.map((participant) => ({
+          reportId: participant.reportId,
+          tecnicoId: participant.tecnicoId,
+          percentage: participant.percentage,
+          amount: participant.amount,
+          periodoId: participant.periodoId,
+          visitId: participant.visitId,
+          defaultCost: participant.defaultCost,
+        }))
+        : undefined;
+      const nextCost = selectedReport?.id === report.id ? costDraft : getEditableValueForReport(report);
       if (nextCost !== getEditableValueForReport(report)) {
-        await persistCost(report, nextCost);
+        await persistCost(report, nextCost, { sharedParticipants });
         report = isGroupActivity(report)
           ? applySharedGroupBaseToReport(report, nextCost)
           : { ...report, costoActividad: nextCost };
       }
-      await updateEstadoAprobacion(report.id, "aprobado");
-      try {
-        await sendApprovalEmail(report);
-      } catch (emailErr) {
-        console.error("Error enviando correo de aprobación:", emailErr);
-      }
-      const tipo = getTipoConfig(String(report.tipo));
-      await createNotificacion({
-        usuarioId: report.tecnicoId,
-        titulo: "Actividad Aprobada",
-        mensaje: `Tu informe de ${tipo.label} del ${report.fecha} ha sido aprobado. Valor: $${report.costoActividad.toLocaleString()}.`,
-        tipo: "aprobacion",
-        datos: { reporteId: report.id, estado: "aprobado" },
-      });
-      updateReportStatusInState(report.id, "aprobado");
+      const approvalTargets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
+      await Promise.all(approvalTargets.map(async (item) => {
+        await updateEstadoAprobacion(item.id, "aprobado");
+        try {
+          await sendApprovalEmail(item);
+        } catch (emailErr) {
+          console.error("Error enviando correo de aprobación:", emailErr);
+        }
+        const tipo = getTipoConfig(String(item.tipo));
+        await createNotificacion({
+          usuarioId: item.tecnicoId,
+          titulo: "Actividad Aprobada",
+          mensaje: `Tu informe de ${tipo.label} del ${item.fecha} ha sido aprobado. Valor: $${item.costoActividad.toLocaleString()}.`,
+          tipo: "aprobacion",
+          datos: { reporteId: item.id, estado: "aprobado" },
+        });
+        updateReportStatusInState(item.id, "aprobado");
+      }));
       setDetailOpen(false);
       setSelectedReport(null);
     } catch (err) {
@@ -847,28 +1104,46 @@ export default function AprobacionesPage() {
     } finally {
       setProcessing(false);
     }
-  }, [applySharedGroupBaseToReport, getNextCostForReport, getEditableValueForReport, persistCost, sendApprovalEmail, updateReportStatusInState]);
+  }, [applySharedGroupBaseToReport, costDraft, getEditableValueForReport, getSharedReportsForReport, persistCost, selectedReport, sendApprovalEmail, sharedParticipantsDraftSummary, updateReportStatusInState]);
 
   const handleReject = useCallback(async (report: ActivityReport) => {
     setProcessing(true);
     try {
-      const nextCost = getNextCostForReport(report);
+      if (usesSharedBasePricing(report) && selectedReport?.id === report.id && !sharedParticipantsDraftSummary.canSave) {
+        alert("Antes de rechazar, deja el reparto técnico consistente con el costo total para evitar inconsistencias.");
+        return;
+      }
+      const sharedParticipants = usesSharedBasePricing(report)
+        ? sharedParticipantsDraftSummary.participants.map((participant) => ({
+          reportId: participant.reportId,
+          tecnicoId: participant.tecnicoId,
+          percentage: participant.percentage,
+          amount: participant.amount,
+          periodoId: participant.periodoId,
+          visitId: participant.visitId,
+          defaultCost: participant.defaultCost,
+        }))
+        : undefined;
+      const nextCost = selectedReport?.id === report.id ? costDraft : getEditableValueForReport(report);
       if (nextCost !== getEditableValueForReport(report)) {
-        await persistCost(report, nextCost);
+        await persistCost(report, nextCost, { sharedParticipants });
         report = isGroupActivity(report)
           ? applySharedGroupBaseToReport(report, nextCost)
           : { ...report, costoActividad: nextCost };
       }
-      await updateEstadoAprobacion(report.id, "rechazado");
-      const tipo = getTipoConfig(String(report.tipo));
-      await createNotificacion({
-        usuarioId: report.tecnicoId,
-        titulo: "Actividad Rechazada",
-        mensaje: `Tu informe de ${tipo.label} del ${report.fecha} ha sido rechazado. Contacta a tu líder para más detalles.`,
-        tipo: "aprobacion",
-        datos: { reporteId: report.id, estado: "rechazado" },
-      });
-      updateReportStatusInState(report.id, "rechazado");
+      const rejectTargets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
+      await Promise.all(rejectTargets.map(async (item) => {
+        await updateEstadoAprobacion(item.id, "rechazado");
+        const tipo = getTipoConfig(String(item.tipo));
+        await createNotificacion({
+          usuarioId: item.tecnicoId,
+          titulo: "Actividad Rechazada",
+          mensaje: `Tu informe de ${tipo.label} del ${item.fecha} ha sido rechazado. Contacta a tu líder para más detalles.`,
+          tipo: "aprobacion",
+          datos: { reporteId: item.id, estado: "rechazado" },
+        });
+        updateReportStatusInState(item.id, "rechazado");
+      }));
       setDetailOpen(false);
       setSelectedReport(null);
     } catch (err) {
@@ -876,13 +1151,16 @@ export default function AprobacionesPage() {
     } finally {
       setProcessing(false);
     }
-  }, [applySharedGroupBaseToReport, getNextCostForReport, getEditableValueForReport, persistCost, updateReportStatusInState]);
+  }, [applySharedGroupBaseToReport, costDraft, getEditableValueForReport, getSharedReportsForReport, persistCost, selectedReport, sharedParticipantsDraftSummary, updateReportStatusInState]);
 
   const handleReactivate = useCallback(async (report: ActivityReport) => {
     setProcessing(true);
     try {
-      await updateEstadoAprobacion(report.id, "pendiente");
-      updateReportStatusInState(report.id, "pendiente");
+      const targets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
+      await Promise.all(targets.map(async (item) => {
+        await updateEstadoAprobacion(item.id, "pendiente");
+        updateReportStatusInState(item.id, "pendiente");
+      }));
       setDetailOpen(false);
       setSelectedReport(null);
     } catch (err) {
@@ -890,7 +1168,7 @@ export default function AprobacionesPage() {
     } finally {
       setProcessing(false);
     }
-  }, [updateReportStatusInState]);
+  }, [getSharedReportsForReport, updateReportStatusInState]);
 
   const handleDelete = useCallback(async (report: ActivityReport) => {
     const confirmed = window.confirm("¿Seguro que deseas eliminar esta actividad? Esta acción no se puede deshacer.");
@@ -898,9 +1176,13 @@ export default function AprobacionesPage() {
 
     setDeletingReportId(report.id);
     try {
-      await deleteReporteActividadAdmin(report.id);
-      setReports((prev) => prev.filter((item) => item.id !== report.id));
-      if (selectedReport?.id === report.id) {
+      const targets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
+      for (const item of targets) {
+        await deleteReporteActividadAdmin(item.id);
+      }
+      const targetIds = new Set(targets.map((item) => item.id));
+      setReports((prev) => prev.filter((item) => !targetIds.has(item.id)));
+      if (selectedReport && targetIds.has(selectedReport.id)) {
         setDetailOpen(false);
         setSelectedReport(null);
       }
@@ -910,74 +1192,152 @@ export default function AprobacionesPage() {
     } finally {
       setDeletingReportId(null);
     }
-  }, [selectedReport]);
+  }, [getSharedReportsForReport, selectedReport]);
 
-  const filtered = useMemo(() => {
+  const groupedReports = useMemo(() => {
+    const grouped = new Map<string, ActivityReport[]>();
+
+    periodScopedReports.forEach((report) => {
+      const key = usesSharedBasePricing(report)
+        ? `${report.tipo}:${getVisualActivityIdentity(report)}`
+        : report.id;
+      const current = grouped.get(key) || [];
+      current.push(report);
+      grouped.set(key, current);
+    });
+
+    return Array.from(grouped.values()).map((items) => {
+      const uniqueTechnicianItems = Array.from(
+        items.reduce((map, item) => {
+          if (!map.has(item.tecnicoId) || item.registroActividadId) {
+            map.set(item.tecnicoId, item);
+          }
+          return map;
+        }, new Map<string, ActivityReport>()).values()
+      );
+      const leadReport = [...items].sort((a, b) => {
+        if (a.id.startsWith("reg-") !== b.id.startsWith("reg-")) {
+          return a.id.startsWith("reg-") ? 1 : -1;
+        }
+
+        if (!!a.registroActividadId !== !!b.registroActividadId) {
+          return a.registroActividadId ? -1 : 1;
+        }
+
+        const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
+        if (creationCompare !== 0) return creationCompare;
+        return b.id.localeCompare(a.id);
+      })[0];
+      const participantNames = Array.from(new Set(uniqueTechnicianItems.map((item) => getParticipantName(item.tecnicoId))));
+      const isShared = usesSharedBasePricing(leadReport) && uniqueTechnicianItems.length > 1;
+      const approvalDate = items
+        .map((item) => item.fechaAprobacionLider)
+        .filter(Boolean)
+        .sort()
+        .at(-1);
+
+      return {
+        id: isShared ? `${leadReport.tipo}:${getVisualActivityIdentity(leadReport)}` : leadReport.id,
+        report: leadReport,
+        reports: uniqueTechnicianItems,
+        tipo: leadReport.tipo,
+        estadoAprobacionLider: (new Set(items.map((item) => item.estadoAprobacionLider))).size > 1
+          ? "pendiente"
+          : items.some((item) => item.estadoAprobacionLider === "pendiente")
+          ? "pendiente"
+          : items.some((item) => item.estadoAprobacionLider === "rechazado")
+            ? "rechazado"
+            : "aprobado",
+        fechaAprobacionLider: approvalDate,
+        costoActividad: isShared ? getActivityTotalForReport(leadReport) : leadReport.costoActividad,
+        participantCount: participantNames.length,
+        participantNames,
+        isShared,
+      } satisfies ApprovalTableRow;
+    });
+  }, [getActivityTotalForReport, getParticipantName, periodScopedReports]);
+  const preventivos = useMemo(
+    () => groupedReports.filter((row) => row.tipo === "mantenimiento_preventivo"),
+    [groupedReports]
+  );
+  const visitas = useMemo(
+    () => groupedReports.filter((row) => row.tipo === "visita_tecnica"),
+    [groupedReports]
+  );
+  const recorridos = useMemo(
+    () => groupedReports.filter((row) => row.tipo === "recorrido"),
+    [groupedReports]
+  );
+  const grupales = useMemo(
+    () => groupedReports.filter((row) => row.tipo === "actividad_grupal"),
+    [groupedReports]
+  );
+
+  const filteredRows = useMemo(() => {
     const normalizedSearch = normalizeSearchValue(search);
     const normalizedTecnicoFilter = normalizeSearchValue(tecnicoFilter);
 
-    return periodScopedReports
-      .filter((r) => {
-        const tech = usersById.get(r.tecnicoId);
-        const client = r.clienteId ? clientsById.get(r.clienteId) : null;
-        const group = groupsById.get(r.grupoId);
-        const techFullName = normalizeSearchValue([tech?.nombre, tech?.apellido].filter(Boolean).join(" "));
+    return groupedReports
+      .filter((row) => {
+        const report = row.report;
+        const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+        const group = groupsById.get(report.grupoId);
+        const participantNames = row.participantNames.map((name) => normalizeSearchValue(name));
         const searchableFields = [
-          techFullName,
+          ...participantNames,
           normalizeSearchValue(client?.edificio),
           normalizeSearchValue(client?.nombre),
           normalizeSearchValue(group?.nombre),
-          normalizeSearchValue(r.fecha),
-          normalizeSearchValue(r.descripcion),
-          normalizeSearchValue(r.especificacion),
+          normalizeSearchValue(report.fecha),
+          normalizeSearchValue(report.descripcion),
+          normalizeSearchValue(report.especificacion),
         ];
         const matchSearch = !normalizedSearch || searchableFields.some((field) => field.includes(normalizedSearch));
-        const matchTecnico = !normalizedTecnicoFilter || techFullName.includes(normalizedTecnicoFilter);
-        const matchDate = !dateFilter || r.fecha === dateFilter;
-        const matchEstado = estadoFilter === "todos" || r.estadoAprobacionLider === estadoFilter;
-        const matchGrupo = grupoFilter === "todos" || r.grupoId === grupoFilter;
+        const matchTecnico = !normalizedTecnicoFilter || participantNames.some((name) => name.includes(normalizedTecnicoFilter));
+        const matchDate = !dateFilter || report.fecha === dateFilter;
+        const matchEstado = estadoFilter === "todos" || row.estadoAprobacionLider === estadoFilter;
+        const matchGrupo = grupoFilter === "todos" || report.grupoId === grupoFilter;
         return matchSearch && matchTecnico && matchDate && matchEstado && matchGrupo;
       })
       .sort((a, b) => {
-        const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
+        const creationCompare = (b.report.fechaCreacion || "").localeCompare(a.report.fechaCreacion || "");
         if (creationCompare !== 0) return creationCompare;
 
-        const dateCompare = (b.fecha || "").localeCompare(a.fecha || "");
+        const dateCompare = (b.report.fecha || "").localeCompare(a.report.fecha || "");
         if (dateCompare !== 0) return dateCompare;
 
-        return b.id.localeCompare(a.id);
+        return b.report.id.localeCompare(a.report.id);
       });
-  }, [periodScopedReports, search, tecnicoFilter, dateFilter, estadoFilter, grupoFilter, usersById, clientsById, groupsById]);
+  }, [groupedReports, search, tecnicoFilter, dateFilter, estadoFilter, grupoFilter, clientsById, groupsById]);
 
   const filteredPreventivos = useMemo(
-    () => filtered.filter((report) => report.tipo === "mantenimiento_preventivo"),
-    [filtered]
+    () => filteredRows.filter((row) => row.tipo === "mantenimiento_preventivo"),
+    [filteredRows]
   );
   const filteredVisitas = useMemo(
-    () => filtered.filter((report) => report.tipo === "visita_tecnica"),
-    [filtered]
+    () => filteredRows.filter((row) => row.tipo === "visita_tecnica"),
+    [filteredRows]
   );
   const filteredRecorridos = useMemo(
-    () => filtered.filter((report) => report.tipo === "recorrido"),
-    [filtered]
+    () => filteredRows.filter((row) => row.tipo === "recorrido"),
+    [filteredRows]
   );
   const filteredGrupales = useMemo(
-    () => filtered.filter((report) => report.tipo === "actividad_grupal"),
-    [filtered]
+    () => filteredRows.filter((row) => row.tipo === "actividad_grupal"),
+    [filteredRows]
   );
 
-  const tabReports = useMemo(() => {
+  const tabRows = useMemo(() => {
     if (activeTab === "visitas") return filteredVisitas;
     if (activeTab === "recorridos") return filteredRecorridos;
     if (activeTab === "grupales") return filteredGrupales;
     return filteredPreventivos;
   }, [activeTab, filteredGrupales, filteredPreventivos, filteredRecorridos, filteredVisitas]);
 
-  // Paginación de resultados filtrados
-  const totalPages = Math.ceil(tabReports.length / itemsPerPage);
+  const totalPages = Math.ceil(tabRows.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
-  const currentReports = tabReports.slice(startIndex, endIndex);
+  const currentRows = tabRows.slice(startIndex, endIndex);
   const visiblePages = Array.from({ length: totalPages }, (_, index) => index + 1).filter((page) => {
     if (totalPages <= 7) return true;
     if (page === 1 || page === totalPages) return true;
@@ -989,12 +1349,12 @@ export default function AprobacionesPage() {
     setCurrentPage(1);
   }, [search, tecnicoFilter, dateFilter, estadoFilter, grupoFilter, activeTab, selectedPeriodId]);
 
-  const totalReportes = periodScopedReports.length;
-  const aprobados = periodScopedReports.filter((r) => r.estadoAprobacionLider === "aprobado").length;
-  const pendientes = periodScopedReports.filter((r) => r.estadoAprobacionLider === "pendiente").length;
-  const totalValor = periodScopedReports
-    .filter((r) => r.estadoAprobacionLider === "aprobado")
-    .reduce((s, r) => s + r.costoActividad, 0);
+  const totalReportes = groupedReports.length;
+  const aprobados = groupedReports.filter((row) => row.estadoAprobacionLider === "aprobado").length;
+  const pendientes = groupedReports.filter((row) => row.estadoAprobacionLider === "pendiente").length;
+  const totalValor = groupedReports
+    .filter((row) => row.estadoAprobacionLider === "aprobado")
+    .reduce((sum, row) => sum + row.costoActividad, 0);
 
   const renderReportsTable = (sectionTitle: string, sectionDescription: string) => (
     <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
@@ -1003,238 +1363,149 @@ export default function AprobacionesPage() {
         <p className="text-sm text-muted-foreground">{sectionDescription}</p>
       </CardHeader>
       <CardContent className="p-0">
-        {(() => {
-          const showSharedColumns = activeTab === "grupales" || activeTab === "visitas";
+        <Table>
+          <TableHeader>
+            <TableRow className="border-border/50 hover:bg-transparent">
+              <TableHead>Fecha</TableHead>
+              <TableHead>Tipo</TableHead>
+              <TableHead>Actividad</TableHead>
+              <TableHead>Cliente / Proyecto</TableHead>
+              <TableHead>Estado</TableHead>
+              <TableHead className="text-right">Costo actividad</TableHead>
+              <TableHead className="text-right">Acciones</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {currentRows.length === 0 ? (
+              <TableRow className="border-border/50">
+                <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                  No hay registros para esta sección con los filtros actuales.
+                </TableCell>
+              </TableRow>
+            ) : currentRows.map((row) => {
+              const report = row.report;
+              const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+              const group = groupsById.get(report.grupoId);
+              const leader = group ? usersById.get(group.liderId) : null;
+              const tipo = getTipoConfig(String(row.tipo));
+              const estado = estadoAprobacionConfig[row.estadoAprobacionLider];
+              const TipoIcon = tipo.icon;
+              const isDeleting = deletingReportId === report.id;
 
-          return (
-            <Table>
-              <TableHeader>
-                <TableRow className="border-border/50 hover:bg-transparent">
-                  <TableHead>Fecha</TableHead>
-                  <TableHead>Tipo</TableHead>
-                  <TableHead>Técnico</TableHead>
-                  <TableHead>Cliente / Proyecto</TableHead>
-                  <TableHead>Estado Lider</TableHead>
-                  <TableHead className="text-right">Costo actividad</TableHead>
-                  {showSharedColumns && <TableHead className="text-right">Costo técnico</TableHead>}
-                  {showSharedColumns && <TableHead className="text-right">Porcentaje</TableHead>}
-                  <TableHead className="text-right">Acciones</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {currentReports.length === 0 ? (
-                  <TableRow className="border-border/50">
-                    <TableCell colSpan={showSharedColumns ? 9 : 7} className="py-10 text-center text-sm text-muted-foreground">
-                      No hay registros para esta sección con los filtros actuales.
-                    </TableCell>
-                  </TableRow>
-                ) : currentReports.map((report) => {
-                  const tech = usersById.get(report.tecnicoId);
-                  const client = report.clienteId ? clientsById.get(report.clienteId) : null;
-                  const group = groupsById.get(report.grupoId);
-                  const leader = group ? usersById.get(group.liderId) : null;
-                  const tipo = getTipoConfig(String(report.tipo));
-                  const estado = estadoAprobacionConfig[report.estadoAprobacionLider];
-                  const TipoIcon = tipo.icon;
-                  const isSharedPricing = usesSharedBasePricing(report);
-                  const inlineCostValue = getInlineCostValue(report);
-                  const inlineCost = Number(inlineCostValue || 0);
-                  const currentEditableValue = getEditableValueForReport(report);
-                  const isInlineCostDirty = inlineCost !== currentEditableValue;
-                  const isInlineSaving = savingInlineCostId === report.id;
-                  const isDeleting = deletingReportId === report.id;
-                  const defaultCost = getDefaultCostForReport(report);
-                  const comparisonReferenceValue = getComparisonReferenceValue(report, defaultCost);
-                  const comparisonCurrentValue = getComparisonCurrentValue(report);
-                  const hasTechnicianChange = shouldShowValueChange(report, comparisonReferenceValue, comparisonCurrentValue);
-                  const costDelta = comparisonCurrentValue - comparisonReferenceValue;
-                  const participationPercentage = getParticipationPercentageForReport(report);
-                  const currentActivityCost = isSharedPricing ? getActivityTotalForReport(report) : report.costoActividad;
-                  const participantPreviewValue = isSharedPricing
-                    ? calculateTechnicalCostForReport(report, inlineCost)
-                    : inlineCost;
-                  const currentTechnicalCost = isSharedPricing
-                    ? calculateTechnicalCostForReport(report, currentActivityCost)
-                    : report.costoActividad;
-                  const displayedTechnicalCost = isInlineCostDirty ? participantPreviewValue : currentTechnicalCost;
-
-                  return (
-                    <TableRow
-                      key={report.id}
-                      className={cn(
-                        "border-border/50 hover:bg-secondary/30",
-                        report.estadoAprobacionLider === "pendiente" && "bg-amber-500/3"
-                      )}
-                    >
-                      <TableCell className="text-sm text-foreground/80 whitespace-nowrap">
-                        {report.fecha}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className={cn("text-[10px] gap-1", tipo.color)}>
-                          <TipoIcon className="h-3 w-3" />
-                          {tipo.label}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        <p className="text-sm font-medium text-foreground">
-                          {tech?.nombre} {tech?.apellido}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          Grupo: {group?.nombre || "Sin grupo"}
-                        </p>
-                      </TableCell>
-                      <TableCell className="max-w-64">
-                        <p className="text-sm text-foreground/80 truncate">
-                          {client ? `${client.nombre} — ${client.edificio}` : report.descripcion}
-                        </p>
-                        {report.especificacion && (
-                          <p className="text-xs text-muted-foreground truncate">
-                            Especificación: {report.especificacion}
-                          </p>
-                        )}
-                        <p className="text-xs text-muted-foreground truncate">
-                          Líder: {leader?.nombre} {leader?.apellido}
-                        </p>
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className={cn("text-xs gap-1", estado.color)}>
-                          <estado.icon className="h-3 w-3" />
-                          {estado.label}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="ml-auto flex w-full max-w-45 items-center justify-end gap-2">
-                          <div className="relative flex-1">
-                            <DollarSign className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gold" />
-                            <Input
-                              type="number"
-                              min="0"
-                              value={inlineCostValue}
-                              onChange={(e) =>
-                                setInlineCostDrafts((prev) => ({
-                                  ...prev,
-                                  [getCostDraftKey(report)]: e.target.value,
-                                }))
-                              }
-                              className={cn(
-                                "h-8 pl-7 pr-2 text-right bg-secondary/50 border-border/50 text-sm font-semibold text-gold",
-                                isInlineCostDirty && "border-gold/50 bg-gold/5"
-                              )}
-                            />
-                          </div>
-                          {isInlineCostDirty && (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 shrink-0 text-gold hover:bg-gold/10 hover:text-gold"
-                              onClick={() => handleInlineSaveCost(report)}
-                              disabled={isInlineSaving || processing || isDeleting}
-                            >
-                              {isInlineSaving ? (
-                                <div className="h-4 w-4 animate-spin rounded-full border-2 border-gold border-t-transparent" />
-                              ) : (
-                                <Save className="h-4 w-4" />
-                              )}
-                            </Button>
-                          )}
-                        </div>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {isSharedPricing ? `Total actual ${formatCurrency(currentActivityCost)}` : `${formatCurrency(currentActivityCost)} actual`}
-                        </p>
-                        {isSharedPricing && (
-                          <p className="text-xs text-muted-foreground">Suma de todos los involucrados en la actividad.</p>
-                        )}
-                        {hasTechnicianChange && (
-                          <p className="text-xs text-amber-400">
-                            {getDefaultValueLabel(report)} {formatCurrency(comparisonReferenceValue)} | Ajuste {formatCurrencyDelta(costDelta)}
-                          </p>
-                        )}
-                      </TableCell>
-                      {showSharedColumns && (
-                        <TableCell className="text-right">
-                          <p className="text-sm font-semibold text-gold">{formatCurrency(displayedTechnicalCost)}</p>
-                          <p className="mt-1 text-xs text-muted-foreground">Valor individual del técnico</p>
-                          <p className="text-xs text-muted-foreground">
-                            Costo técnico actual {formatCurrency(currentTechnicalCost)}
-                          </p>
-                          {isInlineCostDirty && displayedTechnicalCost !== currentTechnicalCost && (
-                            <p className="text-xs text-cyan-neon">
-                              Nuevo valor calculado {formatCurrency(displayedTechnicalCost)}
-                            </p>
-                          )}
-                        </TableCell>
-                      )}
-                      {showSharedColumns && (
-                        <TableCell className="text-right">
-                          <p className="text-sm font-semibold text-foreground">{participationPercentage}%</p>
-                          <p className="mt-1 text-xs text-muted-foreground">Participación asignada</p>
-                        </TableCell>
-                      )}
-                      <TableCell>
-                        <div className="flex items-center gap-1">
+              return (
+                <TableRow
+                  key={row.id}
+                  className={cn(
+                    "border-border/50 hover:bg-secondary/30",
+                    row.estadoAprobacionLider === "pendiente" && "bg-amber-500/3"
+                  )}
+                >
+                  <TableCell className="text-sm text-foreground/80 whitespace-nowrap">{report.fecha}</TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className={cn("text-[10px] gap-1", tipo.color)}>
+                      <TipoIcon className="h-3 w-3" />
+                      {tipo.label}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="max-w-72">
+                    <p className="text-sm font-medium text-foreground truncate">{report.descripcion}</p>
+                    {report.especificacion && (
+                      <p className="text-xs text-muted-foreground truncate">Especificación: {report.especificacion}</p>
+                    )}
+                    <p className="text-xs text-muted-foreground truncate">
+                      {row.isShared
+                        ? `${row.participantCount} técnicos: ${row.participantNames.join(", ")}`
+                        : `Técnico: ${row.participantNames[0] || "Sin técnico"}`}
+                    </p>
+                  </TableCell>
+                  <TableCell className="max-w-64">
+                    <p className="text-sm text-foreground/80 truncate">
+                      {client ? `${client.nombre} — ${client.edificio}` : group?.nombre || report.descripcion}
+                    </p>
+                    <p className="text-xs text-muted-foreground truncate">
+                      Grupo: {group?.nombre || "Sin grupo"}
+                    </p>
+                    <p className="text-xs text-muted-foreground truncate">
+                      Líder: {leader?.nombre} {leader?.apellido}
+                    </p>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className={cn("text-xs gap-1", estado.color)}>
+                      <estado.icon className="h-3 w-3" />
+                      {estado.label}
+                    </Badge>
+                    {row.isShared && (
+                      <p className="mt-1 text-[11px] text-muted-foreground">Se aprueba por actividad completa.</p>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <p className="text-sm font-semibold text-gold">{formatCurrency(row.costoActividad)}</p>
+                    {row.isShared && (
+                      <p className="text-xs text-muted-foreground">Reparto editable en el modal</p>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex items-center justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                        onClick={() => {
+                          setSelectedReport(report);
+                          setDetailOpen(true);
+                        }}
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Button>
+                      {row.estadoAprobacionLider === "pendiente" && (
+                        <>
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                            onClick={() => {
-                              setSelectedReport(report);
-                              setDetailOpen(true);
-                            }}
+                            className="h-8 w-8 text-muted-foreground hover:text-emerald-400"
+                            onClick={() => handleApprove(report)}
+                            disabled={processing || isDeleting}
                           >
-                            <Eye className="h-4 w-4" />
+                            <CheckCircle2 className="h-4 w-4" />
                           </Button>
-                          {report.estadoAprobacionLider === "pendiente" && (
-                            <>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-emerald-400"
-                                onClick={() => handleApprove(report)}
-                                disabled={processing || isInlineSaving || isDeleting}
-                              >
-                                <CheckCircle2 className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8 text-muted-foreground hover:text-red-400"
-                                onClick={() => handleReject(report)}
-                                disabled={processing || isInlineSaving || isDeleting}
-                              >
-                                <XCircle className="h-4 w-4" />
-                              </Button>
-                            </>
-                          )}
-                          {report.estadoAprobacionLider !== "pendiente" && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-cyan-neon"
-                              onClick={() => handleReactivate(report)}
-                              disabled={processing || isInlineSaving || isDeleting}
-                            >
-                              <RotateCcw className="h-4 w-4" />
-                            </Button>
-                          )}
                           <Button
                             variant="ghost"
                             size="icon"
                             className="h-8 w-8 text-muted-foreground hover:text-red-400"
-                            onClick={() => handleDelete(report)}
-                            disabled={processing || isInlineSaving || isDeleting}
+                            onClick={() => handleReject(report)}
+                            disabled={processing || isDeleting}
                           >
-                            {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                            <XCircle className="h-4 w-4" />
                           </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          );
-        })()}
+                        </>
+                      )}
+                      {row.estadoAprobacionLider !== "pendiente" && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-cyan-neon"
+                          onClick={() => handleReactivate(report)}
+                          disabled={processing || isDeleting}
+                        >
+                          <RotateCcw className="h-4 w-4" />
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-red-400"
+                        onClick={() => handleDelete(report)}
+                        disabled={processing || isDeleting}
+                      >
+                        {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
 
         {totalPages > 1 && (
           <div className="overflow-x-auto border-t border-border/50 p-4">
@@ -1505,7 +1776,7 @@ export default function AprobacionesPage() {
             <TabsContent value="grupales">
               {renderReportsTable(
                 "Aprobaciones de Actividades Grupales",
-                "Actividades grupales liquidadas por participante. El valor se revisa desde una base compartida y se recalcula automáticamente según el porcentaje de cada técnico."
+                "Actividades grupales consolidadas por actividad. Desde el detalle puedes ajustar el reparto por técnico y aprobar todo el trabajo en una sola acción."
               )}
             </TabsContent>
           </Tabs>
@@ -1526,6 +1797,12 @@ export default function AprobacionesPage() {
             <DialogTitle className="text-foreground">Detalle del Informe</DialogTitle>
           </DialogHeader>
           {selectedReport && (() => {
+            const modalReports = usesSharedBasePricing(selectedReport) ? getSharedReportsForReport(selectedReport) : [selectedReport];
+            const modalStatus: ActivityReport["estadoAprobacionLider"] = modalReports.some((item) => item.estadoAprobacionLider === "pendiente")
+              ? "pendiente"
+              : modalReports.some((item) => item.estadoAprobacionLider === "rechazado")
+                ? "rechazado"
+                : "aprobado";
             const tech = usersById.get(selectedReport.tecnicoId);
             const leader = usersById.get(selectedReport.liderGrupoId);
             const group = groupsById.get(selectedReport.grupoId);
@@ -1533,17 +1810,16 @@ export default function AprobacionesPage() {
               ? clientsById.get(selectedReport.clienteId)
               : null;
             const tipo = getTipoConfig(String(selectedReport.tipo));
-            const estado = estadoAprobacionConfig[selectedReport.estadoAprobacionLider];
+            const normalizedModalStatus: ActivityReport["estadoAprobacionLider"] = (new Set(modalReports.map((item) => item.estadoAprobacionLider))).size > 1
+              ? "pendiente"
+              : modalStatus;
+            const estado = estadoAprobacionConfig[normalizedModalStatus];
             const isSharedPricing = usesSharedBasePricing(selectedReport);
             const defaultCost = getDefaultCostForReport(selectedReport);
             const comparisonReferenceValue = getComparisonReferenceValue(selectedReport, defaultCost);
             const comparisonCurrentValue = getComparisonCurrentValue(selectedReport);
             const hasTechnicianChange = shouldShowValueChange(selectedReport, comparisonReferenceValue, comparisonCurrentValue);
             const costDelta = comparisonCurrentValue - comparisonReferenceValue;
-            const participationPercentage = getParticipationPercentageForReport(selectedReport);
-            const participantPreviewValue = isSharedPricing
-              ? calculateTechnicalCostForReport(selectedReport, costDraft)
-              : costDraft;
             const isDeleting = deletingReportId === selectedReport.id;
 
             return (
@@ -1560,10 +1836,18 @@ export default function AprobacionesPage() {
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <p className="text-xs text-muted-foreground">Técnico</p>
-                    <p className="text-sm font-medium text-foreground">{tech?.nombre} {tech?.apellido}</p>
-                  </div>
+                  {!isSharedPricing && (
+                    <div className="space-y-1">
+                      <p className="text-xs text-muted-foreground">Técnico</p>
+                      <p className="text-sm font-medium text-foreground">{tech?.nombre} {tech?.apellido}</p>
+                    </div>
+                  )}
+                  {isSharedPricing && (
+                    <div className="space-y-1">
+                      <p className="text-xs text-muted-foreground">Actividad compartida</p>
+                      <p className="text-sm font-medium text-foreground">{sharedParticipantDrafts.length} técnicos involucrados</p>
+                    </div>
+                  )}
                   <div className="space-y-1">
                     <p className="text-xs text-muted-foreground">Líder de Grupo</p>
                     <p className="text-sm font-medium text-foreground">{leader?.nombre} {leader?.apellido}</p>
@@ -1758,7 +2042,7 @@ export default function AprobacionesPage() {
                         variant="outline"
                         className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
                         onClick={handleSaveCost}
-                        disabled={!isCostDirty || savingCost || processing}
+                        disabled={(!(isCostDirty || isSharedParticipantDraftDirty)) || savingCost || processing}
                       >
                         {savingCost ? (
                           <div className="h-4 w-4 animate-spin rounded-full border-2 border-gold border-t-transparent" />
@@ -1770,23 +2054,95 @@ export default function AprobacionesPage() {
                     </div>
                     <p className="mt-2 text-xs text-muted-foreground">
                       {isSharedPricing
-                        ? "Al cambiar el costo actividad se recalculan automáticamente todos los participantes según el porcentaje que les corresponde."
+                        ? "Aprueba la actividad completa. Aquí puedes ajustar cuánto recibe cada técnico y el porcentaje que le corresponde antes de guardar o aprobar."
                         : "El admin puede ajustar este valor incluso si la actividad está pendiente o ya fue aprobada."}
                     </p>
                     {isSharedPricing && (
-                      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                        <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
-                          <p className="text-xs text-muted-foreground">Costo actividad registrado</p>
-                          <p className="text-sm font-semibold text-foreground">{formatCurrency(getSharedGroupReferenceBaseValue(selectedReport))}</p>
+                      <div className="mt-3 space-y-3">
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                          <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
+                            <p className="text-xs text-muted-foreground">Costo actividad registrado</p>
+                            <p className="text-sm font-semibold text-foreground">{formatCurrency(getSharedGroupReferenceBaseValue(selectedReport))}</p>
+                          </div>
+                          <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
+                            <p className="text-xs text-muted-foreground">Costo actividad actual</p>
+                            <p className="text-sm font-semibold text-gold">{formatCurrency(getActivityTotalForReport(selectedReport))}</p>
+                          </div>
+                          <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
+                            <p className="text-xs text-muted-foreground">Participantes</p>
+                            <p className="text-sm font-semibold text-foreground">{sharedParticipantDrafts.length}</p>
+                            <p className="text-xs text-muted-foreground">La aprobación aplica a toda la actividad</p>
+                          </div>
                         </div>
                         <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
-                          <p className="text-xs text-muted-foreground">Costo actividad actual</p>
-                          <p className="text-sm font-semibold text-gold">{formatCurrency(getActivityTotalForReport(selectedReport))}</p>
-                        </div>
-                        <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
-                          <p className="text-xs text-muted-foreground">Participación</p>
-                          <p className="text-sm font-semibold text-foreground">{participationPercentage}%</p>
-                          <p className="text-xs text-muted-foreground">Costo técnico: {formatCurrency(participantPreviewValue)}</p>
+                          <div className="mb-3 flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold text-foreground">Reparto por técnico</p>
+                              <p className="text-xs text-muted-foreground">Edita solo el valor. El porcentaje se calcula automáticamente.</p>
+                            </div>
+                            <Badge variant="outline" className="border-gold/20 bg-gold/10 text-gold">
+                              Base: {formatCurrency(costDraft)}
+                            </Badge>
+                          </div>
+                          <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                            <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+                              <p className="text-xs text-muted-foreground">Total reparto</p>
+                              <p className={cn("text-sm font-semibold", sharedParticipantsDraftSummary.isAmountBalanced ? "text-emerald-400" : "text-red-400")}>
+                                {formatCurrency(sharedParticipantsDraftSummary.totalAmount)}
+                              </p>
+                            </div>
+                            <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+                              <p className="text-xs text-muted-foreground">Total porcentaje</p>
+                              <p className={cn("text-sm font-semibold", sharedParticipantsDraftSummary.isPercentageBalanced ? "text-emerald-400" : "text-red-400")}>
+                                {sharedParticipantsDraftSummary.totalPercentage.toFixed(2)}%
+                              </p>
+                            </div>
+                            <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+                              <p className="text-xs text-muted-foreground">Estado</p>
+                              <p className={cn("text-sm font-semibold", sharedParticipantsDraftSummary.canSave ? "text-emerald-400" : "text-red-400")}>
+                                {sharedParticipantsDraftSummary.canSave ? "Listo para guardar" : "Ajusta el reparto"}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="space-y-2">
+                            {sharedParticipantsDraftSummary.participants.map((participant) => (
+                              <div key={participant.reportId} className="grid grid-cols-1 gap-2 rounded-lg border border-border/50 bg-background/40 p-3 sm:grid-cols-[minmax(0,1fr)_110px_140px]">
+                                <div>
+                                  <p className="text-sm font-medium text-foreground">{participant.nombre}</p>
+                                  <p className="text-xs text-muted-foreground">Porcentaje calculado: {participant.percentage.toFixed(2)}%</p>
+                                </div>
+                                <div className="flex items-center justify-end rounded-md border border-border/50 bg-background/70 px-3 text-sm font-medium text-foreground">
+                                  {participant.percentage.toFixed(2)}%
+                                </div>
+                                <div className="relative">
+                                  <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    value={sharedParticipantDrafts.find((item) => item.reportId === participant.reportId)?.amount || "0"}
+                                    onChange={(e) => handleSharedParticipantAmountChange(participant.reportId, e.target.value)}
+                                    className="h-9 pl-9 bg-background/70 border-border/50 text-right text-gold"
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="mt-3 flex justify-end">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
+                              onClick={handleSaveParticipantSplit}
+                              disabled={!isSharedParticipantDraftDirty || !sharedParticipantsDraftSummary.canSave || savingParticipantSplit || savingCost || processing}
+                            >
+                              {savingParticipantSplit ? (
+                                <div className="h-4 w-4 animate-spin rounded-full border-2 border-gold border-t-transparent" />
+                              ) : (
+                                <Save className="h-4 w-4" />
+                              )}
+                              {savingParticipantSplit ? "Guardando reparto..." : "Guardar reparto técnico"}
+                            </Button>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1853,7 +2209,7 @@ export default function AprobacionesPage() {
                     {isDeleting ? "Eliminando..." : "Eliminar"}
                   </Button>
                   <div className="flex justify-end gap-2">
-                    {selectedReport.estadoAprobacionLider === "pendiente" ? (
+                    {normalizedModalStatus === "pendiente" ? (
                       <>
                         <Button
                           variant="outline"
@@ -1874,7 +2230,7 @@ export default function AprobacionesPage() {
                           ) : (
                             <CheckCircle2 className="h-4 w-4" />
                           )}
-                          {processing ? "Procesando..." : "Aprobar"}
+                          {processing ? "Procesando..." : isSharedPricing ? "Aprobar actividad" : "Aprobar"}
                         </Button>
                       </>
                     ) : (
