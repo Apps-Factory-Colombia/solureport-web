@@ -53,7 +53,7 @@ import {
   Clock,
   MapPin,
   Package,
-  Image,
+  Image as ImageIcon,
   Eye,
   PenLine,
   BookOpen,
@@ -81,6 +81,19 @@ const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 const TABLE_PAGE_SIZE = 10;
 
 type ReportTableKey = "preventivos" | "visitas" | "recorridos" | "grupales";
+type GroupedActivityRow = {
+  id: string;
+  report: ActivityReport;
+  reports: ActivityReport[];
+  tipo: ActivityReport["tipo"];
+  estadoAprobacionLider: ActivityReport["estadoAprobacionLider"];
+  fechaAprobacionLider?: string;
+  costoActividad: number;
+  participantCount: number;
+  participantNames: string[];
+  isShared: boolean;
+};
+
 type PreventiveExportEntry = {
   report: ActivityReport;
   contract?: MaintenanceContract;
@@ -164,6 +177,15 @@ function formatCurrency(value: number) {
   }).format(value);
 }
 
+function getPreferredSharedTotal(values: Array<number | string | null | undefined>, fallback: number) {
+  for (const value of values) {
+    const normalized = Number(value ?? 0) || 0;
+    if (normalized > 0) return normalized;
+  }
+
+  return fallback;
+}
+
 function normalizeSearchValue(value?: string | null) {
   return (value || "")
     .normalize("NFD")
@@ -173,10 +195,116 @@ function normalizeSearchValue(value?: string | null) {
     .toLowerCase();
 }
 
+function isGroupActivity(report: ActivityReport) {
+  return report.tipo === "actividad_grupal";
+}
+
 function isSharedVisit(report: ActivityReport) {
   return report.tipo === "visita_tecnica"
     && ((report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal) != null
       || Number(report.porcentajeParticipacion ?? 0) > 0);
+}
+
+function usesSharedBasePricing(report: ActivityReport) {
+  return isSharedVisit(report) || isGroupActivity(report);
+}
+
+function getGroupActivityVisualIdentity(report: ActivityReport) {
+  if (!isGroupActivity(report)) return report.id;
+
+  return [
+    "group-visual",
+    report.fecha,
+    report.periodoId || "sin-periodo",
+    report.grupoId,
+    report.clienteId || "sin-cliente",
+  ].join("|");
+}
+
+function dedupeReportsByTechnician(reports: ActivityReport[]) {
+  return Array.from(
+    reports.reduce((map, report) => {
+      const current = map.get(report.tecnicoId);
+
+      if (!current) {
+        map.set(report.tecnicoId, report);
+        return map;
+      }
+
+      if (!!report.registroActividadId !== !!current.registroActividadId) {
+        if (report.registroActividadId) {
+          map.set(report.tecnicoId, report);
+        }
+        return map;
+      }
+
+      const creationCompare = (report.fechaCreacion || "").localeCompare(current.fechaCreacion || "");
+      if (creationCompare > 0 || (creationCompare === 0 && report.id.localeCompare(current.id) > 0)) {
+        map.set(report.tecnicoId, report);
+      }
+
+      return map;
+    }, new Map<string, ActivityReport>()).values()
+  );
+}
+
+function sortReportsForSharedActivity(reports: ActivityReport[]) {
+  return [...reports].sort((a, b) => {
+    if (!!a.registroActividadId !== !!b.registroActividadId) {
+      return a.registroActividadId ? -1 : 1;
+    }
+
+    if (a.id.startsWith("reg-") !== b.id.startsWith("reg-")) {
+      return a.id.startsWith("reg-") ? -1 : 1;
+    }
+
+    const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
+    if (creationCompare !== 0) return creationCompare;
+
+    return b.id.localeCompare(a.id);
+  });
+}
+
+function getVisualActivityIdentity(report: ActivityReport) {
+  if (isGroupActivity(report)) {
+    return getGroupActivityVisualIdentity(report);
+  }
+
+  if (isSharedVisit(report)) {
+    return [
+      "shared-visit-visual",
+      report.fecha,
+      report.periodoId || "sin-periodo",
+      report.grupoId,
+      report.clienteId || "sin-cliente",
+      normalizeSearchValue(report.descripcion),
+    ].join("|");
+  }
+
+  return report.id;
+}
+
+function getSharedPricingIdentity(report: ActivityReport) {
+  if (isGroupActivity(report)) {
+    if (report.registroActividadId) {
+      return `group:${report.registroActividadId}`;
+    }
+
+    return [
+      "legacy-group",
+      report.fecha,
+      report.grupoId,
+      report.clienteId || "sin-cliente",
+      normalizeSearchValue(report.descripcion),
+      normalizeSearchValue(report.especificacion),
+    ].join("|");
+  }
+
+  if (isSharedVisit(report)) {
+    return getSharedVisitIdentity(report);
+  }
+
+  return report.id;
 }
 
 function getSharedVisitIdentity(report: ActivityReport) {
@@ -226,7 +354,7 @@ function formatDateTime(value?: string) {
   }).format(parsed);
 }
 
-function paginateReports(reports: ActivityReport[], page: number) {
+function paginateReports<T>(reports: T[], page: number) {
   const totalPages = Math.max(1, Math.ceil(reports.length / TABLE_PAGE_SIZE));
   const currentPage = Math.min(Math.max(page, 1), totalPages);
   const startIndex = (currentPage - 1) * TABLE_PAGE_SIZE;
@@ -344,6 +472,7 @@ export default function InformesPage() {
   const [viewQuincenaMonth, setViewQuincenaMonth] = useState(() => getMonthInputValue(getTodayDateString()));
   const [grupoFilter, setGrupoFilter] = useState<string>("todos");
   const [selectedReport, setSelectedReport] = useState<ActivityReport | null>(null);
+  const [selectedParticipantReportId, setSelectedParticipantReportId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [reportToDelete, setReportToDelete] = useState<ActivityReport | null>(null);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
@@ -514,15 +643,15 @@ export default function InformesPage() {
     const percentageByReportId = new Map<string, number>();
 
     reports.forEach((report) => {
-      if (!isSharedVisit(report)) return;
+      if (!usesSharedBasePricing(report)) return;
 
-      const key = getSharedVisitIdentity(report);
+      const key = getSharedPricingIdentity(report);
       totalByKey.set(key, (totalByKey.get(key) ?? 0) + (Number(report.costoActividad) || 0));
       countByKey.set(key, (countByKey.get(key) ?? 0) + 1);
     });
 
     reports.forEach((report) => {
-      if (!isSharedVisit(report)) return;
+      if (!usesSharedBasePricing(report)) return;
 
       const explicitPercentage = Number(report.porcentajeParticipacion ?? 0) || 0;
       if (explicitPercentage > 0) {
@@ -530,7 +659,7 @@ export default function InformesPage() {
         return;
       }
 
-      const key = getSharedVisitIdentity(report);
+      const key = getSharedPricingIdentity(report);
       const total = totalByKey.get(key) ?? 0;
       if (total > 0) {
         percentageByReportId.set(report.id, Number((((Number(report.costoActividad) || 0) / total) * 100).toFixed(2)));
@@ -547,10 +676,14 @@ export default function InformesPage() {
   const getSharedVisitBaseValue = useCallback(
     (report: ActivityReport) => {
       if (!isSharedVisit(report)) return getEffectiveTechnicalCost(report);
-      return report.valorActividadAplicadoGlobal
-        ?? report.valorActividadBaseGlobal
-        ?? sharedVisitStats.totalByKey.get(getSharedVisitIdentity(report))
+
+      const derivedTotal = sharedVisitStats.totalByKey.get(getSharedPricingIdentity(report))
         ?? getEffectiveTechnicalCost(report);
+
+      return getPreferredSharedTotal([
+        report.valorActividadAplicadoGlobal,
+        report.valorActividadBaseGlobal,
+      ], derivedTotal);
     },
     [getEffectiveTechnicalCost, sharedVisitStats.totalByKey]
   );
@@ -573,6 +706,27 @@ export default function InformesPage() {
     },
     [getEffectiveTechnicalCost, getSharedVisitBaseValue]
   );
+  const getActivityTotalForReport = useCallback(
+    (report: ActivityReport) => {
+      if (!usesSharedBasePricing(report)) return getEffectiveTechnicalCost(report);
+
+      if (isSharedVisit(report)) {
+        return getSharedVisitBaseValue(report);
+      }
+
+      return sharedVisitStats.totalByKey.get(getSharedPricingIdentity(report)) ?? getEffectiveTechnicalCost(report);
+    },
+    [getEffectiveTechnicalCost, getSharedVisitBaseValue, sharedVisitStats.totalByKey]
+  );
+  const getSharedReportsForReport = useCallback((report: ActivityReport) => {
+    if (!usesSharedBasePricing(report)) return [report];
+    const sharedKey = getVisualActivityIdentity(report);
+    return viewScopedReports.filter((item) => usesSharedBasePricing(item) && getVisualActivityIdentity(item) === sharedKey);
+  }, [viewScopedReports]);
+  const getParticipantName = useCallback((tecnicoId: string) => {
+    const tech = usersById.get(tecnicoId);
+    return [tech?.nombre, tech?.apellido].filter(Boolean).join(" ") || "Técnico sin nombre";
+  }, [usersById]);
 
   const getTechnicalCostDraftKey = useCallback(
     (report: ActivityReport) => isSharedVisit(report) ? getSharedVisitIdentity(report) : report.id,
@@ -1145,39 +1299,110 @@ export default function InformesPage() {
 
   const openReportDetail = (report: ActivityReport) => {
     setSelectedReport(report);
+    setSelectedParticipantReportId(report.id);
     setDetailOpen(true);
   };
 
-  const filterReports = (list: ActivityReport[]) =>
+  const matchesActivitySearch = useCallback((report: ActivityReport, participantNames: string[] = []) => {
+    const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+    const group = groupsById.get(report.grupoId);
+    const normalizedSearch = normalizeSearchValue(search);
+
+    if (!normalizedSearch) {
+      return true;
+    }
+
+    const searchableFields = [
+      ...participantNames.map((name) => normalizeSearchValue(name)),
+      normalizeSearchValue(client?.edificio),
+      normalizeSearchValue(client?.nombre),
+      normalizeSearchValue(group?.nombre),
+      normalizeSearchValue(report.fecha),
+      normalizeSearchValue(report.descripcion),
+      normalizeSearchValue(report.especificacion),
+    ];
+
+    return searchableFields.some((field) => field.includes(normalizedSearch));
+  }, [clientsById, groupsById, search]);
+
+  const filterReports = useCallback((list: ActivityReport[]) =>
     list.filter((r) => {
-      const tech = users.find((u) => u.id === r.tecnicoId);
-      const client = r.clienteId ? clients.find((c) => c.id === r.clienteId) : null;
-      const normalizedSearch = search.toLowerCase();
-      const matchSearch =
-        tech?.nombre.toLowerCase().includes(normalizedSearch) ||
-        tech?.apellido.toLowerCase().includes(normalizedSearch) ||
-        client?.edificio?.toLowerCase().includes(normalizedSearch) ||
-        client?.nombre?.toLowerCase().includes(normalizedSearch) ||
-        r.descripcion.toLowerCase().includes(normalizedSearch) ||
-        r.especificacion?.toLowerCase().includes(normalizedSearch);
+      const tech = usersById.get(r.tecnicoId);
+      const participantNames = tech ? [`${tech.nombre} ${tech.apellido}`.trim()] : [];
+      const matchSearch = matchesActivitySearch(r, participantNames);
       const matchGrupo = grupoFilter === "todos" || r.grupoId === grupoFilter;
       return matchSearch && matchGrupo;
+    }),
+  [grupoFilter, matchesActivitySearch, usersById]);
+
+  const buildGroupedActivityRows = useCallback((list: ActivityReport[]) => {
+    const grouped = new Map<string, ActivityReport[]>();
+
+    list.forEach((report) => {
+      const key = usesSharedBasePricing(report)
+        ? `${report.tipo}:${getVisualActivityIdentity(report)}`
+        : report.id;
+      const current = grouped.get(key) || [];
+      current.push(report);
+      grouped.set(key, current);
     });
 
-  const visibleReports = useMemo(
-    () => sortReportsByNewestCreation(filterReports(viewScopedReports)),
-    [viewScopedReports, search, grupoFilter, users, clients]
-  );
+    return Array.from(grouped.values()).map((items) => {
+      const uniqueTechnicianItems = dedupeReportsByTechnician(items);
+      const leadReport = sortReportsForSharedActivity(items)[0];
+      const participantNames = Array.from(new Set(uniqueTechnicianItems.map((item) => getParticipantName(item.tecnicoId))));
+      const approvalDate = items
+        .map((item) => item.fechaAprobacionLider)
+        .filter(Boolean)
+        .sort()
+        .at(-1);
+      const isShared = usesSharedBasePricing(leadReport) && uniqueTechnicianItems.length > 1;
 
-  const visibleClientCostReports = useMemo(
-    () => visibleReports.filter((report) => report.tipo === "visita_tecnica"),
-    [visibleReports]
-  );
+      return {
+        id: isShared ? `${leadReport.tipo}:${getVisualActivityIdentity(leadReport)}` : leadReport.id,
+        report: leadReport,
+        reports: uniqueTechnicianItems,
+        tipo: leadReport.tipo,
+        estadoAprobacionLider: (new Set(items.map((item) => item.estadoAprobacionLider))).size > 1
+          ? "pendiente"
+          : items.some((item) => item.estadoAprobacionLider === "pendiente")
+            ? "pendiente"
+            : items.some((item) => item.estadoAprobacionLider === "rechazado")
+              ? "rechazado"
+              : "aprobado",
+        fechaAprobacionLider: approvalDate,
+        costoActividad: isShared ? getActivityTotalForReport(leadReport) : getEffectiveTechnicalCost(leadReport),
+        participantCount: participantNames.length,
+        participantNames,
+        isShared,
+      } satisfies GroupedActivityRow;
+    });
+  }, [getActivityTotalForReport, getEffectiveTechnicalCost, getParticipantName]);
 
-  const filteredPreventivos = useMemo(() => sortReportsByNewestCreation(filterReports(preventivos)), [preventivos, search, grupoFilter, users, clients]);
-  const filteredVisitas = useMemo(() => sortReportsByNewestCreation(filterReports(visitas)), [visitas, search, grupoFilter, users, clients]);
-  const filteredRecorridos = useMemo(() => sortReportsByNewestCreation(filterReports(recorridos)), [recorridos, search, grupoFilter, users, clients]);
-  const filteredGrupales = useMemo(() => sortReportsByNewestCreation(filterReports(grupales)), [grupales, search, grupoFilter, users, clients]);
+  const filterGroupedRows = useCallback((rows: GroupedActivityRow[]) => {
+    return rows
+      .filter((row) => {
+        const matchSearch = matchesActivitySearch(row.report, row.participantNames);
+        const matchGrupo = grupoFilter === "todos" || row.report.grupoId === grupoFilter;
+        return matchSearch && matchGrupo;
+      })
+      .sort((a, b) => {
+        const creationCompare = (b.report.fechaCreacion || "").localeCompare(a.report.fechaCreacion || "");
+        if (creationCompare !== 0) return creationCompare;
+
+        const dateCompare = (b.report.fecha || "").localeCompare(a.report.fecha || "");
+        if (dateCompare !== 0) return dateCompare;
+
+        return b.report.id.localeCompare(a.report.id);
+      });
+  }, [grupoFilter, matchesActivitySearch]);
+
+  const filteredPreventivos = useMemo(() => sortReportsByNewestCreation(filterReports(preventivos)), [filterReports, preventivos]);
+  const filteredVisitas = useMemo(() => filterGroupedRows(buildGroupedActivityRows(visitas)), [buildGroupedActivityRows, filterGroupedRows, visitas]);
+  const filteredRecorridos = useMemo(() => sortReportsByNewestCreation(filterReports(recorridos)), [filterReports, recorridos]);
+  const filteredGrupales = useMemo(() => filterGroupedRows(buildGroupedActivityRows(grupales)), [buildGroupedActivityRows, filterGroupedRows, grupales]);
+  const groupedVisitasCount = filteredVisitas.length;
+  const groupedGrupalesCount = filteredGrupales.length;
 
   const paginatedPreventivos = useMemo(() => paginateReports(filteredPreventivos, tablePages.preventivos), [filteredPreventivos, tablePages.preventivos]);
   const paginatedVisitas = useMemo(() => paginateReports(filteredVisitas, tablePages.visitas), [filteredVisitas, tablePages.visitas]);
@@ -1199,20 +1424,21 @@ export default function InformesPage() {
       .sort((a, b) => a.fecha.localeCompare(b.fecha) || a.fechaCreacion.localeCompare(b.fechaCreacion)),
     [exportScopedReports, exportReportType, preventiveExportClientId]
   );
-
-  const technicalCostTotal = useMemo(
-    () => visibleReports.reduce((sum, report) => sum + getEffectiveTechnicalCost(report), 0),
-    [getEffectiveTechnicalCost, visibleReports]
-  );
-
-  const clientCostTotal = useMemo(
-    () => visibleClientCostReports.reduce((sum, report) => sum + (Number(report.costoCliente ?? 0) || 0), 0),
-    [visibleClientCostReports]
-  );
+  const selectedExportGroupedRows = useMemo(() => {
+    if (exportReportType !== "visita_tecnica" && exportReportType !== "actividad_grupal") return [];
+    return buildGroupedActivityRows(selectedExportReports);
+  }, [buildGroupedActivityRows, exportReportType, selectedExportReports]);
+  const getParticipantSplitLabel = useCallback((reportsList: ActivityReport[]) => {
+    return dedupeReportsByTechnician(reportsList)
+      .map((report) => `${getParticipantName(report.tecnicoId)}: ${formatCurrency(Number(report.costoActividad) || 0)}`)
+      .join(" / ");
+  }, [getParticipantName]);
 
   const selectedExportTechnicalTotal = useMemo(
-    () => selectedExportReports.reduce((sum, report) => sum + getEffectiveTechnicalCost(report), 0),
-    [getEffectiveTechnicalCost, selectedExportReports]
+    () => exportReportType === "visita_tecnica" || exportReportType === "actividad_grupal"
+      ? selectedExportGroupedRows.reduce((sum, row) => sum + row.costoActividad, 0)
+      : selectedExportReports.reduce((sum, report) => sum + getEffectiveTechnicalCost(report), 0),
+    [exportReportType, getEffectiveTechnicalCost, selectedExportGroupedRows, selectedExportReports]
   );
 
   const selectedExportClientTotal = useMemo(
@@ -1360,8 +1586,10 @@ export default function InformesPage() {
   const selectedExportCountLabel = useMemo(
     () => exportReportType === "mantenimiento_preventivo"
       ? `${selectedPreventiveEntries.length} mantenimiento(s) · ${selectedPreventiveContractCount} contrato(s)`
-      : `${selectedExportReports.length} registros`,
-    [exportReportType, selectedExportReports.length, selectedPreventiveContractCount, selectedPreventiveEntries.length]
+      : exportReportType === "visita_tecnica" || exportReportType === "actividad_grupal"
+        ? `${selectedExportGroupedRows.length} actividades`
+        : `${selectedExportReports.length} registros`,
+    [exportReportType, selectedExportGroupedRows.length, selectedExportReports.length, selectedPreventiveContractCount, selectedPreventiveEntries.length]
   );
 
   useEffect(() => {
@@ -1500,6 +1728,11 @@ export default function InformesPage() {
   }, [activeRangeLabel, companySettings?.nombre, exportRangeEnd, exportRangeStart, preventiveExportClientId, selectedPreventiveAnnualRows, selectedPreventiveAnnualTotal, selectedPreventiveClientLabel, selectedPreventiveContractCount, selectedPreventiveMaintenanceTotal]);
 
   const handleExportTechnicalSummary = useCallback(() => {
+    if ((exportReportType === "visita_tecnica" || exportReportType === "actividad_grupal") && selectedExportGroupedRows.length === 0) {
+      alert(`No hay ${getExportTitleLabel(exportReportType).toLowerCase()} en el rango seleccionado para exportar.`);
+      return;
+    }
+
     if (selectedExportReports.length === 0) {
       alert(`No hay ${getExportTitleLabel(exportReportType).toLowerCase()} en el rango seleccionado para exportar.`);
       return;
@@ -1518,7 +1751,35 @@ export default function InformesPage() {
           || (left.descripcion || "").localeCompare(right.descripcion || "", "es", { sensitivity: "base" });
       });
 
-      const exportRows = exportReportType === "recorrido"
+      const exportRows = exportReportType === "visita_tecnica" || exportReportType === "actividad_grupal"
+        ? selectedExportGroupedRows.map((row) => {
+          const report = row.report;
+          const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+          const projectName = client?.edificio || client?.nombre || groupsById.get(report.grupoId)?.nombre || "—";
+          const detail = report.especificacion
+            ? `${report.descripcion} · ${report.especificacion}`
+            : report.descripcion;
+
+          return exportReportType === "visita_tecnica"
+            ? [
+              report.fecha,
+              projectName,
+              getVisitCategoryLabel(report.tipoVisita),
+              detail || "—",
+              getParticipantSplitLabel(row.reports),
+              row.estadoAprobacionLider,
+              formatCurrency(row.costoActividad),
+            ]
+            : [
+              report.fecha,
+              projectName,
+              detail || "—",
+              getParticipantSplitLabel(row.reports),
+              row.estadoAprobacionLider,
+              formatCurrency(row.costoActividad),
+            ];
+        })
+        : exportReportType === "recorrido"
         ? (() => {
           const rows: string[][] = [];
           let currentTechName = "";
@@ -1599,17 +1860,21 @@ export default function InformesPage() {
         landscape: true,
         fileName: `reporte_${exportReportType}_${exportRangeStart || "inicio"}_${exportRangeEnd || "fin"}`,
         summary: [
-          { label: "Registros", value: String(selectedExportReports.length) },
+          { label: exportReportType === "visita_tecnica" || exportReportType === "actividad_grupal" ? "Actividades" : "Registros", value: String(exportReportType === "visita_tecnica" || exportReportType === "actividad_grupal" ? selectedExportGroupedRows.length : selectedExportReports.length) },
           { label: "Tipo", value: getExportTitleLabel(exportReportType) },
           { label: exportReportType === "visita_tecnica" ? "Total costo técnico" : "Total", value: formatCurrency(selectedExportTechnicalTotal) },
         ],
         headers: exportReportType === "visita_tecnica"
-          ? ["Fecha", "Técnico", "Cliente / Proyecto", "Categoría", "Detalle", "Estado", "Costo técnico"]
-          : ["Fecha", "Técnico", exportReportType === "actividad_grupal" ? "Grupo / Cliente" : "Cliente / Proyecto", "Detalle", "Estado", "Costo"],
+          ? ["Fecha", "Cliente / Proyecto", "Categoría", "Actividad", "Técnicos", "Estado", "Costo técnico"]
+          : exportReportType === "actividad_grupal"
+            ? ["Fecha", "Grupo / Cliente", "Actividad", "Técnicos", "Estado", "Costo"]
+            : ["Fecha", "Técnico", "Cliente / Proyecto", "Detalle", "Estado", "Costo"],
         rows: exportRows,
         totales: exportReportType === "visita_tecnica"
           ? ["", "", "", "", "", "Total", formatCurrency(selectedExportTechnicalTotal)]
-          : ["", "", "", "", "Total", formatCurrency(selectedExportTechnicalTotal)],
+          : exportReportType === "actividad_grupal"
+            ? ["", "", "", "", "Total", formatCurrency(selectedExportTechnicalTotal)]
+            : ["", "", "", "", "Total", formatCurrency(selectedExportTechnicalTotal)],
       });
     } finally {
       setExportingTechnicalSummary(false);
@@ -1623,6 +1888,8 @@ export default function InformesPage() {
     exportReportType,
     getEffectiveTechnicalCost,
     groupsById,
+    getParticipantSplitLabel,
+    selectedExportGroupedRows,
     selectedExportReports,
     selectedExportTechnicalTotal,
     usersById,
@@ -1754,7 +2021,7 @@ export default function InformesPage() {
                   <ClipboardCheck className="h-5 w-5 text-cyan-neon" />
                 </div>
                 <div>
-                  <p className="text-xl font-bold text-foreground">{visitas.length}</p>
+                  <p className="text-xl font-bold text-foreground">{groupedVisitasCount}</p>
                   <p className="text-xs text-muted-foreground">Visitas Técnicas</p>
                 </div>
               </CardContent>
@@ -1776,7 +2043,7 @@ export default function InformesPage() {
                   <Users className="h-5 w-5 text-purple-400" />
                 </div>
                 <div>
-                  <p className="text-xl font-bold text-foreground">{grupales.length}</p>
+                  <p className="text-xl font-bold text-foreground">{groupedGrupalesCount}</p>
                   <p className="text-xs text-muted-foreground">Act. Grupales</p>
                 </div>
               </CardContent>
@@ -2116,7 +2383,7 @@ export default function InformesPage() {
               <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
                 <ClipboardCheck className="h-4 w-4 mr-2" />
                 Visitas Técnicas
-                <Badge className="ml-1.5 bg-cyan-neon/20 text-cyan-neon text-[10px] border-0 px-1.5">{visitas.length}</Badge>
+                <Badge className="ml-1.5 bg-cyan-neon/20 text-cyan-neon text-[10px] border-0 px-1.5">{groupedVisitasCount}</Badge>
               </TabsTrigger>
               <TabsTrigger value="recorridos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
                 <Route className="h-4 w-4 mr-2" />
@@ -2126,7 +2393,7 @@ export default function InformesPage() {
               <TabsTrigger value="grupales" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
                 <Users className="h-4 w-4 mr-2" />
                 Act. Grupales
-                <Badge className="ml-1.5 bg-purple-500/20 text-purple-400 text-[10px] border-0 px-1.5">{grupales.length}</Badge>
+                <Badge className="ml-1.5 bg-purple-500/20 text-purple-400 text-[10px] border-0 px-1.5">{groupedGrupalesCount}</Badge>
               </TabsTrigger>
             </TabsList>
 
@@ -2204,7 +2471,7 @@ export default function InformesPage() {
                             </TableCell>
                             <TableCell>
                               <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                                <Image className="h-3 w-3" />
+                                <ImageIcon className="h-3 w-3" />
                                 {getEvidenceCount(r)}
                               </div>
                             </TableCell>
@@ -2258,42 +2525,44 @@ export default function InformesPage() {
                   <Table>
                     <TableHeader>
                       <TableRow className="border-border/50 hover:bg-transparent">
-                        <TableHead className="text-muted-foreground">Técnico</TableHead>
+                        <TableHead className="text-muted-foreground">Actividad</TableHead>
                         <TableHead className="text-muted-foreground">Cliente</TableHead>
                         <TableHead className="text-muted-foreground">Categoría</TableHead>
                         <TableHead className="text-muted-foreground">Fecha</TableHead>
-                        <TableHead className="text-muted-foreground">Descripción</TableHead>
+                        <TableHead className="text-muted-foreground">Técnicos</TableHead>
                         <TableHead className="text-muted-foreground">Fotos</TableHead>
                         <TableHead className="text-muted-foreground">Aprobación Líder</TableHead>
                         <TableHead className="text-muted-foreground">Correo</TableHead>
-                        <TableHead className="text-muted-foreground text-right">Costo técnico</TableHead>
+                        <TableHead className="text-muted-foreground text-right">Costo actividad</TableHead>
                         <TableHead className="text-muted-foreground text-right">Costo cliente</TableHead>
                         <TableHead className="text-muted-foreground w-32"></TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {paginatedVisitas.items.map((r) => {
-                        const tech = usersById.get(r.tecnicoId);
+                      {paginatedVisitas.items.map((row) => {
+                        const r = row.report;
                         const client = r.clienteId ? clientsById.get(r.clienteId) : null;
-                        const isSharedPricing = isSharedVisit(r);
-                        const participationPercentage = getVisitParticipationPercentage(r);
+                        const categoryLabel = row.reports.length > 1
+                          ? "Actividad compartida"
+                          : getVisitCategoryLabel(r.tipoVisita);
+                        const totalFotos = row.reports.reduce((sum, item) => sum + getEvidenceCount(item), 0);
                         const inlineTechnicalCostValue = getInlineTechnicalCostValue(r);
                         const normalizedCurrentTechnicalCost = getEditableTechnicalCost(r);
                         const normalizedDraftTechnicalCost = inlineTechnicalCostValue.trim() ? Number(inlineTechnicalCostValue) : 0;
                         const isInlineTechnicalCostDirty = normalizedDraftTechnicalCost !== normalizedCurrentTechnicalCost;
                         const isInlineTechnicalCostSaving = savingInlineTechnicalCostId === r.id;
-                        const previewTechnicalCost = isSharedPricing
-                          ? Math.round((normalizedDraftTechnicalCost * participationPercentage) / 100)
-                          : normalizedDraftTechnicalCost;
                         const inlineClientCostValue = getInlineClientCostValue(r);
                         const normalizedCurrentClientCost = r.costoCliente ?? 0;
                         const normalizedDraftClientCost = inlineClientCostValue.trim() ? Number(inlineClientCostValue) : 0;
                         const isInlineClientCostDirty = normalizedDraftClientCost !== normalizedCurrentClientCost;
                         const isInlineClientCostSaving = savingInlineClientCostId === r.id;
                         return (
-                          <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
-                            <TableCell className="text-sm font-medium text-foreground">
-                              {tech?.nombre} {tech?.apellido}
+                          <TableRow key={row.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                            <TableCell className="max-w-60">
+                              <p className="text-sm font-medium text-foreground truncate">{r.descripcion}</p>
+                              {r.especificacion && (
+                                <p className="text-xs text-muted-foreground truncate">Especificación: {r.especificacion}</p>
+                              )}
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80">
                               {client?.edificio || "—"}
@@ -2310,24 +2579,20 @@ export default function InformesPage() {
                                       : "bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20"
                                 )}
                               >
-                                {getVisitCategoryLabel(r.tipoVisita)}
+                                {categoryLabel}
                               </Badge>
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
-                            <TableCell className="text-sm text-foreground/80 max-w-56 truncate">
+                            <TableCell className="max-w-56">
                               <div>
-                                <p className="truncate">{r.descripcion}</p>
-                                {r.especificacion && (
-                                  <p className="text-xs text-muted-foreground truncate">
-                                    Especificación: {r.especificacion}
-                                  </p>
-                                )}
+                                <p className="text-sm text-foreground/80 truncate">{row.participantCount} técnico(s)</p>
+                                <p className="text-xs text-muted-foreground truncate">{row.participantNames.join(", ")}</p>
                               </div>
                             </TableCell>
                             <TableCell>
                               <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                                <Image className="h-3 w-3" />
-                                {getEvidenceCount(r)}
+                                <ImageIcon className="h-3 w-3" />
+                                {totalFotos}
                               </div>
                             </TableCell>
                             <TableCell>
@@ -2335,13 +2600,17 @@ export default function InformesPage() {
                                 variant="outline"
                                 className={cn(
                                   "text-[10px]",
-                                  r.estadoAprobacionLider === "aprobado"
+                                  row.estadoAprobacionLider === "aprobado"
                                     ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                                    : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                    : row.estadoAprobacionLider === "rechazado"
+                                      ? "bg-red-500/10 text-red-400 border-red-500/20"
+                                      : "bg-amber-500/10 text-amber-400 border-amber-500/20"
                                 )}
                               >
-                                {r.estadoAprobacionLider === "aprobado" ? (
+                                {row.estadoAprobacionLider === "aprobado" ? (
                                   <><CheckCircle2 className="h-3 w-3 mr-0.5" />Aprobado → Actividad</>
+                                ) : row.estadoAprobacionLider === "rechazado" ? (
+                                  <>Rechazado</>
                                 ) : (
                                   <><Clock className="h-3 w-3 mr-0.5" />Pendiente</>
                                 )}
@@ -2389,16 +2658,7 @@ export default function InformesPage() {
                                   </Button>
                                 )}
                               </div>
-                              {isSharedPricing && (
-                                <div className="mt-1 space-y-1 text-xs text-muted-foreground">
-                                  <p>Base actual: {formatCurrency(getSharedVisitBaseValue(r))}</p>
-                                  <p>Participación: {participationPercentage}%</p>
-                                  <p>Costo técnico: {formatCurrency(r.costoActividad ?? 0)}</p>
-                                  {isInlineTechnicalCostDirty && previewTechnicalCost !== (r.costoActividad ?? 0) && (
-                                    <p className="text-cyan-neon">Nuevo costo técnico: {formatCurrency(previewTechnicalCost)}</p>
-                                  )}
-                                </div>
-                              )}
+                              <p className="mt-1 text-xs text-muted-foreground">Base de la actividad</p>
                             </TableCell>
                             <TableCell className="text-right">
                               <div className="ml-auto flex w-full max-w-34 items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
@@ -2441,6 +2701,7 @@ export default function InformesPage() {
                                   </Button>
                                 )}
                               </div>
+                              {row.isShared && <p className="mt-1 text-xs text-muted-foreground">Se edita desde la actividad</p>}
                             </TableCell>
                             <TableCell>{renderActionButtons(r)}</TableCell>
                           </TableRow>
@@ -2526,7 +2787,7 @@ export default function InformesPage() {
                             <TableCell>
                               {r.fotoHerramienta ? (
                                 <span className="text-xs text-foreground/80 flex items-center gap-1">
-                                  <Image className="h-3 w-3 text-amber-400" /> Adjunta
+                                  <ImageIcon className="h-3 w-3 text-amber-400" /> Adjunta
                                 </span>
                               ) : (
                                 <span className="text-xs text-muted-foreground">—</span>
@@ -2616,37 +2877,36 @@ export default function InformesPage() {
                   <Table>
                     <TableHeader>
                       <TableRow className="border-border/50 hover:bg-transparent">
-                        <TableHead className="text-muted-foreground">Técnico</TableHead>
+                        <TableHead className="text-muted-foreground">Actividad</TableHead>
                         <TableHead className="text-muted-foreground">Grupo</TableHead>
                         <TableHead className="text-muted-foreground">Fecha</TableHead>
-                        <TableHead className="text-muted-foreground">Descripción</TableHead>
+                        <TableHead className="text-muted-foreground">Técnicos</TableHead>
                         <TableHead className="text-muted-foreground">Líder</TableHead>
                         <TableHead className="text-muted-foreground">Aprobación</TableHead>
                         <TableHead className="text-muted-foreground">Correo</TableHead>
-                        <TableHead className="text-muted-foreground text-right">Costo</TableHead>
+                        <TableHead className="text-muted-foreground text-right">Costo actividad</TableHead>
                         <TableHead className="text-muted-foreground w-32"></TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {paginatedGrupales.items.map((r) => {
-                        const tech = usersById.get(r.tecnicoId);
+                      {paginatedGrupales.items.map((row) => {
+                        const r = row.report;
                         const group = groupsById.get(r.grupoId);
                         const leader = usersById.get(r.liderGrupoId);
                         return (
-                          <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
-                            <TableCell className="text-sm font-medium text-foreground">
-                              {tech?.nombre} {tech?.apellido}
+                          <TableRow key={row.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                            <TableCell className="max-w-60">
+                              <p className="text-sm font-medium text-foreground truncate">{r.descripcion}</p>
+                              {r.especificacion && (
+                                <p className="text-xs text-muted-foreground truncate">Especificación: {r.especificacion}</p>
+                              )}
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80">{group?.nombre || "—"}</TableCell>
                             <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
-                            <TableCell className="text-sm text-foreground/80 max-w-48 truncate">
+                            <TableCell className="max-w-56">
                               <div>
-                                <p className="truncate">{r.descripcion}</p>
-                                {r.especificacion && (
-                                  <p className="text-xs text-muted-foreground truncate">
-                                    Especificación: {r.especificacion}
-                                  </p>
-                                )}
+                                <p className="text-sm text-foreground/80 truncate">{row.participantCount} técnico(s)</p>
+                                <p className="text-xs text-muted-foreground truncate">{row.participantNames.join(", ")}</p>
                               </div>
                             </TableCell>
                             <TableCell className="text-xs text-foreground/80">
@@ -2657,16 +2917,16 @@ export default function InformesPage() {
                                 variant="outline"
                                 className={cn(
                                   "text-[10px]",
-                                  r.estadoAprobacionLider === "aprobado"
+                                  row.estadoAprobacionLider === "aprobado"
                                     ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                                    : r.estadoAprobacionLider === "rechazado"
+                                    : row.estadoAprobacionLider === "rechazado"
                                       ? "bg-red-500/10 text-red-400 border-red-500/20"
                                       : "bg-amber-500/10 text-amber-400 border-amber-500/20"
                                 )}
                               >
-                                {r.estadoAprobacionLider === "aprobado" ? (
+                                {row.estadoAprobacionLider === "aprobado" ? (
                                   <><CheckCircle2 className="h-3 w-3 mr-0.5" />Aprobado</>
-                                ) : r.estadoAprobacionLider === "rechazado" ? (
+                                ) : row.estadoAprobacionLider === "rechazado" ? (
                                   <>Rechazado</>
                                 ) : (
                                   <><Clock className="h-3 w-3 mr-0.5" />Pendiente</>
@@ -2675,7 +2935,7 @@ export default function InformesPage() {
                             </TableCell>
                             <TableCell>{renderEmailStatusBadge(r)}</TableCell>
                             <TableCell className="text-right font-semibold text-gold text-sm">
-                              {formatCurrency(r.costoActividad)}
+                              {formatCurrency(row.costoActividad)}
                             </TableCell>
                             <TableCell>{renderActionButtons(r)}</TableCell>
                           </TableRow>
@@ -2703,7 +2963,10 @@ export default function InformesPage() {
         open={detailOpen}
         onOpenChange={(open) => {
           setDetailOpen(open);
-          if (!open) setSelectedReport(null);
+          if (!open) {
+            setSelectedReport(null);
+            setSelectedParticipantReportId(null);
+          }
         }}
       >
         <DialogContent className="bg-card border-border sm:max-w-3xl max-h-[90vh] overflow-y-auto">
@@ -2714,24 +2977,77 @@ export default function InformesPage() {
             </DialogDescription>
           </DialogHeader>
           {selectedReport && (() => {
-            const tech = usersById.get(selectedReport.tecnicoId);
-            const leader = usersById.get(selectedReport.liderGrupoId);
-            const client = selectedReport.clienteId ? clientsById.get(selectedReport.clienteId) : null;
-            const group = groupsById.get(selectedReport.grupoId);
-            const totalFotos = getEvidenceCount(selectedReport);
-            const isSharedPricing = isSharedVisit(selectedReport);
-            const participationPercentage = getVisitParticipationPercentage(selectedReport);
-            const editableTechnicalBase = getEditableTechnicalCost(selectedReport);
+            const modalReports = usesSharedBasePricing(selectedReport) ? getSharedReportsForReport(selectedReport) : [selectedReport];
+            const modalParticipantReports = dedupeReportsByTechnician(modalReports);
+            const activeDetailReport = modalParticipantReports.find((report) => report.id === selectedParticipantReportId)
+              || modalParticipantReports[0]
+              || modalReports[0]
+              || selectedReport;
+            const tech = usersById.get(activeDetailReport.tecnicoId);
+            const leader = usersById.get(activeDetailReport.liderGrupoId);
+            const client = activeDetailReport.clienteId ? clientsById.get(activeDetailReport.clienteId) : null;
+            const group = groupsById.get(activeDetailReport.grupoId);
+            const totalFotos = getEvidenceCount(activeDetailReport);
+            const isSharedPricing = usesSharedBasePricing(selectedReport);
+            const participationPercentage = getVisitParticipationPercentage(activeDetailReport);
+            const editableTechnicalBase = getEditableTechnicalCost(activeDetailReport);
             const technicalPreviewValue = isSharedPricing
               ? Math.round(((editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) * participationPercentage) / 100)
               : (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0);
 
             return (
               <div className="space-y-5">
+                {modalParticipantReports.length > 1 && (
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-3">
+                    <div>
+                      <p className="text-sm font-semibold text-foreground">Actividad consolidada</p>
+                      <p className="text-xs text-muted-foreground">Selecciona un técnico para ver el detalle individual dentro de esta actividad.</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {modalParticipantReports.map((report) => {
+                        const participantName = getParticipantName(report.tecnicoId);
+                        const isActive = report.id === activeDetailReport.id;
+
+                        return (
+                          <Button
+                            key={report.id}
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className={cn(
+                              "border-border/50 bg-background/40 text-foreground hover:bg-secondary/40",
+                              isActive && "border-gold/40 bg-gold/10 text-gold"
+                            )}
+                            onClick={() => {
+                              setSelectedParticipantReportId(report.id);
+                              setSelectedReport(report);
+                            }}
+                          >
+                            {participantName}
+                          </Button>
+                        );
+                      })}
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                      <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+                        <p className="text-xs text-muted-foreground">Actividad</p>
+                        <p className="text-sm font-medium text-foreground">{selectedReport.descripcion}</p>
+                      </div>
+                      <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+                        <p className="text-xs text-muted-foreground">Participantes</p>
+                        <p className="text-sm font-medium text-foreground">{modalParticipantReports.length}</p>
+                      </div>
+                      <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+                        <p className="text-xs text-muted-foreground">Costo actividad</p>
+                        <p className="text-sm font-medium text-gold">{formatCurrency(getActivityTotalForReport(selectedReport))}</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Tipo</p>
-                    <p className="text-sm font-medium text-foreground">{getTipoLabel(selectedReport.tipo)}</p>
+                    <p className="text-sm font-medium text-foreground">{getTipoLabel(activeDetailReport.tipo)}</p>
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Técnico</p>
@@ -2747,19 +3063,19 @@ export default function InformesPage() {
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Fecha</p>
-                    <p className="text-sm font-medium text-foreground">{selectedReport.fecha}</p>
+                    <p className="text-sm font-medium text-foreground">{activeDetailReport.fecha}</p>
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Costo técnico</p>
-                    <p className="text-sm font-medium text-gold">{formatCurrency(getEffectiveTechnicalCost(selectedReport))}</p>
+                    <p className="text-sm font-medium text-gold">{formatCurrency(getEffectiveTechnicalCost(activeDetailReport))}</p>
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Estado aprobación</p>
-                    <p className="text-sm font-medium text-foreground">{selectedReport.estadoAprobacionLider}</p>
+                    <p className="text-sm font-medium text-foreground">{activeDetailReport.estadoAprobacionLider}</p>
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Fecha aprobación</p>
-                    <p className="text-sm font-medium text-foreground">{selectedReport.fechaAprobacionLider || "Pendiente"}</p>
+                    <p className="text-sm font-medium text-foreground">{activeDetailReport.fechaAprobacionLider || "Pendiente"}</p>
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Fotos</p>
@@ -2771,7 +3087,7 @@ export default function InformesPage() {
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Último envío</p>
-                    <p className="text-sm font-medium text-foreground">{formatDateTime(selectedReport.fechaUltimoEnvioCorreo)}</p>
+                    <p className="text-sm font-medium text-foreground">{formatDateTime(activeDetailReport.fechaUltimoEnvioCorreo)}</p>
                   </div>
                   {client && (
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 md:col-span-2 lg:col-span-3">
@@ -2795,29 +3111,29 @@ export default function InformesPage() {
 
                 <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                   <p className="text-xs text-muted-foreground">Descripción</p>
-                  <p className="text-sm text-foreground">{selectedReport.descripcion || "—"}</p>
+                  <p className="text-sm text-foreground">{activeDetailReport.descripcion || "—"}</p>
                 </div>
 
-                {selectedReport.especificacion && (
+                {activeDetailReport.especificacion && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Especificación</p>
-                    <p className="text-sm text-foreground">{selectedReport.especificacion}</p>
+                    <p className="text-sm text-foreground">{activeDetailReport.especificacion}</p>
                   </div>
                 )}
 
-                {selectedReport.observaciones && (
+                {activeDetailReport.observaciones && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Observaciones</p>
-                    <p className="text-sm text-foreground">{selectedReport.observaciones}</p>
+                    <p className="text-sm text-foreground">{activeDetailReport.observaciones}</p>
                   </div>
                 )}
 
-                {selectedReport.tipo === "visita_tecnica" && (
+                {activeDetailReport.tipo === "visita_tecnica" && (
                   <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-3">
                       <div className="rounded-lg border border-border/50 bg-background/40 p-3">
                         <p className="text-xs text-muted-foreground">Categoría de la visita</p>
-                        <p className="text-sm font-medium text-foreground">{getVisitCategoryLabel(selectedReport.tipoVisita)}</p>
+                        <p className="text-sm font-medium text-foreground">{getVisitCategoryLabel(activeDetailReport.tipoVisita)}</p>
                       </div>
                       <div>
                         <p className="text-xs text-muted-foreground">Resumen economico</p>
@@ -2854,7 +3170,7 @@ export default function InformesPage() {
                           <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 text-xs text-muted-foreground space-y-1">
                             <p>Base actual: {formatCurrency(getSharedVisitBaseValue(selectedReport))}</p>
                             <p>Participación: {participationPercentage}%</p>
-                            <p>Costo técnico actual: {formatCurrency(selectedReport.costoActividad ?? 0)}</p>
+                            <p>Costo técnico actual: {formatCurrency(activeDetailReport.costoActividad ?? 0)}</p>
                             <p>Vista previa técnico: {formatCurrency(technicalPreviewValue)}</p>
                           </div>
                         )}
@@ -2891,7 +3207,7 @@ export default function InformesPage() {
                           onChange={(event) => setEditableClientCost(event.target.value)}
                           className={cn(
                             "pl-9 bg-background/70 border-gold/20 text-gold font-semibold",
-                            (editableClientCost.trim() ? Number(editableClientCost) : 0) !== (selectedReport.costoCliente ?? 0)
+                            (editableClientCost.trim() ? Number(editableClientCost) : 0) !== (activeDetailReport.costoCliente ?? 0)
                             && "border-gold shadow-[0_0_0_1px_rgba(234,179,8,0.25)]"
                           )}
                         />
@@ -2907,7 +3223,7 @@ export default function InformesPage() {
                         variant="outline"
                         className="w-full gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
                         onClick={handleSaveSelectedVisitClientCost}
-                        disabled={savingClientCost || (editableClientCost.trim() ? Number(editableClientCost) : 0) === (selectedReport.costoCliente ?? 0)}
+                        disabled={savingClientCost || (editableClientCost.trim() ? Number(editableClientCost) : 0) === (activeDetailReport.costoCliente ?? 0)}
                       >
                         {savingClientCost ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
@@ -2920,26 +3236,26 @@ export default function InformesPage() {
                   </div>
                 )}
 
-                {selectedReport.datosReceptor && (
+                {activeDetailReport.datosReceptor && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Receptor</p>
                     <p className="text-sm text-foreground">
-                      {selectedReport.datosReceptor.nombre}
-                      {selectedReport.datosReceptor.cedula ? ` · CC: ${selectedReport.datosReceptor.cedula}` : ""}
-                      {selectedReport.datosReceptor.cargo ? ` · ${selectedReport.datosReceptor.cargo}` : ""}
+                      {activeDetailReport.datosReceptor.nombre}
+                      {activeDetailReport.datosReceptor.cedula ? ` · CC: ${activeDetailReport.datosReceptor.cedula}` : ""}
+                      {activeDetailReport.datosReceptor.cargo ? ` · ${activeDetailReport.datosReceptor.cargo}` : ""}
                     </p>
                   </div>
                 )}
 
-                {(selectedReport.tipo === "mantenimiento_preventivo" || selectedReport.tipo === "visita_tecnica") && (
+                {(activeDetailReport.tipo === "mantenimiento_preventivo" || activeDetailReport.tipo === "visita_tecnica") && (
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                       <p className="text-xs text-muted-foreground">Bitácora</p>
-                      <p className="text-sm font-medium text-foreground">{selectedReport.bitacora ? "Sí" : "No"}</p>
+                      <p className="text-sm font-medium text-foreground">{activeDetailReport.bitacora ? "Sí" : "No"}</p>
                     </div>
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                       <p className="text-xs text-muted-foreground">Firma receptor</p>
-                      <p className="text-sm font-medium text-foreground">{selectedReport.firmaReceptor ? "Registrada" : "No registrada"}</p>
+                      <p className="text-sm font-medium text-foreground">{activeDetailReport.firmaReceptor ? "Registrada" : "No registrada"}</p>
                     </div>
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                       <p className="text-xs text-muted-foreground">Fotos evidencias</p>
@@ -2948,20 +3264,20 @@ export default function InformesPage() {
                   </div>
                 )}
 
-                {selectedReport.tipo === "recorrido" && (
+                {activeDetailReport.tipo === "recorrido" && (
                   <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                       <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                         <p className="text-xs text-muted-foreground">Punto de partida</p>
-                        <p className="text-sm font-medium text-foreground">{selectedReport.puntoPartida || "—"}</p>
+                        <p className="text-sm font-medium text-foreground">{activeDetailReport.puntoPartida || "—"}</p>
                       </div>
                       <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                         <p className="text-xs text-muted-foreground">Punto de llegada</p>
-                        <p className="text-sm font-medium text-foreground">{selectedReport.puntoLlegada || "—"}</p>
+                        <p className="text-sm font-medium text-foreground">{activeDetailReport.puntoLlegada || "—"}</p>
                       </div>
                       <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                         <p className="text-xs text-muted-foreground">Tipo de recorrido</p>
-                        <p className="text-sm font-medium text-foreground">{selectedReport.tipoRecorrido || "—"}</p>
+                        <p className="text-sm font-medium text-foreground">{activeDetailReport.tipoRecorrido || "—"}</p>
                       </div>
                     </div>
 
@@ -2969,7 +3285,7 @@ export default function InformesPage() {
                       <div className="space-y-1">
                         <p className="text-sm font-semibold text-foreground">Editar costo del recorrido</p>
                         <p className="text-xs text-muted-foreground">
-                          Valor configurado: {formatCurrency(getConfiguredRecorridoCost(selectedReport))}
+                          Valor configurado: {formatCurrency(getConfiguredRecorridoCost(activeDetailReport))}
                         </p>
                       </div>
                       <div className="relative max-w-40">
@@ -2981,7 +3297,7 @@ export default function InformesPage() {
                           onChange={(event) => setEditableTechnicalCost(event.target.value)}
                           className={cn(
                             "pl-9 bg-background/70 border-gold/20 text-gold font-semibold",
-                            (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) !== getEffectiveTechnicalCost(selectedReport)
+                            (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) !== getEffectiveTechnicalCost(activeDetailReport)
                             && "border-gold shadow-[0_0_0_1px_rgba(234,179,8,0.25)]"
                           )}
                         />
@@ -2991,7 +3307,7 @@ export default function InformesPage() {
                         variant="outline"
                         className="w-full gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
                         onClick={handleSaveSelectedTechnicalCost}
-                        disabled={savingTechnicalCost || (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) === getEffectiveTechnicalCost(selectedReport)}
+                        disabled={savingTechnicalCost || (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) === getEffectiveTechnicalCost(activeDetailReport)}
                       >
                         {savingTechnicalCost ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
@@ -3008,11 +3324,11 @@ export default function InformesPage() {
                   <div className="space-y-3">
                     <p className="text-xs font-semibold text-foreground/80 uppercase tracking-wide">Evidencia fotográfica</p>
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                      {selectedReport.fotosAntes && selectedReport.fotosAntes.length > 0 && (
+                      {activeDetailReport.fotosAntes && activeDetailReport.fotosAntes.length > 0 && (
                         <div className="space-y-2">
-                          <p className="text-xs text-muted-foreground">Antes ({selectedReport.fotosAntes.length})</p>
+                          <p className="text-xs text-muted-foreground">Antes ({activeDetailReport.fotosAntes.length})</p>
                           <div className="grid grid-cols-2 gap-2">
-                            {selectedReport.fotosAntes.map((url, index) => (
+                            {activeDetailReport.fotosAntes.map((url, index) => (
                               <a key={`antes-${index}`} href={url} target="_blank" rel="noreferrer" className="aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/20">
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img src={url} alt={`Antes ${index + 1}`} className="h-full w-full object-cover" />
@@ -3021,11 +3337,11 @@ export default function InformesPage() {
                           </div>
                         </div>
                       )}
-                      {selectedReport.fotosDespues && selectedReport.fotosDespues.length > 0 && (
+                      {activeDetailReport.fotosDespues && activeDetailReport.fotosDespues.length > 0 && (
                         <div className="space-y-2">
-                          <p className="text-xs text-muted-foreground">Después ({selectedReport.fotosDespues.length})</p>
+                          <p className="text-xs text-muted-foreground">Después ({activeDetailReport.fotosDespues.length})</p>
                           <div className="grid grid-cols-2 gap-2">
-                            {selectedReport.fotosDespues.map((url, index) => (
+                            {activeDetailReport.fotosDespues.map((url, index) => (
                               <a key={`despues-${index}`} href={url} target="_blank" rel="noreferrer" className="aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/20">
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
                                 <img src={url} alt={`Después ${index + 1}`} className="h-full w-full object-cover" />
@@ -3034,31 +3350,31 @@ export default function InformesPage() {
                           </div>
                         </div>
                       )}
-                      {selectedReport.fotoBitacora && (
+                      {activeDetailReport.fotoBitacora && (
                         <div className="space-y-2 md:col-span-2">
                           <p className="text-xs text-muted-foreground">Foto de bitácora</p>
                           <a
-                            href={selectedReport.fotoBitacora}
+                            href={activeDetailReport.fotoBitacora}
                             target="_blank"
                             rel="noreferrer"
                             className="block max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/20"
                           >
                             {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={selectedReport.fotoBitacora} alt="Foto de bitácora" className="h-full w-full object-cover" />
+                            <img src={activeDetailReport.fotoBitacora} alt="Foto de bitácora" className="h-full w-full object-cover" />
                           </a>
                         </div>
                       )}
-                      {selectedReport.fotoHerramienta && (
+                      {activeDetailReport.fotoHerramienta && (
                         <div className="space-y-2 md:col-span-2">
                           <p className="text-xs text-muted-foreground">Foto de herramienta</p>
                           <a
-                            href={selectedReport.fotoHerramienta}
+                            href={activeDetailReport.fotoHerramienta}
                             target="_blank"
                             rel="noreferrer"
                             className="block max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/20"
                           >
                             {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={selectedReport.fotoHerramienta} alt="Foto de herramienta" className="h-full w-full object-cover" />
+                            <img src={activeDetailReport.fotoHerramienta} alt="Foto de herramienta" className="h-full w-full object-cover" />
                           </a>
                         </div>
                       )}
@@ -3071,10 +3387,10 @@ export default function InformesPage() {
                     <Button
                       variant="outline"
                       className="gap-2 border-border/50 text-foreground/80"
-                      onClick={() => handleSendEmail(selectedReport)}
-                      disabled={sendingReportId === selectedReport.id}
+                      onClick={() => handleSendEmail(activeDetailReport)}
+                      disabled={sendingReportId === activeDetailReport.id}
                     >
-                      {sendingReportId === selectedReport.id ? (
+                      {sendingReportId === activeDetailReport.id ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
                       ) : (
                         <Mail className="h-4 w-4" />
@@ -3082,11 +3398,11 @@ export default function InformesPage() {
                       Enviar correo
                     </Button>
                   )}
-                  <Button
-                    variant="outline"
-                    className="gap-2 border-border/50 text-foreground/80"
-                    onClick={() => handleDownloadPDF(selectedReport)}
-                  >
+                    <Button
+                      variant="outline"
+                      className="gap-2 border-border/50 text-foreground/80"
+                      onClick={() => handleDownloadPDF(activeDetailReport)}
+                    >
                     <Download className="h-4 w-4" />
                     Descargar PDF
                   </Button>
