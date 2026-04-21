@@ -480,13 +480,49 @@ function mergeGroupActivityMetadata(report: ActivityReport, relatedReport: Activ
     ...report,
     registroActividadId: relatedReport.registroActividadId || report.registroActividadId,
     porcentajeParticipacion: relatedReport.porcentajeParticipacion ?? report.porcentajeParticipacion,
-    costoActividadDefault: relatedReport.costoActividadDefault || report.costoActividadDefault,
-    costoActividad: relatedReport.costoActividad || report.costoActividad,
+    costoActividadDefault: report.costoActividadDefault || relatedReport.costoActividadDefault,
+    costoActividad: report.costoActividad,
     valorActividadBaseGlobal: relatedReport.valorActividadBaseGlobal ?? report.valorActividadBaseGlobal,
     valorActividadAplicadoGlobal: relatedReport.valorActividadAplicadoGlobal ?? report.valorActividadAplicadoGlobal,
     valorModificado: report.valorModificado || relatedReport.valorModificado,
     motivoModificacionValor: report.motivoModificacionValor || relatedReport.motivoModificacionValor,
   };
+}
+
+async function resolveRegistrosPeriodoIds(rows: RegistroActividadRow[]): Promise<Map<string, string>> {
+  const missingPeriodoRows = rows.filter((row) => !row.periodo_id && row.fecha);
+  if (missingPeriodoRows.length === 0) {
+    return new Map();
+  }
+
+  const fechas = Array.from(new Set(missingPeriodoRows.map((row) => row.fecha)));
+  const minFecha = [...fechas].sort()[0];
+  const maxFecha = [...fechas].sort().at(-1);
+
+  if (!minFecha || !maxFecha) {
+    return new Map();
+  }
+
+  const { data: periodos, error } = await supabase
+    .from("periodos_liquidacion")
+    .select("id, fecha_inicio, fecha_fin")
+    .lte("fecha_inicio", maxFecha)
+    .gte("fecha_fin", minFecha)
+    .order("fecha_inicio", { ascending: false });
+
+  if (error) throw error;
+
+  const periodosList = periodos || [];
+  const resolved = new Map<string, string>();
+
+  missingPeriodoRows.forEach((row) => {
+    const periodo = periodosList.find((item: { id: string; fecha_inicio: string; fecha_fin: string }) => row.fecha >= item.fecha_inicio && row.fecha <= item.fecha_fin);
+    if (periodo?.id) {
+      resolved.set(row.id, periodo.id);
+    }
+  });
+
+  return resolved;
 }
 
 function buildVisitMirrorStrictKey(params: {
@@ -1303,8 +1339,8 @@ async function syncGroupedActivityLiquidationValue(params: {
 }
 
 async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Promise<ActivityReport[]> {
-  const [{ data: registros }, { data: allParticipantes }, { data: actividades }, { data: periodos }, { data: approvalItems }] = await Promise.all([
-    supabase.from("registros_actividades").select("id, actividad_id, lider_id, grupo_id, fecha, cliente_id, cliente_nombre, especificacion, valor_actividad_base, valor_actividad_aplicado, valor_modificado, motivo_modificacion_valor, enviado_correo, fecha_ultimo_envio_correo, fecha_creacion").order("fecha", { ascending: false }),
+    const [{ data: registros }, { data: allParticipantes }, { data: actividades }, { data: periodos }, { data: approvalItems }] = await Promise.all([
+    supabase.from("registros_actividades").select("id, actividad_id, lider_id, grupo_id, fecha, cliente_id, cliente_nombre, especificacion, valor_actividad_base, valor_actividad_aplicado, valor_modificado, motivo_modificacion_valor, enviado_correo, fecha_ultimo_envio_correo, periodo_id, fecha_creacion").order("fecha", { ascending: false }),
     supabase.from("actividad_participantes").select("registro_actividad_id, tecnico_id, porcentaje, valor_calculado"),
     supabase.from("actividades").select("id, codigo, nombre"),
     supabase.from("periodos_liquidacion").select("id, fecha_inicio, fecha_fin").order("fecha_inicio", { ascending: false }),
@@ -1335,13 +1371,14 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
     return p?.id || "";
   };
 
+  const registroPeriodoIds = await resolveRegistrosPeriodoIds((registros || []) as RegistroActividadRow[]);
   const reports: ActivityReport[] = [];
   for (const reg of (registros || []) as RegistroActividadRow[]) {
     const parts = participantesByRegistro.get(reg.id) || [];
     if (parts.length === 0) continue;
 
     const act = reg.actividad_id ? actividadesById.get(reg.actividad_id) : undefined;
-    const periodoId = reg.periodo_id || findPeriodo(reg.fecha);
+    const periodoId = reg.periodo_id || registroPeriodoIds.get(reg.id) || findPeriodo(reg.fecha);
 
     for (const part of parts) {
       const approval = approvalByTecnicoFecha.get(`${part.tecnico_id}|${reg.fecha}`);
@@ -1871,20 +1908,71 @@ export async function updateActividadGrupalBaseAdmin(
       0
     );
 
+    let legacyRegistroQuery = supabase
+      .from("registros_actividades")
+      .select("id, valor_actividad_base")
+      .eq("fecha", sourceReport.fecha)
+      .eq("grupo_id", sourceReport.grupo_id);
+
+    if (sourceReport.cliente_id) {
+      legacyRegistroQuery = legacyRegistroQuery.eq("cliente_id", sourceReport.cliente_id);
+    } else {
+      legacyRegistroQuery = legacyRegistroQuery.is("cliente_id", null);
+    }
+
+    const { data: legacyRegistroCandidates, error: legacyRegistroCandidatesError } = await legacyRegistroQuery;
+    if (legacyRegistroCandidatesError) throw legacyRegistroCandidatesError;
+
+    let legacyRegistro = (legacyRegistroCandidates || [])[0] as { id: string; valor_actividad_base?: number | string | null } | undefined;
+
+    if ((legacyRegistroCandidates || []).length > 1) {
+      const candidateRegistroIds = (legacyRegistroCandidates || []).map((item: { id: string }) => item.id);
+      const { data: candidateParticipants, error: candidateParticipantsError } = await supabase
+        .from("actividad_participantes")
+        .select("registro_actividad_id, tecnico_id")
+        .in("registro_actividad_id", candidateRegistroIds);
+      if (candidateParticipantsError) throw candidateParticipantsError;
+
+      const expectedTechnicianIds = Array.from(new Set(participants.map((participant: { tecnico_id: string }) => participant.tecnico_id))).sort();
+      const participantsByRegistro = new Map<string, string[]>();
+
+      (candidateParticipants || []).forEach((row: { registro_actividad_id: string; tecnico_id: string }) => {
+        const current = participantsByRegistro.get(row.registro_actividad_id) || [];
+        current.push(row.tecnico_id);
+        participantsByRegistro.set(row.registro_actividad_id, current);
+      });
+
+      legacyRegistro = (legacyRegistroCandidates || []).find((candidate: { id: string }) => {
+        const registroParticipantIds = Array.from(new Set(participantsByRegistro.get(candidate.id) || [])).sort();
+        return registroParticipantIds.length === expectedTechnicianIds.length
+          && registroParticipantIds.every((value, index) => value === expectedTechnicianIds[index]);
+      }) || legacyRegistro;
+    }
+
+    const participantResults = participants.map((participant: { id: string; tecnico_id: string; costo_actividad?: number | string | null; periodo_id?: string | null }) => {
+      const currentValue = Number(participant.costo_actividad) || 0;
+      const participantOverride = resolveSharedParticipantOverride(normalizedParticipantOverrides, {
+        reportId: participant.id,
+        tecnicoId: participant.tecnico_id,
+      });
+      const percentage = participantOverride
+        ? Number(participantOverride.percentage ?? 0) || 0
+        : currentTotal > 0
+          ? Number(((currentValue / currentTotal) * 100).toFixed(2))
+          : Number((100 / participantsCount).toFixed(2));
+      const nextTechnicalValue = participantOverride?.valorGanado
+        ?? calculateGroupParticipantValue(normalizedBaseValue, percentage);
+
+      return {
+        participant,
+        participantOverride,
+        percentage,
+        nextTechnicalValue,
+      };
+    });
+
     await Promise.all(
-      participants.map(async (participant: { id: string; tecnico_id: string; costo_actividad?: number | string | null; periodo_id?: string | null }) => {
-        const currentValue = Number(participant.costo_actividad) || 0;
-        const participantOverride = resolveSharedParticipantOverride(normalizedParticipantOverrides, {
-          reportId: participant.id,
-          tecnicoId: participant.tecnico_id,
-        });
-        const percentage = participantOverride
-          ? Number(participantOverride.percentage ?? 0) || 0
-          : currentTotal > 0
-            ? Number(((currentValue / currentTotal) * 100).toFixed(2))
-            : Number((100 / participantsCount).toFixed(2));
-        const nextTechnicalValue = participantOverride?.valorGanado
-          ?? calculateGroupParticipantValue(normalizedBaseValue, percentage);
+      participantResults.map(async ({ participant, participantOverride, percentage, nextTechnicalValue }) => {
 
         const { error: reportUpdateError } = await supabase
           .from("reportes_actividad")
@@ -1913,6 +2001,33 @@ export async function updateActividadGrupalBaseAdmin(
         });
       })
     );
+
+    if (legacyRegistro) {
+      const normalizedOriginalBase = Number(legacyRegistro.valor_actividad_base ?? 0) || 0;
+
+      const { error: registroUpdateError } = await supabase
+        .from("registros_actividades")
+        .update({
+          valor_actividad_aplicado: normalizedBaseValue,
+          valor_modificado: normalizedBaseValue !== normalizedOriginalBase,
+        })
+        .eq("id", legacyRegistro.id);
+      if (registroUpdateError) throw registroUpdateError;
+
+      await Promise.all(
+        participantResults.map(async ({ participant, percentage, nextTechnicalValue }) => {
+          const { error: participantUpdateError } = await supabase
+            .from("actividad_participantes")
+            .update({
+              porcentaje: percentage,
+              valor_calculado: nextTechnicalValue,
+            })
+            .eq("registro_actividad_id", legacyRegistro.id)
+            .eq("tecnico_id", participant.tecnico_id);
+          if (participantUpdateError) throw participantUpdateError;
+        })
+      );
+    }
 
     invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
     invalidateCachedValue("liquidacion:entries");

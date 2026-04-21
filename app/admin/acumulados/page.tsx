@@ -195,7 +195,7 @@ export default function AcumuladosPage() {
         // Extra se calcula sobre actividades aprobadas (excluidos recorridos) del grupo, excluyendo al técnico configurado.
         const group = groups.find((g) => g.liderId === acc.liderId);
         const groupMembers = group ? users.filter((u) => group.miembros.includes(u.id) && u.id !== acc.liderId) : [];
-        const excludedTechnicianIds = acc.tecnicosExcluidosExtraIds?.length ? acc.tecnicosExcluidosExtraIds : groupMembers[0] ? [groupMembers[0].id] : [];
+        const excludedTechnicianIds = acc.tecnicosExcluidosExtraIds?.length ? acc.tecnicosExcluidosExtraIds : [];
         let extraBase = 0;
         groupMembers.forEach((member) => {
           if (excludedTechnicianIds.includes(member.id)) return;
@@ -456,11 +456,22 @@ export default function AcumuladosPage() {
           const nonRecorridoReports = approvedReports.filter((r) => r.tipo !== "recorrido");
 
           const groupMembers = group ? users.filter((u) => group.miembros.includes(u.id) && u.id !== acc.liderId) : [];
-          const defaultExcludedIds = groupMembers[0] ? [groupMembers[0].id] : [];
           const draft = leaderExtraDrafts[acc.liderId];
           const draftPercentage = draft?.porcentaje ?? String(acc.porcentajeExtraLiderAplicado);
           const draftActive = draft?.activo ?? acc.extraLiderActivo;
-          const resolvedExcludedIds = draft?.tecnicosExcluidosIds ?? acc.tecnicosExcluidosExtraIds ?? defaultExcludedIds;
+          const resolvedExcludedIds = draft?.tecnicosExcluidosIds ?? acc.tecnicosExcluidosExtraIds ?? [];
+          const memberTotals = new Map(
+            groupMembers.map((member) => [
+              member.id,
+              nonRecorridoReports
+                .filter((report) => report.tecnicoId === member.id)
+                .reduce((sum, report) => sum + report.costoActividad, 0),
+            ])
+          );
+          const extraLeaderBase = groupMembers.reduce((sum, member) => {
+            if (resolvedExcludedIds.includes(member.id)) return sum;
+            return sum + (memberTotals.get(member.id) || 0);
+          }, 0);
           const excludedSearch = excludedSearchByLeader[acc.liderId] || "";
           const filteredGroupMembers = groupMembers.filter((member) =>
             `${member.nombre} ${member.apellido}`.toLowerCase().includes(excludedSearch.toLowerCase())
@@ -523,6 +534,9 @@ export default function AcumuladosPage() {
                         <p className="text-[10px] text-muted-foreground">Extra Líder</p>
                         <p className="text-[9px] text-purple-400/70 mt-1">
                           {acc.extraLiderActivo ? `${acc.porcentajeExtraLiderAplicado}% activo` : "Inactivo"}
+                        </p>
+                        <p className="text-[9px] text-muted-foreground mt-1">
+                          Base extra: {formatCurrency(extraLeaderBase)}
                         </p>
                       </div>
                       <div className="rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-3 text-center">
@@ -664,17 +678,17 @@ export default function AcumuladosPage() {
                       </div>
                       <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2 text-sm">
                         <p className="text-xs text-muted-foreground">
-                          El extra líder corresponde a un <span className="text-purple-400 font-bold">{acc.porcentajeExtraLiderAplicado}%</span> del valor total de las actividades aprobadas, excluidos recorridos y excluyendo a los técnicos seleccionados para este líder en el período.
+                          El extra líder corresponde a un <span className="text-purple-400 font-bold">{acc.porcentajeExtraLiderAplicado}%</span> de las actividades aprobadas no recorridos de los técnicos del grupo. No incluye actividades del líder y respeta los técnicos excluidos para este período.
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Base actual del extra líder: <span className="font-semibold text-foreground">{formatCurrency(extraLeaderBase)}</span>
                         </p>
                         {groupMembers.length === 0 ? (
                           <p className="text-xs text-muted-foreground italic mt-2">No hay integrantes en el grupo de este líder.</p>
                         ) : (
                           <div className="grid grid-cols-1 gap-1 mt-2">
                             {groupMembers.map((member, idx) => {
-                              const memberReports = nonRecorridoReports.filter(
-                                (r) => r.tecnicoId === member.id
-                              );
-                              const memberTotal = memberReports.reduce((s, r) => s + r.costoActividad, 0);
+                              const memberTotal = memberTotals.get(member.id) || 0;
                               const isExcluded = resolvedExcludedIds.includes(member.id);
                               const extraApplied = isExcluded ? 0 : Math.round(memberTotal * acc.porcentajeExtraLiderAplicado / 100);
 

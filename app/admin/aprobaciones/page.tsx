@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
@@ -95,6 +95,10 @@ function formatCurrencyDelta(value: number) {
   return value > 0 ? `+${formatted}` : `-${formatted}`;
 }
 
+function formatRoundedPercentage(value: number) {
+  return `${Math.round(value)}%`;
+}
+
 function formatPeriodLabel(period?: LiquidationPeriod) {
   if (!period) return "Sin período";
   return `${period.fechaInicio} al ${period.fechaFin}`;
@@ -140,15 +144,21 @@ function getGroupActivityIdentity(report: ActivityReport) {
   ].join("|");
 }
 
+function getGroupActivityVisualIdentity(report: ActivityReport) {
+  if (!isGroupActivity(report)) return report.id;
+
+  return [
+    "group-visual",
+    report.fecha,
+    report.periodoId || "sin-periodo",
+    report.grupoId,
+    report.clienteId || "sin-cliente",
+  ].join("|");
+}
+
 function getVisualActivityIdentity(report: ActivityReport) {
   if (isGroupActivity(report)) {
-    return [
-      "group-visual",
-      report.fecha,
-      report.periodoId || "sin-periodo",
-      report.grupoId,
-      report.clienteId || "sin-cliente",
-    ].join("|");
+    return getGroupActivityVisualIdentity(report);
   }
 
   if (isSharedVisit(report)) {
@@ -358,6 +368,8 @@ export default function AprobacionesPage() {
   const [defaultVisitCost, setDefaultVisitCost] = useState("");
   const [savingDefaultVisitCost, setSavingDefaultVisitCost] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
+  const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
+  const previousCostDraftRef = useRef<number | null>(null);
 
   // Paginación
   const [currentPage, setCurrentPage] = useState(1);
@@ -397,6 +409,18 @@ export default function AprobacionesPage() {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  const refreshReports = useCallback(async (reportId?: string | null) => {
+    const refreshedReports = await getReportesActividad();
+    setReports(refreshedReports);
+
+    if (!reportId) {
+      setSelectedReport(null);
+      return;
+    }
+
+    setSelectedReport(refreshedReports.find((item) => item.id === reportId) || null);
   }, []);
 
   const sharedActivityStats = useMemo(() => {
@@ -547,11 +571,15 @@ export default function AprobacionesPage() {
       defaultCost: getDefaultCostForReport(item),
     })));
   }, [getDefaultCostForReport, getParticipantName, getParticipationPercentageForReport, getSharedReportsForReport]);
-  const syncParticipantDraftAmounts = useCallback((nextDrafts: SharedParticipantDraft[]) => {
-    const normalized = nextDrafts.map((draft) => ({
+  const normalizeParticipantDrafts = useCallback((nextDrafts: SharedParticipantDraft[]) => {
+    return nextDrafts.map((draft) => ({
       ...draft,
-      amount: String(Math.max(0, Number(draft.amount || 0))),
+      amount: String(Math.max(0, Math.round(Number(draft.amount || 0) || 0))),
+      percentage: String(Math.max(0, Number(draft.percentage || 0) || 0)),
     }));
+  }, []);
+  const syncParticipantDraftAmounts = useCallback((nextDrafts: SharedParticipantDraft[]) => {
+    const normalized = normalizeParticipantDrafts(nextDrafts);
     const totalAmount = normalized.reduce((sum, draft) => sum + (Number(draft.amount || 0) || 0), 0);
 
     return normalized.map((draft, index) => {
@@ -571,14 +599,63 @@ export default function AprobacionesPage() {
         amount: String(amountValue),
       };
     });
-  }, []);
+  }, [normalizeParticipantDrafts]);
+  const redistributeParticipantDraftAmounts = useCallback((nextDrafts: SharedParticipantDraft[], nextTotal: number) => {
+    const normalizedTotal = Math.max(0, Math.round(Number(nextTotal) || 0));
+    if (nextDrafts.length === 0) return nextDrafts;
+
+    const normalizedDrafts = normalizeParticipantDrafts(nextDrafts);
+    const currentPercentageTotal = normalizedDrafts.reduce((sum, draft) => sum + (Number(draft.percentage || 0) || 0), 0);
+
+    const normalizedPercentages = currentPercentageTotal > 0
+      ? normalizedDrafts.map((draft, index) => {
+        if (index === normalizedDrafts.length - 1) {
+          const assigned = normalizedDrafts.slice(0, index).reduce((sum, item) => {
+            const currentPercentage = Number(item.percentage || 0) || 0;
+            return sum + Number(((currentPercentage / currentPercentageTotal) * 100).toFixed(2));
+          }, 0);
+
+          return Number((100 - assigned).toFixed(2));
+        }
+
+        return Number((((Number(draft.percentage || 0) || 0) / currentPercentageTotal) * 100).toFixed(2));
+      })
+      : normalizedDrafts.map((_, index) => index === normalizedDrafts.length - 1
+        ? Number((100 - ((100 / normalizedDrafts.length) * index)).toFixed(2))
+        : Number((100 / normalizedDrafts.length).toFixed(2))
+      );
+
+    if (normalizedTotal === 0) {
+      return normalizedDrafts.map((draft, index) => ({
+        ...draft,
+        amount: "0",
+        percentage: String(Math.max(0, normalizedPercentages[index] || 0)),
+      }));
+    }
+
+    let assigned = 0;
+
+    return normalizedDrafts.map((draft, index) => {
+      const currentPercentage = Math.max(0, normalizedPercentages[index] || 0);
+      const amount = index === normalizedDrafts.length - 1
+        ? normalizedTotal - assigned
+        : Math.max(0, Math.round((currentPercentage / 100) * normalizedTotal));
+
+      assigned += amount;
+      return {
+        ...draft,
+        amount: String(amount),
+        percentage: String(currentPercentage),
+      };
+    });
+  }, [normalizeParticipantDrafts]);
   const getNormalizedSharedParticipantDrafts = useCallback(() => {
-    return syncParticipantDraftAmounts(sharedParticipantDrafts).map((draft) => ({
+    return normalizeParticipantDrafts(sharedParticipantDrafts).map((draft) => ({
       ...draft,
       percentage: Number(draft.percentage || 0) || 0,
       amount: Number(draft.amount || 0) || 0,
     }));
-  }, [sharedParticipantDrafts, syncParticipantDraftAmounts]);
+  }, [normalizeParticipantDrafts, sharedParticipantDrafts]);
   const handleSharedParticipantAmountChange = useCallback((reportId: string, value: string) => {
     setSharedParticipantDrafts((current) => syncParticipantDraftAmounts(
       current.map((draft) => {
@@ -590,14 +667,42 @@ export default function AprobacionesPage() {
       })
     ));
   }, [syncParticipantDraftAmounts]);
+  const handleEditableCostChange = useCallback((value: string) => {
+    setEditableCost(value);
+
+    if (!selectedReport || !usesSharedBasePricing(selectedReport)) return;
+
+    setSharedParticipantDrafts((current) => {
+      if (current.length === 0) return current;
+      return redistributeParticipantDraftAmounts(current, Number(value || 0));
+    });
+  }, [redistributeParticipantDraftAmounts, selectedReport]);
   useEffect(() => {
-    if (!selectedReport || !usesSharedBasePricing(selectedReport) || sharedParticipantDrafts.length === 0) return;
-    setSharedParticipantDrafts((current) => syncParticipantDraftAmounts(current));
-  }, [costDraft, selectedReport, sharedParticipantDrafts.length, syncParticipantDraftAmounts]);
+    previousCostDraftRef.current = null;
+  }, [selectedReport?.id]);
+  useEffect(() => {
+    if (!selectedReport || !usesSharedBasePricing(selectedReport)) {
+      previousCostDraftRef.current = costDraft;
+      return;
+    }
+
+    if (previousCostDraftRef.current == null) {
+      previousCostDraftRef.current = costDraft;
+      return;
+    }
+
+    if (previousCostDraftRef.current === costDraft || sharedParticipantDrafts.length === 0) {
+      return;
+    }
+
+    previousCostDraftRef.current = costDraft;
+    setSharedParticipantDrafts((current) => redistributeParticipantDraftAmounts(current, costDraft));
+  }, [costDraft, redistributeParticipantDraftAmounts, selectedReport, sharedParticipantDrafts.length]);
   useEffect(() => {
     if (!selectedReport) {
       setEditableCost("");
       setSharedParticipantDrafts([]);
+      setSaveSuccessMessage(null);
       return;
     }
 
@@ -605,12 +710,13 @@ export default function AprobacionesPage() {
     setSharedParticipantDrafts(usesSharedBasePricing(selectedReport)
       ? buildSharedParticipantDrafts(selectedReport)
       : []);
+    setSaveSuccessMessage(null);
   }, [buildSharedParticipantDrafts, getEditableValueForReport, selectedReport]);
   const isSharedParticipantDraftDirty = useMemo(() => {
     if (!selectedReport || !usesSharedBasePricing(selectedReport)) return false;
 
-    const currentDrafts = syncParticipantDraftAmounts(buildSharedParticipantDrafts(selectedReport));
-    const nextDrafts = syncParticipantDraftAmounts(sharedParticipantDrafts);
+    const currentDrafts = normalizeParticipantDrafts(buildSharedParticipantDrafts(selectedReport));
+    const nextDrafts = normalizeParticipantDrafts(sharedParticipantDrafts);
 
     if (currentDrafts.length !== nextDrafts.length) return true;
 
@@ -620,7 +726,7 @@ export default function AprobacionesPage() {
 
       return currentDraft.percentage !== draft.percentage || currentDraft.amount !== draft.amount;
     });
-  }, [buildSharedParticipantDrafts, selectedReport, sharedParticipantDrafts, syncParticipantDraftAmounts]);
+  }, [buildSharedParticipantDrafts, normalizeParticipantDrafts, selectedReport, sharedParticipantDrafts]);
   const sharedParticipantsDraftSummary = useMemo(() => {
     const participants = getNormalizedSharedParticipantDrafts();
     const totalAmount = participants.reduce((sum, participant) => sum + participant.amount, 0);
@@ -977,6 +1083,8 @@ export default function AprobacionesPage() {
         }))
         : undefined;
       await persistCost(selectedReport, costDraft, { sharedParticipants });
+      await refreshReports(selectedReport.id);
+      setSaveSuccessMessage("Datos sincronizados correctamente.");
       if (usesSharedBasePricing(selectedReport)) {
         setSharedParticipantDrafts(syncParticipantDraftAmounts(
           (sharedParticipants || []).map((participant) => ({
@@ -1018,6 +1126,8 @@ export default function AprobacionesPage() {
       }));
 
       await persistCost(selectedReport, costDraft, { sharedParticipants });
+      await refreshReports(selectedReport.id);
+      setSaveSuccessMessage("Reparto técnico sincronizado correctamente.");
       setSharedParticipantDrafts(syncParticipantDraftAmounts(
         sharedParticipants.map((participant) => ({
           reportId: participant.reportId,
@@ -1395,6 +1505,7 @@ export default function AprobacionesPage() {
               return (
                 <TableRow
                   key={row.id}
+                  data-testid={`approval-row-${row.id}`}
                   className={cn(
                     "border-border/50 hover:bg-secondary/30",
                     row.estadoAprobacionLider === "pendiente" && "bg-amber-500/3"
@@ -1449,6 +1560,7 @@ export default function AprobacionesPage() {
                       <Button
                         variant="ghost"
                         size="icon"
+                        data-testid={`approval-open-${row.id}`}
                         className="h-8 w-8 text-muted-foreground hover:text-foreground"
                         onClick={() => {
                           setSelectedReport(report);
@@ -1792,7 +1904,7 @@ export default function AprobacionesPage() {
       </div>
 
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="bg-card border-border sm:max-w-2xl max-h-[85vh] overflow-y-auto">
+        <DialogContent data-testid="approval-detail-dialog" className="bg-card border-border sm:max-w-2xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-foreground">Detalle del Informe</DialogTitle>
           </DialogHeader>
@@ -1816,9 +1928,33 @@ export default function AprobacionesPage() {
             const estado = estadoAprobacionConfig[normalizedModalStatus];
             const isSharedPricing = usesSharedBasePricing(selectedReport);
             const defaultCost = getDefaultCostForReport(selectedReport);
-            const comparisonReferenceValue = getComparisonReferenceValue(selectedReport, defaultCost);
-            const comparisonCurrentValue = getComparisonCurrentValue(selectedReport);
-            const hasTechnicianChange = shouldShowValueChange(selectedReport, comparisonReferenceValue, comparisonCurrentValue);
+            const groupActivityReferenceValue = selectedReport.tipo === "actividad_grupal"
+              ? (() => {
+                const explicitBase = modalReports.find((item) => item.valorActividadBaseGlobal != null)?.valorActividadBaseGlobal;
+                if (explicitBase != null) {
+                  return Number(explicitBase ?? 0) || 0;
+                }
+
+                const participantDefaultsTotal = modalReports.reduce(
+                  (sum, item) => sum + (Number(item.costoActividadDefault ?? 0) || 0),
+                  0
+                );
+
+                return participantDefaultsTotal > 0
+                  ? participantDefaultsTotal
+                  : getActivityTotalForReport(selectedReport);
+              })()
+              : getComparisonReferenceValue(selectedReport, defaultCost);
+            const comparisonReferenceValue = groupActivityReferenceValue;
+            const comparisonCurrentValue = selectedReport.tipo === "actividad_grupal"
+              ? getActivityTotalForReport(selectedReport)
+              : getComparisonCurrentValue(selectedReport);
+            const comparisonCurrentLabel = selectedReport.tipo === "actividad_grupal"
+              ? "Base actual"
+              : getComparisonCurrentLabel(selectedReport);
+            const hasTechnicianChange = selectedReport.tipo === "actividad_grupal"
+              ? !!selectedReport.valorModificado || !!selectedReport.motivoModificacionValor || comparisonReferenceValue !== comparisonCurrentValue
+              : shouldShowValueChange(selectedReport, comparisonReferenceValue, comparisonCurrentValue);
             const costDelta = comparisonCurrentValue - comparisonReferenceValue;
             const isDeleting = deletingReportId === selectedReport.id;
 
@@ -2027,10 +2163,11 @@ export default function AprobacionesPage() {
                       <div className="relative w-full max-w-xs">
                         <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
                         <Input
+                          data-testid="approval-cost-input"
                           type="number"
                           min="0"
                           value={editableCost}
-                          onChange={(e) => setEditableCost(e.target.value)}
+                          onChange={(e) => handleEditableCostChange(e.target.value)}
                           className={cn(
                             "pl-9 bg-background/70 border-gold/20 text-gold font-semibold",
                             isCostDirty && "border-gold shadow-[0_0_0_1px_rgba(234,179,8,0.25)]"
@@ -2040,6 +2177,7 @@ export default function AprobacionesPage() {
                       <Button
                         type="button"
                         variant="outline"
+                        data-testid="approval-save-value"
                         className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
                         onClick={handleSaveCost}
                         disabled={(!(isCostDirty || isSharedParticipantDraftDirty)) || savingCost || processing}
@@ -2057,20 +2195,29 @@ export default function AprobacionesPage() {
                         ? "Aprueba la actividad completa. Aquí puedes ajustar cuánto recibe cada técnico y el porcentaje que le corresponde antes de guardar o aprobar."
                         : "El admin puede ajustar este valor incluso si la actividad está pendiente o ya fue aprobada."}
                     </p>
+                    {saveSuccessMessage && (
+                      <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs font-medium text-emerald-400">
+                        <div data-testid="approval-save-success">{saveSuccessMessage}</div>
+                      </div>
+                    )}
                     {isSharedPricing && (
                       <div className="mt-3 space-y-3">
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                           <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
-                            <p className="text-xs text-muted-foreground">Costo actividad registrado</p>
-                            <p className="text-sm font-semibold text-foreground">{formatCurrency(getSharedGroupReferenceBaseValue(selectedReport))}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {selectedReport.tipo === "actividad_grupal" ? "Base total registrada" : "Costo actividad registrado"}
+                            </p>
+                            <p className="text-sm font-semibold text-foreground">{formatCurrency(comparisonReferenceValue)}</p>
                           </div>
                           <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
-                            <p className="text-xs text-muted-foreground">Costo actividad actual</p>
-                            <p className="text-sm font-semibold text-gold">{formatCurrency(getActivityTotalForReport(selectedReport))}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {selectedReport.tipo === "actividad_grupal" ? "Base total actual" : "Costo actividad actual"}
+                            </p>
+                            <p className="text-sm font-semibold text-gold">{formatCurrency(comparisonCurrentValue)}</p>
                           </div>
                           <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
                             <p className="text-xs text-muted-foreground">Participantes</p>
-                            <p className="text-sm font-semibold text-foreground">{sharedParticipantDrafts.length}</p>
+                            <p className="text-sm font-semibold text-foreground">{sharedParticipantsDraftSummary.participants.length}</p>
                             <p className="text-xs text-muted-foreground">La aprobación aplica a toda la actividad</p>
                           </div>
                         </div>
@@ -2078,7 +2225,7 @@ export default function AprobacionesPage() {
                           <div className="mb-3 flex items-center justify-between gap-3">
                             <div>
                               <p className="text-sm font-semibold text-foreground">Reparto por técnico</p>
-                              <p className="text-xs text-muted-foreground">Edita solo el valor. El porcentaje se calcula automáticamente.</p>
+                              <p className="text-xs text-muted-foreground">Edita los valores y los porcentajes se calculan automáticamente. Para guardar, el total debe completar 100%.</p>
                             </div>
                             <Badge variant="outline" className="border-gold/20 bg-gold/10 text-gold">
                               Base: {formatCurrency(costDraft)}
@@ -2094,7 +2241,7 @@ export default function AprobacionesPage() {
                             <div className="rounded-lg border border-border/50 bg-background/40 p-3">
                               <p className="text-xs text-muted-foreground">Total porcentaje</p>
                               <p className={cn("text-sm font-semibold", sharedParticipantsDraftSummary.isPercentageBalanced ? "text-emerald-400" : "text-red-400")}>
-                                {sharedParticipantsDraftSummary.totalPercentage.toFixed(2)}%
+                                {formatRoundedPercentage(sharedParticipantsDraftSummary.totalPercentage)}
                               </p>
                             </div>
                             <div className="rounded-lg border border-border/50 bg-background/40 p-3">
@@ -2104,22 +2251,26 @@ export default function AprobacionesPage() {
                               </p>
                             </div>
                           </div>
+                          <p className="mb-3 text-xs text-muted-foreground">
+                            Los porcentajes mostrados son automáticos y se redondean visualmente. El reparto solo se puede guardar cuando el total del porcentaje sea 100%.
+                          </p>
                           <div className="space-y-2">
                             {sharedParticipantsDraftSummary.participants.map((participant) => (
                               <div key={participant.reportId} className="grid grid-cols-1 gap-2 rounded-lg border border-border/50 bg-background/40 p-3 sm:grid-cols-[minmax(0,1fr)_110px_140px]">
                                 <div>
                                   <p className="text-sm font-medium text-foreground">{participant.nombre}</p>
-                                  <p className="text-xs text-muted-foreground">Porcentaje calculado: {participant.percentage.toFixed(2)}%</p>
+                                  <p className="text-xs text-muted-foreground">Porcentaje calculado: {formatRoundedPercentage(participant.percentage)}</p>
                                 </div>
                                 <div className="flex items-center justify-end rounded-md border border-border/50 bg-background/70 px-3 text-sm font-medium text-foreground">
-                                  {participant.percentage.toFixed(2)}%
+                                  {formatRoundedPercentage(participant.percentage)}
                                 </div>
                                 <div className="relative">
                                   <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
                                   <Input
+                                    data-testid={`approval-participant-amount-${participant.reportId}`}
                                     type="number"
                                     min="0"
-                                    value={sharedParticipantDrafts.find((item) => item.reportId === participant.reportId)?.amount || "0"}
+                                    value={String(participant.amount)}
                                     onChange={(e) => handleSharedParticipantAmountChange(participant.reportId, e.target.value)}
                                     className="h-9 pl-9 bg-background/70 border-border/50 text-right text-gold"
                                   />
@@ -2131,6 +2282,7 @@ export default function AprobacionesPage() {
                             <Button
                               type="button"
                               variant="outline"
+                              data-testid="approval-save-split"
                               className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
                               onClick={handleSaveParticipantSplit}
                               disabled={!isSharedParticipantDraftDirty || !sharedParticipantsDraftSummary.canSave || savingParticipantSplit || savingCost || processing}
@@ -2179,7 +2331,7 @@ export default function AprobacionesPage() {
                         <p className="text-sm font-semibold text-foreground">{formatCurrency(comparisonReferenceValue)}</p>
                       </div>
                       <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
-                        <p className="text-xs text-muted-foreground">{getComparisonCurrentLabel(selectedReport)}</p>
+                        <p className="text-xs text-muted-foreground">{comparisonCurrentLabel}</p>
                         <p className="text-sm font-semibold text-gold">{formatCurrency(comparisonCurrentValue)}</p>
                       </div>
                       <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
@@ -2222,6 +2374,7 @@ export default function AprobacionesPage() {
                         </Button>
                         <Button
                           className="gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+                          data-testid="approval-approve"
                           onClick={() => handleApprove(selectedReport)}
                           disabled={processing || isDeleting}
                         >
@@ -2236,6 +2389,7 @@ export default function AprobacionesPage() {
                     ) : (
                       <Button
                         variant="outline"
+                        data-testid="approval-reactivate"
                         className="gap-2 border-cyan-neon/30 text-cyan-neon hover:bg-cyan-neon/10 hover:text-cyan-neon"
                         onClick={() => handleReactivate(selectedReport)}
                         disabled={processing || isDeleting}

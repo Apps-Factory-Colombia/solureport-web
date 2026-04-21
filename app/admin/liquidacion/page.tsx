@@ -378,9 +378,7 @@ export default function LiquidacionPage() {
     const groupMembers = users.filter((user) => group.miembros.includes(user.id) && user.id !== liderId);
     const excludedTechnicianIds = persisted?.tecnicosExcluidosExtraIds?.length
       ? persisted.tecnicosExcluidosExtraIds
-      : groupMembers[0]
-        ? [groupMembers[0].id]
-        : [];
+      : [];
 
     let extraBase = 0;
 
@@ -447,6 +445,29 @@ export default function LiquidacionPage() {
 
       summary.set(report.tecnicoId, existing);
     });
+
+    if (includeLeaderExtra) {
+      leaderExtraByTech.forEach((extraValue, techId) => {
+        if (extraValue <= 0 && !summary.has(techId)) return;
+
+        const tech = users.find((u) => u.id === techId);
+        if (!tech) return;
+
+        if (!summary.has(techId)) {
+          summary.set(techId, {
+            nombre: `${tech.nombre} ${tech.apellido}`,
+            actividades: 0,
+            totalBruto: 0,
+            totalNoRecorridos: 0,
+            totalRecorridos: 0,
+            extraLider: 0,
+            descuentoPorcentaje: 0,
+            descuentoValor: 0,
+            total: 0,
+          });
+        }
+      });
+    }
 
     summary.forEach((item, techId) => {
       item.descuentoPorcentaje = discountRecordsByUser.get(techId) || 0;
@@ -681,7 +702,9 @@ export default function LiquidacionPage() {
     const matchTechnician = !normalizedTechnicianTabSearch || techFullName.includes(normalizedTechnicianTabSearch);
     const userGroupId = groupIdByUser.get(user.id);
     const matchGroup = technicianTabGroupId === "todos" || userGroupId === technicianTabGroupId;
-    return matchTechnician && matchGroup;
+    const hasVisibleReports = filteredTechTabReports.some((report) => report.tecnicoId === user.id);
+    const hasLeaderExtra = (leaderExtraByTech.get(user.id) || 0) > 0;
+    return matchTechnician && matchGroup && (hasVisibleReports || hasLeaderExtra);
   });
 
   const filteredTechPayableReports = filteredTechTabReports.filter(
@@ -728,7 +751,9 @@ export default function LiquidacionPage() {
     const matchTechnician = !normalizedComprobanteSearch || techFullName.includes(normalizedComprobanteSearch);
     const userGroupId = groupIdByUser.get(user.id);
     const matchGroup = comprobanteGroupId === "todos" || userGroupId === comprobanteGroupId;
-    return matchTechnician && matchGroup;
+    const hasVisibleReports = filteredComprobanteReports.some((report) => report.tecnicoId === user.id);
+    const hasLeaderExtra = (leaderExtraByTech.get(user.id) || 0) > 0;
+    return matchTechnician && matchGroup && (hasVisibleReports || hasLeaderExtra);
   });
 
   const filteredComprobantePayableReports = filteredComprobanteReports.filter(
@@ -1531,6 +1556,7 @@ export default function LiquidacionPage() {
                   return (
                     <Card
                       key={techId}
+                      data-testid={`liquidation-comprobante-card-${techId}`}
                       className="border-border/50 bg-card/80 hover:border-gold/20 transition-all cursor-pointer"
                       onClick={() => {
                         setSelectedTechId(techId);
@@ -1758,7 +1784,7 @@ export default function LiquidacionPage() {
       </Dialog>
 
       <Dialog open={comprobanteOpen} onOpenChange={setComprobanteOpen}>
-        <DialogContent className="bg-card border-border sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent data-testid="liquidation-comprobante-dialog" className="bg-card border-border sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-foreground">Comprobante de Liquidación</DialogTitle>
           </DialogHeader>
@@ -1962,6 +1988,7 @@ export default function LiquidacionPage() {
                   </Button>
                   <Button
                     className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+                    data-testid="liquidation-download-comprobante"
                     onClick={handleDownloadComprobante}
                     disabled={exportingComprobante}
                   >

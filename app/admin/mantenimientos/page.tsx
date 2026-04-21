@@ -57,13 +57,16 @@ import {
   ChevronLeft,
   ChevronRight,
   Loader2,
+  Download,
 } from "lucide-react";
-import { Maintenance, MaintenanceStatus, Client, User } from "@/lib/types";
+import { Maintenance, MaintenanceStatus, Client, User, CompanySettings } from "@/lib/types";
 import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/supabase/services/mantenimientos";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
+import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { cn } from "@/lib/utils";
+import { generateTablePDF } from "@/lib/utils/pdf-generator";
 
 const statusConfig: Record<string, { label: string; color: string; icon: React.ElementType }> = {
   programado: {
@@ -225,6 +228,7 @@ export default function MantenimientosPage() {
   const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("todos");
@@ -249,10 +253,19 @@ export default function MantenimientosPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, c, u] = await Promise.all([getMantenimientos(), getClientes(), getUsuarios()]);
+      const [m, c, u, s] = await Promise.all([
+        getMantenimientos(),
+        getClientes(),
+        getUsuarios(),
+        getConfiguracion().catch((error) => {
+          console.error("Error cargando configuración de empresa:", error);
+          return null;
+        }),
+      ]);
       setMaintenances(m);
       setClients(c);
       setUsers(u);
+      setCompanySettings(s);
     } catch (err) {
       console.error("Error cargando mantenimientos:", err);
     } finally {
@@ -262,10 +275,10 @@ export default function MantenimientosPage() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  const today = new Date();
-  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const threeDaysFromNow = new Date(today);
-  threeDaysFromNow.setDate(today.getDate() + 3);
+  const todayStart = useMemo(() => {
+    const today = new Date();
+    return new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  }, []);
 
   const proximosMantenimientos = useMemo(() => {
     return maintenances.filter((m) => {
@@ -349,6 +362,96 @@ export default function MantenimientosPage() {
       }
     });
   }, [filtered, calendarMonth, calendarSelectedDate]);
+
+  const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
+
+  const getMaintenanceClientLabel = (maintenance: Maintenance) => {
+    const client = clients.find((c) => c.id === maintenance.clienteId);
+    return client?.edificio || client?.nombre || "Cliente no registrado";
+  };
+
+  const getMaintenanceTechnicianLabel = (maintenance: Maintenance) => {
+    const tech = users.find((u) => u.id === maintenance.tecnicoId);
+    if (!tech) return "Sin técnico asignado";
+    return `${tech.nombre} ${tech.apellido}`.trim();
+  };
+
+  const getMaintenanceStatusLabel = (maintenance: Maintenance) => {
+    return (statusConfig[maintenance.estado] || defaultStatusConfig).label;
+  };
+
+  const formatSelectedCalendarLabel = () => {
+    if (calendarSelectedDate) {
+      return calendarSelectedDate.toLocaleDateString("es-CO", {
+        day: "2-digit",
+        month: "long",
+        year: "numeric",
+      });
+    }
+
+    return calendarMonth.toLocaleDateString("es-CO", {
+      month: "long",
+      year: "numeric",
+    });
+  };
+
+  const handleExportProgramadosPDF = () => {
+    if (programados.length === 0) {
+      alert("No hay mantenimientos programados para exportar.");
+      return;
+    }
+
+    generateTablePDF({
+      titulo: "MANTENIMIENTOS PROGRAMADOS",
+      subtitulo: "Programación confirmada con técnico, fecha y observaciones registradas.",
+      empresa: companyName,
+      headers: ["Cliente", "Técnico", "Fecha", "Observaciones", "Estado"],
+      rows: programados.map((maintenance) => [
+        getMaintenanceClientLabel(maintenance),
+        getMaintenanceTechnicianLabel(maintenance),
+        `${maintenance.fechaProgramada}${maintenance.horaProgramada ? ` · ${maintenance.horaProgramada}` : ""}`,
+        maintenance.observaciones || "—",
+        getMaintenanceStatusLabel(maintenance),
+      ]),
+      summary: [
+        { label: "Programados", value: String(programados.length) },
+      ],
+      fileName: "mantenimientos_programados",
+    });
+  };
+
+  const handleExportCalendarPDF = () => {
+    if (calendarFilteredMaintenances.length === 0) {
+      alert(`No hay mantenimientos para exportar en ${calendarSelectedDate ? "la fecha" : "el mes"} seleccionada.`);
+      return;
+    }
+
+    const periodLabel = formatSelectedCalendarLabel();
+    const filePeriod = calendarSelectedDate
+      ? `${calendarSelectedDate.getFullYear()}-${String(calendarSelectedDate.getMonth() + 1).padStart(2, "0")}-${String(calendarSelectedDate.getDate()).padStart(2, "0")}`
+      : `${calendarMonth.getFullYear()}-${String(calendarMonth.getMonth() + 1).padStart(2, "0")}`;
+
+    generateTablePDF({
+      titulo: calendarSelectedDate ? "MANTENIMIENTOS DEL DÍA" : "MANTENIMIENTOS DEL MES",
+      subtitulo: calendarSelectedDate
+        ? "Exportación de la fecha seleccionada en el calendario."
+        : "Exportación del mes seleccionado en el calendario.",
+      empresa: companyName,
+      periodo: periodLabel,
+      headers: ["Cliente", "Técnico", "Fecha", "Estado"],
+      rows: calendarFilteredMaintenances.map((maintenance) => [
+        getMaintenanceClientLabel(maintenance),
+        getMaintenanceTechnicianLabel(maintenance),
+        `${maintenance.fechaProgramada}${maintenance.horaProgramada ? ` · ${maintenance.horaProgramada}` : ""}`,
+        getMaintenanceStatusLabel(maintenance),
+      ]),
+      summary: [
+        { label: "Registros", value: String(calendarFilteredMaintenances.length) },
+        { label: "Vista", value: calendarSelectedDate ? "Día" : "Mes" },
+      ],
+      fileName: `mantenimientos_calendario_${filePeriod}`,
+    });
+  };
 
   const handleSave = async (data: Partial<Maintenance>) => {
     try {
@@ -564,13 +667,27 @@ export default function MantenimientosPage() {
           <TabsContent value="programados">
             <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
               <CardHeader>
-                <CardTitle className="text-lg text-foreground flex items-center gap-2">
-                  <UserCheck className="h-5 w-5 text-blue-400" />
-                  Mantenimientos Programados
-                </CardTitle>
-                <p className="text-sm text-muted-foreground">
-                  Mantenimientos con técnico asignado, fecha y hora confirmados. Se notifica automáticamente al aplicativo.
-                </p>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                      <UserCheck className="h-5 w-5 text-blue-400" />
+                      Mantenimientos Programados
+                    </CardTitle>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      Mantenimientos con técnico asignado, fecha y hora confirmados. Se notifica automáticamente al aplicativo.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
+                    onClick={handleExportProgramadosPDF}
+                    disabled={programados.length === 0}
+                  >
+                    <Download className="h-4 w-4" />
+                    Exportar PDF
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent className="p-0">
                 <Table>
@@ -722,11 +839,24 @@ export default function MantenimientosPage() {
                   <h3 className="text-sm font-semibold text-foreground">
                     Mantenimientos del {calendarSelectedDate ? "día seleccionado" : "mes seleccionado"}
                   </h3>
-                  {calendarSelectedDate && (
-                    <Button variant="ghost" size="sm" onClick={() => setCalendarSelectedDate(null)} className="h-8 text-xs">
-                      Ver todo el mes
+                  <div className="flex items-center gap-2">
+                    {calendarSelectedDate && (
+                      <Button variant="ghost" size="sm" onClick={() => setCalendarSelectedDate(null)} className="h-8 text-xs">
+                        Ver todo el mes
+                      </Button>
+                    )}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
+                      onClick={handleExportCalendarPDF}
+                      disabled={calendarFilteredMaintenances.length === 0}
+                    >
+                      <Download className="h-4 w-4" />
+                      Exportar PDF
                     </Button>
-                  )}
+                  </div>
                 </div>
                 {calendarFilteredMaintenances.length === 0 ? (
                   <div className="text-center py-10 rounded-lg border border-border/50 bg-card/50">
