@@ -1830,24 +1830,14 @@ export default function InformesPage() {
             ? `${report.descripcion} · ${report.especificacion}`
             : report.descripcion;
 
-          return exportReportType === "visita_tecnica"
-            ? [
-              report.fecha,
-              tech ? `${tech.nombre} ${tech.apellido}` : "—",
-              projectName,
-              getVisitCategoryLabel(report.tipoVisita),
-              detail || "—",
-              report.estadoAprobacionLider,
-              formatCurrency(report.costoActividad),
-            ]
-            : [
-              report.fecha,
-              tech ? `${tech.nombre} ${tech.apellido}` : "—",
-              projectName,
-              detail || "—",
-              report.estadoAprobacionLider,
-              formatCurrency(report.costoActividad),
-            ];
+          return [
+            report.fecha,
+            tech ? `${tech.nombre} ${tech.apellido}` : "—",
+            projectName,
+            detail || "—",
+            report.estadoAprobacionLider,
+            formatCurrency(report.costoActividad),
+          ];
         });
 
       generateTablePDF({
