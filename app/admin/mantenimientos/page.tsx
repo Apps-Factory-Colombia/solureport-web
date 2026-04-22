@@ -61,12 +61,14 @@ import {
 } from "lucide-react";
 import { Maintenance, MaintenanceStatus, Client, User, CompanySettings } from "@/lib/types";
 import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/supabase/services/mantenimientos";
+import { getContratos } from "@/lib/supabase/services/contratos";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
+import type { MaintenanceContract } from "@/lib/types";
 
 const statusConfig: Record<string, { label: string; color: string; icon: React.ElementType }> = {
   programado: {
@@ -108,6 +110,14 @@ const defaultStatusConfig = {
 };
 
 const daysOfWeek = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat("es-CO", {
+    style: "currency",
+    currency: "COP",
+    minimumFractionDigits: 0,
+  }).format(value);
+}
 
 interface MiniCalendarProps {
   maintenances: Maintenance[];
@@ -226,6 +236,7 @@ function MiniCalendar({ maintenances, currentMonth, onMonthChange, selectedDate,
 
 export default function MantenimientosPage() {
   const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
+  const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
@@ -253,8 +264,9 @@ export default function MantenimientosPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, c, u, s] = await Promise.all([
+      const [m, ct, c, u, s] = await Promise.all([
         getMantenimientos(),
+        getContratos(),
         getClientes(),
         getUsuarios(),
         getConfiguracion().catch((error) => {
@@ -263,6 +275,7 @@ export default function MantenimientosPage() {
         }),
       ]);
       setMaintenances(m);
+      setContracts(ct);
       setClients(c);
       setUsers(u);
       setCompanySettings(s);
@@ -280,6 +293,86 @@ export default function MantenimientosPage() {
     return new Date(today.getFullYear(), today.getMonth(), today.getDate());
   }, []);
 
+  const clientsById = useMemo(
+    () => new Map(clients.map((client) => [client.id, client])),
+    [clients]
+  );
+
+  const usersById = useMemo(
+    () => new Map(users.map((user) => [user.id, user])),
+    [users]
+  );
+
+  const contractsById = useMemo(
+    () => new Map(contracts.map((contract) => [contract.id, contract])),
+    [contracts]
+  );
+
+  const contractByMaintenanceId = useMemo(() => {
+    const nextMap = new Map<string, MaintenanceContract>();
+    contracts.forEach((contract) => {
+      contract.mantenimientosRealizados.forEach((item) => {
+        if (item.id) {
+          nextMap.set(item.id, contract);
+        }
+      });
+    });
+    return nextMap;
+  }, [contracts]);
+
+  const getMaintenanceContract = useCallback((maintenance: Maintenance) => {
+    if (maintenance.contratoId) {
+      return contractsById.get(maintenance.contratoId);
+    }
+
+    if (maintenance.contratoMantenimientoId) {
+      return contractByMaintenanceId.get(maintenance.contratoMantenimientoId);
+    }
+
+    return contractByMaintenanceId.get(maintenance.id);
+  }, [contractByMaintenanceId, contractsById]);
+
+  const getMaintenanceDoorCount = useCallback((maintenance: Maintenance) => {
+    const client = clientsById.get(maintenance.clienteId);
+    return (client?.puertasPeatonales || 0) + (client?.puertasVehiculares || 0);
+  }, [clientsById]);
+
+  const getMaintenanceProgressLabel = useCallback((maintenance: Maintenance) => {
+    const contract = getMaintenanceContract(maintenance);
+    if (!contract) return "—";
+
+    const orderedMaintenances = [...contract.mantenimientosRealizados].sort((a, b) => {
+      const dateCompare = (a.fechaProgramada || "").localeCompare(b.fechaProgramada || "");
+      if (dateCompare !== 0) return dateCompare;
+      return a.id.localeCompare(b.id);
+    });
+
+    const currentIndex = orderedMaintenances.findIndex((item) => item.id === (maintenance.contratoMantenimientoId || maintenance.id));
+    if (currentIndex === -1) return `0/${contract.cantidadMantenimientos}`;
+
+    return `${currentIndex + 1}/${contract.cantidadMantenimientos}`;
+  }, [getMaintenanceContract]);
+
+  const getMaintenancePaymentCost = useCallback((maintenance: Maintenance) => {
+    const contract = getMaintenanceContract(maintenance);
+    if (maintenance.valorRecaudado && maintenance.valorRecaudado > 0) {
+      return maintenance.valorRecaudado;
+    }
+
+    return contract?.costoPorMantenimiento || 0;
+  }, [getMaintenanceContract]);
+
+  const getMaintenanceAnnualValue = useCallback((maintenance: Maintenance) => {
+    return getMaintenanceContract(maintenance)?.costoTotalAnual || 0;
+  }, [getMaintenanceContract]);
+
+  const isMaintenanceOverdue = useCallback((maintenance: Maintenance) => {
+    if (!maintenance.fechaProgramada) return false;
+    if (maintenance.estado === "realizado") return false;
+    const maintenanceDate = parseLocalDate(maintenance.fechaProgramada);
+    return maintenanceDate.getTime() < todayStart.getTime();
+  }, [todayStart]);
+
   const proximosMantenimientos = useMemo(() => {
     return maintenances.filter((m) => {
       if (m.estado !== "pendiente") return false;
@@ -291,8 +384,12 @@ export default function MantenimientosPage() {
   }, [maintenances, todayStart]);
 
   const programados = useMemo(() => {
-    return maintenances.filter((m) => m.estado === "programado");
-  }, [maintenances]);
+    return maintenances.filter((m) => m.estado === "programado" && !isMaintenanceOverdue(m));
+  }, [maintenances, isMaintenanceOverdue]);
+
+  const vencidos = useMemo(() => {
+    return maintenances.filter((m) => isMaintenanceOverdue(m));
+  }, [maintenances, isMaintenanceOverdue]);
 
   const assignableUsers = users.filter(
     (u) =>
@@ -344,7 +441,8 @@ export default function MantenimientosPage() {
       client?.nombre.toLowerCase().includes(search.toLowerCase()) ||
       tech?.nombre.toLowerCase().includes(search.toLowerCase()) ||
       tech?.apellido.toLowerCase().includes(search.toLowerCase());
-    const matchesStatus = statusFilter === "todos" || m.estado === statusFilter;
+    const matchesStatus = statusFilter === "todos"
+      || (statusFilter === "vencido" ? isMaintenanceOverdue(m) : m.estado === statusFilter);
     return matchesSearch && matchesStatus;
   });
 
@@ -366,12 +464,12 @@ export default function MantenimientosPage() {
   const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
 
   const getMaintenanceClientLabel = (maintenance: Maintenance) => {
-    const client = clients.find((c) => c.id === maintenance.clienteId);
+    const client = clientsById.get(maintenance.clienteId);
     return client?.edificio || client?.nombre || "Cliente no registrado";
   };
 
   const getMaintenanceTechnicianLabel = (maintenance: Maintenance) => {
-    const tech = users.find((u) => u.id === maintenance.tecnicoId);
+    const tech = usersById.get(maintenance.tecnicoId);
     if (!tech) return "Sin técnico asignado";
     return `${tech.nombre} ${tech.apellido}`.trim();
   };
@@ -403,14 +501,14 @@ export default function MantenimientosPage() {
 
     generateTablePDF({
       titulo: "MANTENIMIENTOS PROGRAMADOS",
-      subtitulo: "Programación confirmada con técnico, fecha y observaciones registradas.",
+      subtitulo: "Programación confirmada con técnico asignado, fecha y hora registradas.",
       empresa: companyName,
-      headers: ["Cliente", "Técnico", "Fecha", "Observaciones", "Estado"],
+      headers: ["Cliente", "Técnico", "Fecha", "Hora", "Estado"],
       rows: programados.map((maintenance) => [
         getMaintenanceClientLabel(maintenance),
         getMaintenanceTechnicianLabel(maintenance),
-        `${maintenance.fechaProgramada}${maintenance.horaProgramada ? ` · ${maintenance.horaProgramada}` : ""}`,
-        maintenance.observaciones || "—",
+        maintenance.fechaProgramada,
+        maintenance.horaProgramada || "—",
         getMaintenanceStatusLabel(maintenance),
       ]),
       summary: [
@@ -438,18 +536,27 @@ export default function MantenimientosPage() {
         : "Exportación del mes seleccionado en el calendario.",
       empresa: companyName,
       periodo: periodLabel,
-      headers: ["Cliente", "Técnico", "Fecha", "Estado"],
+      headers: ["Cliente", "Puertas", "Avance", "Valor total", "Costo mant.", "Técnico", "Fecha", "Estado"],
       rows: calendarFilteredMaintenances.map((maintenance) => [
         getMaintenanceClientLabel(maintenance),
+        String(getMaintenanceDoorCount(maintenance)),
+        getMaintenanceProgressLabel(maintenance),
+        formatCurrency(getMaintenanceAnnualValue(maintenance)),
+        formatCurrency(getMaintenancePaymentCost(maintenance)),
         getMaintenanceTechnicianLabel(maintenance),
         `${maintenance.fechaProgramada}${maintenance.horaProgramada ? ` · ${maintenance.horaProgramada}` : ""}`,
         getMaintenanceStatusLabel(maintenance),
       ]),
       summary: [
-        { label: "Registros", value: String(calendarFilteredMaintenances.length) },
+        { label: "Mantenimientos", value: String(calendarFilteredMaintenances.length) },
+        {
+          label: "Costo total",
+          value: formatCurrency(calendarFilteredMaintenances.reduce((sum, maintenance) => sum + getMaintenancePaymentCost(maintenance), 0)),
+        },
         { label: "Vista", value: calendarSelectedDate ? "Día" : "Mes" },
       ],
       fileName: `mantenimientos_calendario_${filePeriod}`,
+      landscape: true,
     });
   };
 
@@ -517,14 +624,15 @@ export default function MantenimientosPage() {
               <SelectTrigger className="w-48 bg-secondary/50 border-border/50">
                 <SelectValue placeholder="Filtrar por estado" />
               </SelectTrigger>
-              <SelectContent className="bg-card border-border">
-                <SelectItem value="todos">Todos los estados</SelectItem>
-                <SelectItem value="programado">Programado</SelectItem>
-                <SelectItem value="en_ejecucion">En Ejecución</SelectItem>
-                <SelectItem value="realizado">Realizado</SelectItem>
-                <SelectItem value="pendiente">Pendiente</SelectItem>
-              </SelectContent>
-            </Select>
+                <SelectContent className="bg-card border-border">
+                  <SelectItem value="todos">Todos los estados</SelectItem>
+                  <SelectItem value="programado">Programado</SelectItem>
+                  <SelectItem value="en_ejecucion">En Ejecución</SelectItem>
+                  <SelectItem value="realizado">Realizado</SelectItem>
+                  <SelectItem value="pendiente">Pendiente</SelectItem>
+                  <SelectItem value="vencido">Vencidos</SelectItem>
+                </SelectContent>
+              </Select>
           </div>
           <Button
             onClick={() => {
@@ -575,6 +683,18 @@ export default function MantenimientosPage() {
             >
               <CalendarDays className="h-4 w-4 mr-2" />
               Calendario
+            </TabsTrigger>
+            <TabsTrigger
+              value="vencidos"
+              className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
+            >
+              <AlertTriangle className="h-4 w-4 mr-2" />
+              Vencidos
+              {vencidos.length > 0 && (
+                <Badge className="ml-1.5 bg-red-500/20 text-red-400 text-[10px] border-0 px-1.5">
+                  {vencidos.length}
+                </Badge>
+              )}
             </TabsTrigger>
           </TabsList>
 
@@ -867,8 +987,8 @@ export default function MantenimientosPage() {
                   </div>
                 ) : (
                   calendarFilteredMaintenances.map((m) => {
-                    const client = clients.find((c) => c.id === m.clienteId);
-                    const tech = users.find((u) => u.id === m.tecnicoId);
+                    const client = clientsById.get(m.clienteId);
+                    const tech = usersById.get(m.tecnicoId);
                     const status = statusConfig[m.estado] || defaultStatusConfig;
                     const StatusIcon = status.icon;
 
@@ -886,6 +1006,9 @@ export default function MantenimientosPage() {
                             <p className="text-xs text-muted-foreground">
                               {tech?.nombre} {tech?.apellido} · {m.fechaProgramada} {m.horaProgramada ? `· ${m.horaProgramada}` : ""}
                             </p>
+                            <p className="text-xs text-muted-foreground">
+                              {getMaintenanceDoorCount(m)} puertas · avance {getMaintenanceProgressLabel(m)} · valor {formatCurrency(getMaintenanceAnnualValue(m))} · pago {formatCurrency(getMaintenancePaymentCost(m))}
+                            </p>
                           </div>
                         </div>
                         <Badge variant="outline" className={cn("text-xs", status.color)}>
@@ -897,6 +1020,72 @@ export default function MantenimientosPage() {
                 )}
               </div>
             </div>
+          </TabsContent>
+
+          <TabsContent value="vencidos">
+            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                  <AlertTriangle className="h-5 w-5 text-red-400" />
+                  Mantenimientos Vencidos
+                </CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Mantenimientos cuya fecha ya pasó y aún no fueron realizados.
+                </p>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-border/50 hover:bg-transparent">
+                      <TableHead className="text-muted-foreground">Cliente</TableHead>
+                      <TableHead className="text-muted-foreground">Técnico</TableHead>
+                      <TableHead className="text-muted-foreground">Fecha programada</TableHead>
+                      <TableHead className="text-muted-foreground">Avance</TableHead>
+                      <TableHead className="text-muted-foreground">Costo mant.</TableHead>
+                      <TableHead className="text-muted-foreground">Estado</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {vencidos.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                          No hay mantenimientos vencidos
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      vencidos.map((m) => {
+                        const status = statusConfig[m.estado] || defaultStatusConfig;
+                        return (
+                          <TableRow key={m.id} className="border-border/50 hover:bg-secondary/30">
+                            <TableCell>
+                              <p className="font-medium text-foreground">{getMaintenanceClientLabel(m)}</p>
+                              <p className="text-xs text-muted-foreground">{clientsById.get(m.clienteId)?.nombre}</p>
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">
+                              {getMaintenanceTechnicianLabel(m)}
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">
+                              {m.fechaProgramada}
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">
+                              {getMaintenanceProgressLabel(m)}
+                            </TableCell>
+                            <TableCell className="text-sm font-medium text-gold">
+                              {formatCurrency(getMaintenancePaymentCost(m))}
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className={cn("text-xs", status.color)}>
+                                {status.label}
+                              </Badge>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
           </TabsContent>
         </Tabs>
       </div>

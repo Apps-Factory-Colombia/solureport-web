@@ -113,6 +113,86 @@ function normalizeSearchValue(value?: string | null) {
     .toLowerCase();
 }
 
+function getGroupActivityBaseTitle(report: ActivityReport) {
+  const normalized = (report.descripcion || "").trim();
+  if (!normalized) return "";
+
+  const emDashParts = normalized.split(" — ").map((part) => part.trim()).filter(Boolean);
+  if (emDashParts.length >= 2) {
+    return emDashParts.slice(1).join(" — ");
+  }
+
+  const dashParts = normalized.split(" - ").map((part) => part.trim()).filter(Boolean);
+  return dashParts[0] || normalized;
+}
+
+function getGroupActivitySpecification(report: ActivityReport) {
+  if (report.especificacion?.trim()) return report.especificacion.trim();
+
+  const observationMatch = report.observaciones?.match(/Especificaci[oó]n:\s*(.+?)(?:$|\n)/i);
+  if (observationMatch?.[1]?.trim()) return observationMatch[1].trim();
+
+  const description = (report.descripcion || "").trim();
+  if (!description || description.includes(" — ")) return "";
+
+  const dashParts = description.split(" - ").map((part) => part.trim()).filter(Boolean);
+  if (dashParts.length < 3) return "";
+
+  return dashParts.slice(1, -1).join(" - ").trim();
+}
+
+function getGroupActivityUiIdentity(report: ActivityReport) {
+  return [
+    "group-ui",
+    report.fecha,
+    report.grupoId,
+    report.clienteId || "sin-cliente",
+    normalizeSearchValue(getGroupActivityBaseTitle(report)),
+  ].join("|");
+}
+
+function getGroupActivityUiSpecificity(report: ActivityReport) {
+  let score = 0;
+  if (report.registroActividadId) score += 4;
+  if (getGroupActivitySpecification(report)) score += 6;
+  if ((report.descripcion || "").includes(" - ")) score += 2;
+  if (report.observaciones?.includes("Especificación:")) score += 1;
+  return score;
+}
+
+function shouldPreferGroupActivityUiCandidate(current: ActivityReport | undefined, next: ActivityReport) {
+  if (!current) return true;
+
+  const currentScore = getGroupActivityUiSpecificity(current);
+  const nextScore = getGroupActivityUiSpecificity(next);
+  if (nextScore !== currentScore) return nextScore > currentScore;
+
+  const currentCreatedAt = current.fechaCreacion || "";
+  const nextCreatedAt = next.fechaCreacion || "";
+  if (nextCreatedAt !== currentCreatedAt) return nextCreatedAt > currentCreatedAt;
+
+  return next.id > current.id;
+}
+
+function dedupeGroupActivityRowsForUi(reports: ActivityReport[]) {
+  const canonicalByTech = new Map<string, ActivityReport>();
+
+  reports.forEach((report) => {
+    if (!isGroupActivity(report)) {
+      canonicalByTech.set(`direct:${report.id}`, report);
+      return;
+    }
+
+    const key = `${getGroupActivityUiIdentity(report)}|${report.tecnicoId}`;
+    const current = canonicalByTech.get(key);
+    if (shouldPreferGroupActivityUiCandidate(current, report)) {
+      canonicalByTech.set(key, report);
+    }
+  });
+
+  return Array.from(canonicalByTech.values());
+}
+
 function isGroupActivity(report: ActivityReport) {
   return report.tipo === "actividad_grupal";
 }
@@ -144,15 +224,9 @@ function getGroupActivityIdentity(report: ActivityReport) {
   ].join("|");
 }
 
-function getGroupActivityVisualIdentity(report: ActivityReport) {
-  if (!isGroupActivity(report)) return report.id;
-
-  return getGroupActivityIdentity(report);
-}
-
 function getVisualActivityIdentity(report: ActivityReport) {
   if (isGroupActivity(report)) {
-    return getGroupActivityVisualIdentity(report);
+    return getGroupActivityUiIdentity(report);
   }
 
   if (isSharedVisit(report)) {
@@ -1300,8 +1374,9 @@ export default function AprobacionesPage() {
 
   const groupedReports = useMemo(() => {
     const grouped = new Map<string, ActivityReport[]>();
+    const uiScopedReports = dedupeGroupActivityRowsForUi(periodScopedReports);
 
-    periodScopedReports.forEach((report) => {
+    uiScopedReports.forEach((report) => {
       const key = usesSharedBasePricing(report)
         ? `${report.tipo}:${getVisualActivityIdentity(report)}`
         : report.id;

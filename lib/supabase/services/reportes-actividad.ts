@@ -323,6 +323,62 @@ function normalizeActivityMatchText(value?: string | null) {
     .toLowerCase();
 }
 
+function extractGroupActivityTitle(description?: string | null) {
+  const normalized = (description || "").trim();
+  if (!normalized) return "";
+
+  const emDashParts = normalized.split(" — ").map((part) => part.trim()).filter(Boolean);
+  if (emDashParts.length >= 2) {
+    return emDashParts.slice(1).join(" — ");
+  }
+
+  const dashParts = normalized.split(" - ").map((part) => part.trim()).filter(Boolean);
+  return dashParts[0] || normalized;
+}
+
+function extractGroupActivitySpecificationFromDescription(description?: string | null) {
+  const normalized = (description || "").trim();
+  if (!normalized || normalized.includes(" — ")) return undefined;
+
+  const dashParts = normalized.split(" - ").map((part) => part.trim()).filter(Boolean);
+  if (dashParts.length < 3) return undefined;
+
+  const specification = dashParts.slice(1, -1).join(" - ").trim();
+  return specification || undefined;
+}
+
+function extractGroupActivitySpecificationFromObservations(observaciones?: string | null) {
+  const normalized = observaciones?.trim();
+  if (!normalized) return undefined;
+
+  const match = normalized.match(/Especificaci[oó]n:\s*(.+?)(?:$|\n)/i);
+  return match?.[1]?.trim() || undefined;
+}
+
+function getNormalizedGroupActivityTitle(params: { description?: string | null }) {
+  return normalizeActivityMatchText(extractGroupActivityTitle(params.description));
+}
+
+function getNormalizedGroupActivitySpecification(params: {
+  description?: string | null;
+  especificacion?: string | null;
+  observaciones?: string | null;
+}) {
+  return normalizeActivityMatchText(
+    params.especificacion
+      || extractGroupActivitySpecificationFromObservations(params.observaciones)
+      || extractGroupActivitySpecificationFromDescription(params.description)
+  );
+}
+
+function hasGroupActivitySpecification(params: {
+  description?: string | null;
+  especificacion?: string | null;
+  observaciones?: string | null;
+}) {
+  return !!getNormalizedGroupActivitySpecification(params);
+}
+
 function buildLegacyActivityMirrorKey(params: {
   tecnicoId: string;
   fecha: string;
@@ -339,6 +395,244 @@ function buildLegacyActivityMirrorKey(params: {
     normalizeActivityMatchText(params.descripcion),
     normalizeActivityMatchText(params.especificacion),
   ].join("|");
+}
+
+function buildCanonicalLegacyGroupActivityIdentity(params: {
+  actividadId?: string | null;
+  leaderId?: string | null;
+  grupoId?: string | null;
+  clienteId?: string | null;
+  fecha: string;
+  description?: string | null;
+  especificacion?: string | null;
+  observaciones?: string | null;
+}) {
+  return [
+    params.actividadId || "",
+    params.leaderId || "",
+    params.grupoId || "",
+    params.clienteId || "",
+    params.fecha,
+    getNormalizedGroupActivityTitle({ description: params.description }),
+    getNormalizedGroupActivitySpecification({
+      description: params.description,
+      especificacion: params.especificacion,
+      observaciones: params.observaciones,
+    }),
+  ].join("|");
+}
+
+function buildCanonicalLegacyGroupActivityBaseIdentity(params: {
+  actividadId?: string | null;
+  leaderId?: string | null;
+  grupoId?: string | null;
+  clienteId?: string | null;
+  fecha: string;
+  description?: string | null;
+}) {
+  return [
+    params.actividadId || "",
+    params.leaderId || "",
+    params.grupoId || "",
+    params.clienteId || "",
+    params.fecha,
+    getNormalizedGroupActivityTitle({ description: params.description }),
+  ].join("|");
+}
+
+function scoreLegacyActivityCompleteness(params: {
+  description?: string | null;
+  especificacion?: string | null;
+  observaciones?: string | null;
+  registroActividadId?: string | null;
+}) {
+  let score = 0;
+
+  if (params.registroActividadId) score += 8;
+  if (getNormalizedGroupActivityTitle({ description: params.description })) score += 4;
+  if (hasGroupActivitySpecification(params)) score += 6;
+
+  return score;
+}
+
+function isNewerActivityCandidate(currentDate?: string | null, nextDate?: string | null, currentId?: string | null, nextId?: string | null) {
+  const normalizedCurrentDate = currentDate || "";
+  const normalizedNextDate = nextDate || "";
+
+  if (normalizedNextDate !== normalizedCurrentDate) {
+    return normalizedNextDate > normalizedCurrentDate;
+  }
+
+  return (nextId || "") > (currentId || "");
+}
+
+function shouldReplaceLegacyCanonicalCandidate<T extends {
+  id: string;
+  descripcion?: string | null;
+  especificacion?: string | null;
+  observaciones?: string | null;
+  fechaCreacion?: string | null;
+  registroActividadId?: string | null;
+}>(current: T | undefined, next: T) {
+  if (!current) return true;
+
+  const currentScore = scoreLegacyActivityCompleteness(current);
+  const nextScore = scoreLegacyActivityCompleteness(next);
+  if (nextScore !== currentScore) {
+    return nextScore > currentScore;
+  }
+
+  return isNewerActivityCandidate(current.fechaCreacion, next.fechaCreacion, current.id, next.id);
+}
+
+function dedupeGroupActivityReports(reports: ActivityReport[]) {
+  const directReports = reports.filter((report) => report.tipo !== "actividad_grupal");
+  const groupedReports = reports.filter((report) => report.tipo === "actividad_grupal");
+  const groupedByBaseIdentity = new Map<string, ActivityReport[]>();
+
+  groupedReports.forEach((report) => {
+    const baseKey = buildCanonicalLegacyGroupActivityBaseIdentity({
+      leaderId: report.liderGrupoId,
+      grupoId: report.grupoId,
+      clienteId: report.clienteId,
+      fecha: report.fecha,
+      description: report.descripcion,
+    });
+    const current = groupedByBaseIdentity.get(baseKey) || [];
+    current.push(report);
+    groupedByBaseIdentity.set(baseKey, current);
+  });
+
+  const canonicalReports = directReports;
+
+  groupedByBaseIdentity.forEach((baseReports) => {
+    const availableSpecKeys = Array.from(new Set(
+      baseReports
+        .map((report) => getNormalizedGroupActivitySpecification({
+          description: report.descripcion,
+          especificacion: report.especificacion,
+          observaciones: report.observaciones,
+        }))
+        .filter(Boolean)
+    ));
+
+    const reportsToProcess = availableSpecKeys.length > 0
+      ? baseReports.filter((report) => getNormalizedGroupActivitySpecification({
+        description: report.descripcion,
+        especificacion: report.especificacion,
+        observaciones: report.observaciones,
+      }))
+      : baseReports;
+
+    const canonicalByTechAndSpec = new Map<string, ActivityReport>();
+
+    reportsToProcess.forEach((report) => {
+      const key = [
+        getNormalizedGroupActivitySpecification({
+          description: report.descripcion,
+          especificacion: report.especificacion,
+          observaciones: report.observaciones,
+        }),
+        report.tecnicoId,
+      ].join("|");
+      const current = canonicalByTechAndSpec.get(key);
+
+      if (shouldReplaceLegacyCanonicalCandidate(current, report)) {
+        canonicalByTechAndSpec.set(key, report);
+      }
+    });
+
+    canonicalReports.push(...Array.from(canonicalByTechAndSpec.values()));
+  });
+
+  return canonicalReports;
+}
+
+function selectCanonicalLegacyRegistroIds(reports: ActivityReport[]) {
+  const reportsByRegistroId = new Map<string, ActivityReport[]>();
+
+  reports.forEach((report) => {
+    if (!report.registroActividadId) return;
+    const current = reportsByRegistroId.get(report.registroActividadId) || [];
+    current.push(report);
+    reportsByRegistroId.set(report.registroActividadId, current);
+  });
+
+  const registrosByBaseIdentity = new Map<string, Array<{ registroId: string; reports: ActivityReport[] }>>();
+
+  reportsByRegistroId.forEach((registroReports, registroId) => {
+    const reference = registroReports[0];
+    const baseKey = buildCanonicalLegacyGroupActivityBaseIdentity({
+      leaderId: reference.liderGrupoId,
+      grupoId: reference.grupoId,
+      clienteId: reference.clienteId,
+      fecha: reference.fecha,
+      description: reference.descripcion,
+    });
+    const current = registrosByBaseIdentity.get(baseKey) || [];
+    current.push({ registroId, reports: registroReports });
+    registrosByBaseIdentity.set(baseKey, current);
+  });
+
+  const selectedRegistroIds = new Set<string>();
+
+  registrosByBaseIdentity.forEach((registroCandidates) => {
+    const candidatesBySpec = new Map<string, Array<{ registroId: string; reports: ActivityReport[] }>>();
+
+    registroCandidates.forEach((candidate) => {
+      const reference = candidate.reports[0];
+      const specKey = getNormalizedGroupActivitySpecification({
+        description: reference.descripcion,
+        especificacion: reference.especificacion,
+        observaciones: reference.observaciones,
+      });
+      const current = candidatesBySpec.get(specKey) || [];
+      current.push(candidate);
+      candidatesBySpec.set(specKey, current);
+    });
+
+    const nonEmptySpecKeys = Array.from(candidatesBySpec.keys()).filter(Boolean);
+    const specKeysToKeep = nonEmptySpecKeys.length > 0 ? nonEmptySpecKeys : [""];
+
+    specKeysToKeep.forEach((specKey) => {
+      const candidates = candidatesBySpec.get(specKey) || [];
+      const bestCandidate = candidates.reduce<{ registroId: string; reports: ActivityReport[] } | undefined>((best, candidate) => {
+        const candidateReference = candidate.reports[0];
+        if (!best) return candidate;
+
+        const bestReference = best.reports[0];
+        return shouldReplaceLegacyCanonicalCandidate(bestReference, candidateReference) ? candidate : best;
+      }, undefined);
+
+      if (bestCandidate) {
+        selectedRegistroIds.add(bestCandidate.registroId);
+      }
+    });
+  });
+
+  return selectedRegistroIds;
+}
+
+function buildLegacyRegistroCandidateIdentity(params: {
+  actividadId?: string | null;
+  leaderId?: string | null;
+  grupoId?: string | null;
+  clienteId?: string | null;
+  fecha: string;
+  especificacion?: string | null;
+  descripcion?: string | null;
+  observaciones?: string | null;
+}) {
+  return buildCanonicalLegacyGroupActivityIdentity({
+    actividadId: params.actividadId,
+    leaderId: params.leaderId,
+    grupoId: params.grupoId,
+    clienteId: params.clienteId,
+    fecha: params.fecha,
+    description: params.descripcion,
+    especificacion: params.especificacion,
+    observaciones: params.observaciones,
+  });
 }
 
 function buildLegacyActivityFallbackKey(params: {
@@ -1425,7 +1719,13 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
       }, mirrors));
     }
   }
-  return reports;
+
+  const canonicalRegistroIds = selectCanonicalLegacyRegistroIds(reports);
+
+  return reports.filter((report) => {
+    if (!report.registroActividadId) return true;
+    return canonicalRegistroIds.has(report.registroActividadId);
+  });
 }
 
 export async function getReportesActividad(): Promise<ActivityReport[]> {
@@ -1715,8 +2015,17 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       console.error("Error cargando registros_actividades como reportes:", err);
     }
 
-    reports.sort((a, b) => b.fecha.localeCompare(a.fecha));
-    return reports;
+    const dedupedReports = dedupeGroupActivityReports(reports);
+    dedupedReports.sort((a, b) => {
+      const dateCompare = b.fecha.localeCompare(a.fecha);
+      if (dateCompare !== 0) return dateCompare;
+
+      const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
+      if (creationCompare !== 0) return creationCompare;
+
+      return b.id.localeCompare(a.id);
+    });
+    return dedupedReports;
   });
 }
 
@@ -1871,7 +2180,7 @@ export async function updateActividadGrupalBaseAdmin(
     }
     const { data: sourceReport, error: sourceReportError } = await supabase
       .from("reportes_actividad")
-      .select("id, fecha, grupo_id, cliente_id, descripcion, periodo_id")
+      .select("id, fecha, grupo_id, cliente_id, descripcion, periodo_id, lider_grupo_id")
       .eq("id", sourceReportLookupId)
       .maybeSingle();
     if (sourceReportError) throw sourceReportError;
@@ -1910,7 +2219,7 @@ export async function updateActividadGrupalBaseAdmin(
 
     let legacyRegistroQuery = supabase
       .from("registros_actividades")
-      .select("id, valor_actividad_base")
+      .select("id, actividad_id, lider_id, grupo_id, cliente_id, fecha, especificacion, valor_actividad_base, fecha_creacion")
       .eq("fecha", sourceReport.fecha)
       .eq("grupo_id", sourceReport.grupo_id);
 
@@ -1923,7 +2232,25 @@ export async function updateActividadGrupalBaseAdmin(
     const { data: legacyRegistroCandidates, error: legacyRegistroCandidatesError } = await legacyRegistroQuery;
     if (legacyRegistroCandidatesError) throw legacyRegistroCandidatesError;
 
-    let legacyRegistro = (legacyRegistroCandidates || [])[0] as { id: string; valor_actividad_base?: number | string | null } | undefined;
+    let legacyRegistro = (legacyRegistroCandidates || [])[0] as {
+      id: string;
+      actividad_id?: string | null;
+      lider_id?: string | null;
+      grupo_id?: string | null;
+      cliente_id?: string | null;
+      fecha: string;
+      especificacion?: string | null;
+      valor_actividad_base?: number | string | null;
+      fecha_creacion?: string | null;
+    } | undefined;
+
+    const canonicalIdentity = buildLegacyRegistroCandidateIdentity({
+      leaderId: sourceReport.lider_grupo_id,
+      grupoId: sourceReport.grupo_id,
+      clienteId: sourceReport.cliente_id,
+      fecha: sourceReport.fecha,
+      descripcion: sourceReport.descripcion,
+    });
 
     if ((legacyRegistroCandidates || []).length > 1) {
       const candidateRegistroIds = (legacyRegistroCandidates || []).map((item: { id: string }) => item.id);
@@ -1942,11 +2269,55 @@ export async function updateActividadGrupalBaseAdmin(
         participantsByRegistro.set(row.registro_actividad_id, current);
       });
 
-      legacyRegistro = (legacyRegistroCandidates || []).find((candidate: { id: string }) => {
+      const participantMatchedRegistro = (legacyRegistroCandidates || []).find((candidate: { id: string }) => {
         const registroParticipantIds = Array.from(new Set(participantsByRegistro.get(candidate.id) || [])).sort();
         return registroParticipantIds.length === expectedTechnicianIds.length
           && registroParticipantIds.every((value, index) => value === expectedTechnicianIds[index]);
-      }) || legacyRegistro;
+      });
+
+      const identityMatchedRegistro = (legacyRegistroCandidates || []).find((candidate: {
+        actividad_id?: string | null;
+        lider_id?: string | null;
+        grupo_id?: string | null;
+        cliente_id?: string | null;
+        fecha: string;
+        especificacion?: string | null;
+      }) => buildLegacyRegistroCandidateIdentity({
+        actividadId: candidate.actividad_id,
+        leaderId: candidate.lider_id,
+        grupoId: candidate.grupo_id,
+        clienteId: candidate.cliente_id,
+        fecha: candidate.fecha,
+        especificacion: candidate.especificacion,
+        descripcion: sourceReport.descripcion,
+      }) === canonicalIdentity);
+
+      legacyRegistro = identityMatchedRegistro || participantMatchedRegistro || legacyRegistro;
+
+      if ((legacyRegistroCandidates || []).length > 1) {
+        legacyRegistro = (legacyRegistroCandidates || []).reduce<typeof legacyRegistro>((best, candidate) => {
+          if (!best) return candidate;
+
+          const candidateScore = scoreLegacyActivityCompleteness({
+            description: sourceReport.descripcion,
+            especificacion: candidate.especificacion,
+            registroActividadId: candidate.id,
+          });
+          const bestScore = scoreLegacyActivityCompleteness({
+            description: sourceReport.descripcion,
+            especificacion: best.especificacion,
+            registroActividadId: best.id,
+          });
+
+          if (candidateScore !== bestScore) {
+            return candidateScore > bestScore ? candidate : best;
+          }
+
+          return isNewerActivityCandidate(best.fecha_creacion, candidate.fecha_creacion, best.id, candidate.id)
+            ? candidate
+            : best;
+        }, legacyRegistro);
+      }
     }
 
     const participantResults = participants.map((participant: { id: string; tecnico_id: string; costo_actividad?: number | string | null; periodo_id?: string | null }) => {
