@@ -147,13 +147,7 @@ function getGroupActivityIdentity(report: ActivityReport) {
 function getGroupActivityVisualIdentity(report: ActivityReport) {
   if (!isGroupActivity(report)) return report.id;
 
-  return [
-    "group-visual",
-    report.fecha,
-    report.periodoId || "sin-periodo",
-    report.grupoId,
-    report.clienteId || "sin-cliente",
-  ].join("|");
+  return getGroupActivityIdentity(report);
 }
 
 function getVisualActivityIdentity(report: ActivityReport) {

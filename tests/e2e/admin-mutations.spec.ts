@@ -36,8 +36,8 @@ async function openApprovalCase(page: import("@playwright/test").Page, target = 
   await page.getByRole("tab", { name: /Act\. Grupal/i }).click();
   await page.locator('input[type="date"]').fill(target.date);
   await page.getByPlaceholder("Buscar por cliente, grupo, descripción o fecha...").fill(target.description.split(" - ")[0]);
-  await expect(page.getByTestId(`approval-open-actividad_grupal:group-visual|${target.date}|${target.periodId}|${target.groupId}|${target.clientId}`)).toBeVisible();
-  await page.getByTestId(`approval-open-actividad_grupal:group-visual|${target.date}|${target.periodId}|${target.groupId}|${target.clientId}`).click();
+  await expect(page.getByTestId(`approval-open-actividad_grupal:group:${target.registroId}`)).toBeVisible();
+  await page.getByTestId(`approval-open-actividad_grupal:group:${target.registroId}`).click();
   await expect(page.getByTestId("approval-detail-dialog")).toBeVisible();
 }
 

@@ -209,16 +209,27 @@ function usesSharedBasePricing(report: ActivityReport) {
   return isSharedVisit(report) || isGroupActivity(report);
 }
 
+function getGroupActivityIdentity(report: ActivityReport) {
+  if (!isGroupActivity(report)) return report.id;
+
+  if (report.registroActividadId) {
+    return `group:${report.registroActividadId}`;
+  }
+
+  return [
+    "legacy-group",
+    report.fecha,
+    report.grupoId,
+    report.clienteId || "sin-cliente",
+    normalizeSearchValue(report.descripcion),
+    normalizeSearchValue(report.especificacion),
+  ].join("|");
+}
+
 function getGroupActivityVisualIdentity(report: ActivityReport) {
   if (!isGroupActivity(report)) return report.id;
 
-  return [
-    "group-visual",
-    report.fecha,
-    report.periodoId || "sin-periodo",
-    report.grupoId,
-    report.clienteId || "sin-cliente",
-  ].join("|");
+  return getGroupActivityIdentity(report);
 }
 
 function dedupeReportsByTechnician(reports: ActivityReport[]) {
@@ -286,18 +297,7 @@ function getVisualActivityIdentity(report: ActivityReport) {
 
 function getSharedPricingIdentity(report: ActivityReport) {
   if (isGroupActivity(report)) {
-    if (report.registroActividadId) {
-      return `group:${report.registroActividadId}`;
-    }
-
-    return [
-      "legacy-group",
-      report.fecha,
-      report.grupoId,
-      report.clienteId || "sin-cliente",
-      normalizeSearchValue(report.descripcion),
-      normalizeSearchValue(report.especificacion),
-    ].join("|");
+    return getGroupActivityIdentity(report);
   }
 
   if (isSharedVisit(report)) {
