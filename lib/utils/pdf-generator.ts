@@ -34,7 +34,55 @@ interface PDFTableData {
 }
 
 function normalizePdfCellValue(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
+  // Remove zero-width characters and replace any unicode whitespace
+  // (including non-breaking spaces) with regular spaces so jspdf-autotable
+  // can wrap long text inside the cell.
+  const cleaned = value
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[\u00A0\u202F\u2007\u2009\u200A\u3000]/g, " ")
+    .replace(/[\u2028\u2029]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Insert a real space inside very long tokens (URLs, slugs, words without
+  // spaces) so jspdf-autotable can break them and they don't overflow the cell.
+  return cleaned.replace(/(\S{30})(?=\S)/g, "$1 ");
+}
+
+function wrapPdfTextConservatively(value: string, maxCharsPerLine: number): string {
+  const words = value.split(" ").filter(Boolean);
+  const safeMaxChars = Math.max(maxCharsPerLine, 12);
+  const lines: string[] = [];
+  let currentLine = "";
+
+  words.forEach((word) => {
+    if (word.length > safeMaxChars) {
+      if (currentLine) {
+        lines.push(currentLine);
+        currentLine = "";
+      }
+
+      const chunks = word.match(new RegExp(`.{1,${safeMaxChars}}`, "g")) || [word];
+      lines.push(...chunks.slice(0, -1));
+      currentLine = chunks[chunks.length - 1] || "";
+      return;
+    }
+
+    const nextLine = currentLine ? `${currentLine} ${word}` : word;
+    if (nextLine.length > safeMaxChars && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+      return;
+    }
+
+    currentLine = nextLine;
+  });
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.join("\n");
 }
 
 function normalizePdfHeaderLabel(value: string): string {
@@ -44,29 +92,59 @@ function normalizePdfHeaderLabel(value: string): string {
     .toLowerCase();
 }
 
+type PdfTableColumnStyle = {
+  cellWidth: number;
+  halign?: "left" | "center" | "right";
+  overflow?: "linebreak";
+};
+
 function getTableColumnStyles(headers: string[], availableWidth: number) {
-  const columnStyles: Record<number, { cellWidth: number; halign?: "left" | "center" | "right" }> = {};
+  const columnStyles: Record<number, PdfTableColumnStyle> = {};
   const flexibleIndexes: number[] = [];
+  const prioritizedFlexibleIndexes: number[] = [];
   let fixedWidth = 0;
+  const normalizedHeaders = headers.map(normalizePdfHeaderLabel);
+
+  const isSixColumnDetailReport =
+    normalizedHeaders.length === 6
+    && normalizedHeaders[0]?.includes("fecha")
+    && normalizedHeaders[1]?.includes("tecnico")
+    && (normalizedHeaders[2]?.includes("cliente") || normalizedHeaders[2]?.includes("proyecto") || normalizedHeaders[2]?.includes("grupo"))
+    && normalizedHeaders[3]?.includes("detalle")
+    && normalizedHeaders[4]?.includes("estado")
+    && (normalizedHeaders[5]?.includes("costo") || normalizedHeaders[5]?.includes("valor") || normalizedHeaders[5]?.includes("total"));
+
+  if (isSixColumnDetailReport && availableWidth >= 269) {
+    const fixedDetailLayout: Record<number, PdfTableColumnStyle> = {
+      0: { cellWidth: 20 },
+      1: { cellWidth: 30, overflow: "linebreak" },
+      2: { cellWidth: 28, overflow: "linebreak" },
+      3: { cellWidth: 150, overflow: "linebreak" },
+      4: { cellWidth: 17, halign: "center" },
+      5: { cellWidth: 24, halign: "right" },
+    };
+
+    return fixedDetailLayout;
+  }
 
   headers.forEach((header, index) => {
-    const normalizedHeader = normalizePdfHeaderLabel(header);
+    const normalizedHeader = normalizedHeaders[index] || "";
 
     if (normalizedHeader.includes("fecha")) {
-      columnStyles[index] = { cellWidth: 24 };
-      fixedWidth += 24;
+      columnStyles[index] = { cellWidth: 22 };
+      fixedWidth += 22;
       return;
     }
 
     if (normalizedHeader.includes("tecnico")) {
-      columnStyles[index] = { cellWidth: 38 };
-      fixedWidth += 38;
+      columnStyles[index] = { cellWidth: 32, overflow: "linebreak" };
+      fixedWidth += 32;
       return;
     }
 
     if (normalizedHeader.includes("cliente") || normalizedHeader.includes("proyecto") || normalizedHeader.includes("grupo")) {
-      columnStyles[index] = { cellWidth: 32 };
-      fixedWidth += 32;
+      columnStyles[index] = { cellWidth: 30, overflow: "linebreak" };
+      fixedWidth += 30;
       return;
     }
 
@@ -77,26 +155,43 @@ function getTableColumnStyles(headers: string[], availableWidth: number) {
     }
 
     if (normalizedHeader.includes("tipo")) {
-      columnStyles[index] = { cellWidth: 44 };
-      fixedWidth += 44;
+      columnStyles[index] = { cellWidth: 28, overflow: "linebreak" };
+      fixedWidth += 28;
       return;
     }
 
     if (normalizedHeader.includes("costo") || normalizedHeader.includes("valor") || normalizedHeader.includes("total")) {
-      const width = normalizedHeader.length > 10 ? 32 : 24;
+      const width = normalizedHeader.length > 10 ? 30 : 24;
       columnStyles[index] = { cellWidth: width, halign: "right" };
       fixedWidth += width;
+      return;
+    }
+
+    if (
+      normalizedHeader.includes("detalle")
+      || normalizedHeader.includes("actividad")
+      || normalizedHeader.includes("descripcion")
+      || normalizedHeader.includes("observaciones")
+      || normalizedHeader.includes("resumen")
+    ) {
+      prioritizedFlexibleIndexes.push(index);
       return;
     }
 
     flexibleIndexes.push(index);
   });
 
-  const remainingWidth = Math.max(availableWidth - fixedWidth, flexibleIndexes.length * 18);
-  const flexibleWidth = remainingWidth / Math.max(flexibleIndexes.length, 1);
+  const allFlexibleIndexes = [...prioritizedFlexibleIndexes, ...flexibleIndexes];
+  const remainingWidth = Math.max(availableWidth - fixedWidth, allFlexibleIndexes.length * 20);
+  const weightedSlots = prioritizedFlexibleIndexes.length * 1.8 + flexibleIndexes.length;
+  const baseFlexibleWidth = remainingWidth / Math.max(weightedSlots, 1);
+
+  prioritizedFlexibleIndexes.forEach((index) => {
+    columnStyles[index] = { cellWidth: Math.max(baseFlexibleWidth * 1.8, 48), overflow: "linebreak" };
+  });
 
   flexibleIndexes.forEach((index) => {
-    columnStyles[index] = { cellWidth: flexibleWidth };
+    columnStyles[index] = { cellWidth: Math.max(baseFlexibleWidth, 20), overflow: "linebreak" };
   });
 
   return columnStyles;
@@ -106,17 +201,22 @@ function buildWrappedTableRows(
   doc: jsPDF,
   headers: string[],
   rows: string[][],
-  columnStyles: Record<number, { cellWidth: number; halign?: "left" | "center" | "right" }>,
+  columnStyles: Record<number, PdfTableColumnStyle>,
 ) {
   const normalizedHeaders = headers.map(normalizePdfHeaderLabel);
+  const horizontalPadding = 6;
 
   return rows.map((row) => row.map((cell, index) => {
     const value = normalizePdfCellValue(cell || "");
     if (!value) return "";
 
     const header = normalizedHeaders[index] || "";
-    const columnWidth = columnStyles[index]?.cellWidth ?? 28;
-    const wrapWidth = Math.max(columnWidth - 5, 10);
+    const isLongTextColumn =
+      header.includes("detalle")
+      || header.includes("actividad")
+      || header.includes("descripcion")
+      || header.includes("observaciones")
+      || header.includes("resumen");
     const shouldKeepSingleLine =
       header.includes("fecha") ||
       header.includes("estado") ||
@@ -128,7 +228,15 @@ function buildWrappedTableRows(
       return value;
     }
 
-    return doc.splitTextToSize(value, wrapWidth);
+    const maxTextWidth = Math.max((columnStyles[index]?.cellWidth || 24) - horizontalPadding, 10);
+    const wrappedLines = doc.splitTextToSize(value, maxTextWidth);
+
+    if (isLongTextColumn) {
+      const conservativeCharLimit = Math.max(Math.floor(maxTextWidth / 2.6), 18);
+      return wrapPdfTextConservatively(value, conservativeCharLimit);
+    }
+
+    return Array.isArray(wrappedLines) ? wrappedLines.join("\n") : value;
   }));
 }
 
@@ -466,8 +574,11 @@ export function generateTablePDF(data: PDFTableData): void {
   y += 6;
 
   const columnStyles = getTableColumnStyles(data.headers, tableContentWidth);
+  const previousFontSize = doc.getFontSize();
+  doc.setFontSize(7.5);
   const wrappedRows = buildWrappedTableRows(doc, data.headers, data.rows, columnStyles);
   const wrappedFoot = data.totales ? buildWrappedTableRows(doc, data.headers, [data.totales], columnStyles) : undefined;
+  doc.setFontSize(previousFontSize);
 
   autoTable(doc, {
     startY: y,
@@ -475,8 +586,9 @@ export function generateTablePDF(data: PDFTableData): void {
     body: wrappedRows,
     foot: wrappedFoot,
     styles: {
-      fontSize: 7.5,
+      fontSize: 7,
       cellPadding: 3,
+      minCellHeight: 8,
       overflow: "linebreak",
       textColor: [43, 50, 61],
       lineColor: [226, 232, 240],
@@ -487,11 +599,13 @@ export function generateTablePDF(data: PDFTableData): void {
       fillColor: [15, 23, 42],
       textColor: [255, 255, 255],
       fontStyle: "bold",
+      overflow: "linebreak",
     },
     footStyles: {
       fillColor: [226, 232, 240],
       textColor: [15, 23, 42],
       fontStyle: "bold",
+      overflow: "linebreak",
     },
     alternateRowStyles: {
       fillColor: [248, 250, 252],
@@ -500,6 +614,7 @@ export function generateTablePDF(data: PDFTableData): void {
     tableWidth: tableContentWidth,
     theme: "grid",
     margin: tableMargin,
+    rowPageBreak: "avoid",
   });
 
   const pageCount = doc.getNumberOfPages();
