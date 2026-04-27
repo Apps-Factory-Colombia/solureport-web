@@ -280,7 +280,8 @@ function isGroupActivity(report: ActivityReport) {
 }
 
 function isSharedVisit(report: ActivityReport) {
-  return report.tipo === "visita_tecnica"
+  return (report.tipo === "visita_tecnica"
+    || report.tipo === "mantenimiento_preventivo")
     && ((report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal) != null
       || Number(report.porcentajeParticipacion ?? 0) > 0);
 }
@@ -356,8 +357,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   }
 
   if (isSharedVisit(report)) {
+    const identityPrefix = report.tipo === "mantenimiento_preventivo" ? "shared-maintenance-visual" : "shared-visit-visual";
     return [
-      "shared-visit-visual",
+      identityPrefix,
+      report.mantenimientoId || "sin-mantenimiento",
       report.fecha,
       report.periodoId || "sin-periodo",
       report.grupoId,
@@ -385,7 +388,8 @@ function getSharedVisitIdentity(report: ActivityReport) {
   if (!isSharedVisit(report)) return report.id;
 
   return [
-    "shared-visit",
+    report.tipo === "mantenimiento_preventivo" ? "shared-maintenance" : "shared-visit",
+    report.mantenimientoId || "sin-mantenimiento",
     report.fecha,
     report.periodoId || "sin-periodo",
     report.grupoId,
@@ -1472,10 +1476,11 @@ export default function InformesPage() {
       });
   }, [grupoFilter, matchesActivitySearch]);
 
-  const filteredPreventivos = useMemo(() => sortReportsByNewestCreation(filterReports(preventivos)), [filterReports, preventivos]);
+  const filteredPreventivos = useMemo(() => filterGroupedRows(buildGroupedActivityRows(preventivos)), [buildGroupedActivityRows, filterGroupedRows, preventivos]);
   const filteredVisitas = useMemo(() => filterGroupedRows(buildGroupedActivityRows(visitas)), [buildGroupedActivityRows, filterGroupedRows, visitas]);
   const filteredRecorridos = useMemo(() => sortReportsByNewestCreation(filterReports(recorridos)), [filterReports, recorridos]);
   const filteredGrupales = useMemo(() => filterGroupedRows(buildGroupedActivityRows(grupales)), [buildGroupedActivityRows, filterGroupedRows, grupales]);
+  const groupedPreventivosCount = filteredPreventivos.length;
   const groupedVisitasCount = filteredVisitas.length;
   const groupedGrupalesCount = filteredGrupales.length;
 
@@ -1500,7 +1505,7 @@ export default function InformesPage() {
     [exportScopedReports, exportReportType, preventiveExportClientId]
   );
   const selectedExportGroupedRows = useMemo(() => {
-    if (exportReportType !== "visita_tecnica" && exportReportType !== "actividad_grupal") return [];
+    if (exportReportType !== "visita_tecnica" && exportReportType !== "actividad_grupal" && exportReportType !== "mantenimiento_preventivo") return [];
     return buildGroupedActivityRows(selectedExportReports);
   }, [buildGroupedActivityRows, exportReportType, selectedExportReports]);
   const getParticipantSplitLabel = useCallback((reportsList: ActivityReport[]) => {
@@ -1512,6 +1517,8 @@ export default function InformesPage() {
   const selectedExportTechnicalTotal = useMemo(
     () => exportReportType === "visita_tecnica" || exportReportType === "actividad_grupal"
       ? selectedExportGroupedRows.reduce((sum, row) => sum + row.costoActividad, 0)
+      : exportReportType === "mantenimiento_preventivo"
+        ? selectedExportGroupedRows.reduce((sum, row) => sum + row.costoActividad, 0)
       : selectedExportReports.reduce((sum, report) => sum + getEffectiveTechnicalCost(report), 0),
     [exportReportType, getEffectiveTechnicalCost, selectedExportGroupedRows, selectedExportReports]
   );
@@ -1660,11 +1667,11 @@ export default function InformesPage() {
   );
   const selectedExportCountLabel = useMemo(
     () => exportReportType === "mantenimiento_preventivo"
-      ? `${selectedPreventiveEntries.length} mantenimiento(s) · ${selectedPreventiveContractCount} contrato(s)`
+      ? `${selectedExportGroupedRows.length} mantenimiento(s) · ${selectedPreventiveContractCount} contrato(s)`
       : exportReportType === "visita_tecnica" || exportReportType === "actividad_grupal"
         ? `${selectedExportGroupedRows.length} actividades`
         : `${selectedExportReports.length} registros`,
-    [exportReportType, selectedExportGroupedRows.length, selectedExportReports.length, selectedPreventiveContractCount, selectedPreventiveEntries.length]
+    [exportReportType, selectedExportGroupedRows.length, selectedExportReports.length, selectedPreventiveContractCount]
   );
 
   useEffect(() => {
@@ -2443,7 +2450,7 @@ export default function InformesPage() {
               <TabsTrigger value="preventivos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
                 <Wrench className="h-4 w-4 mr-2" />
                 Mant. Preventivo
-                <Badge className="ml-1.5 bg-blue-500/20 text-blue-400 text-[10px] border-0 px-1.5">{preventivos.length}</Badge>
+                <Badge className="ml-1.5 bg-blue-500/20 text-blue-400 text-[10px] border-0 px-1.5">{groupedPreventivosCount}</Badge>
               </TabsTrigger>
               <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
                 <ClipboardCheck className="h-4 w-4 mr-2" />
@@ -2491,14 +2498,20 @@ export default function InformesPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {paginatedPreventivos.items.map((r) => {
+                      {paginatedPreventivos.items.map((row) => {
+                        const r = row.report;
                         const tech = usersById.get(r.tecnicoId);
                         const client = r.clienteId ? clientsById.get(r.clienteId) : null;
                         const leader = usersById.get(r.liderGrupoId);
                         return (
-                          <TableRow key={r.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                          <TableRow key={row.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
                             <TableCell className="text-sm font-medium text-foreground">
-                              {tech?.nombre} {tech?.apellido}
+                              {row.participantCount > 1
+                                ? `${row.participantCount} participantes`
+                                : `${tech?.nombre || ""} ${tech?.apellido || ""}`.trim() || "—"}
+                              {row.participantCount > 1 && (
+                                <p className="text-xs text-muted-foreground truncate">{row.participantNames.join(", ")}</p>
+                              )}
                             </TableCell>
                             <TableCell>
                               <p className="text-sm text-foreground/80">{client?.edificio}</p>
@@ -2562,7 +2575,7 @@ export default function InformesPage() {
                             </TableCell>
                             <TableCell>{renderEmailStatusBadge(r)}</TableCell>
                             <TableCell className="text-right font-semibold text-gold text-sm">
-                              {formatCurrency(r.costoActividad)}
+                              {formatCurrency(row.costoActividad)}
                             </TableCell>
                             <TableCell>{renderActionButtons(r)}</TableCell>
                           </TableRow>

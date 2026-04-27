@@ -1,5 +1,5 @@
 import { supabase } from "../client";
-import { Maintenance, MaintenanceReport } from "@/lib/types";
+import { Maintenance, MaintenanceParticipant, MaintenanceReport } from "@/lib/types";
 import { deleteAllFotosMantenimiento } from "./storage";
 import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
 
@@ -55,6 +55,7 @@ function mapRow(row: any): Maintenance {
     observaciones: row.observaciones || undefined,
     tipoPendiente: row.tipo_pendiente || undefined,
     descripcionPendiente: row.descripcion_pendiente || undefined,
+    costoTecnicoTotal: Number(row.costo_tecnico_total ?? 0) || 0,
     fechaCreacion: row.fecha_creacion?.split("T")[0] || "",
     fechaCierre: row.fecha_cierre?.split("T")[0] || undefined,
   };
@@ -71,9 +72,228 @@ function mapContratoRow(row: any, contrato: any): Maintenance {
     fechaProgramada: toDateOnly(row.fecha_programada),
     estado: row.estado,
     valorRecaudado: parseFloat(row.valor_recaudado) || 0,
+    costoTecnicoTotal: parseFloat(row.costo_tecnico_total) || 0,
     fechaCreacion: contrato?.fecha_creacion?.split("T")[0] || "",
     fechaCierre: row.fecha_realizado?.split("T")[0] || undefined,
   };
+}
+
+function normalizeMaintenanceParticipants(
+  maintenanceId: string,
+  tecnicoId: string | undefined,
+  participants: MaintenanceParticipant[] | undefined,
+  fallbackTotal: number
+) {
+  const normalizedParticipants = (participants || [])
+    .map((participant) => {
+      const usuarioId = participant.usuarioId;
+      if (!usuarioId) return null;
+
+      const porcentaje = Math.max(0, Number(participant.porcentaje ?? 0) || 0);
+      const valorCalculado = Math.max(0, Math.round(Number(participant.valorCalculado ?? 0) || 0));
+
+      return {
+        maintenance_id: maintenanceId,
+        usuario_id: usuarioId,
+        porcentaje,
+        valor_calculado: valorCalculado,
+      };
+    })
+    .filter(Boolean) as Array<{
+      maintenance_id: string;
+      usuario_id: string;
+      porcentaje: number;
+      valor_calculado: number;
+    }>;
+
+  if (normalizedParticipants.length > 0) {
+    return normalizedParticipants;
+  }
+
+  if (!tecnicoId) {
+    return [];
+  }
+
+  return [{
+    maintenance_id: maintenanceId,
+    usuario_id: tecnicoId,
+    porcentaje: 100,
+    valor_calculado: Math.max(0, Math.round(Number(fallbackTotal) || 0)),
+  }];
+}
+
+async function replaceMaintenanceParticipants(
+  maintenanceId: string,
+  tecnicoId: string | undefined,
+  participants: MaintenanceParticipant[] | undefined,
+  fallbackTotal: number
+) {
+  const participantRows = normalizeMaintenanceParticipants(maintenanceId, tecnicoId, participants, fallbackTotal);
+
+  const { error: deleteParticipantsError } = await supabase
+    .from("mantenimiento_participantes")
+    .delete()
+    .eq("maintenance_id", maintenanceId);
+  if (deleteParticipantsError) throw deleteParticipantsError;
+
+  if (participantRows.length === 0) {
+    return;
+  }
+
+  const { error: insertParticipantsError } = await supabase
+    .from("mantenimiento_participantes")
+    .insert(participantRows);
+  if (insertParticipantsError) throw insertParticipantsError;
+}
+
+async function getMaintenanceParticipantsMap(maintenanceIds: string[]) {
+  if (maintenanceIds.length === 0) {
+    return new Map<string, MaintenanceParticipant[]>();
+  }
+
+  const { data, error } = await supabase
+    .from("mantenimiento_participantes")
+    .select("id, maintenance_id, usuario_id, porcentaje, valor_calculado")
+    .in("maintenance_id", maintenanceIds)
+    .order("fecha_creacion", { ascending: true });
+  if (error) throw error;
+
+  const participantsByMaintenance = new Map<string, MaintenanceParticipant[]>();
+
+  for (const row of data || []) {
+    const maintenanceId = row.maintenance_id;
+    if (!maintenanceId || !row.usuario_id) continue;
+
+    const current = participantsByMaintenance.get(maintenanceId) || [];
+    current.push({
+      id: row.id,
+      usuarioId: row.usuario_id,
+      porcentaje: Number(row.porcentaje ?? 0) || 0,
+      valorCalculado: Number(row.valor_calculado ?? 0) || 0,
+    });
+    participantsByMaintenance.set(maintenanceId, current);
+  }
+
+  return participantsByMaintenance;
+}
+
+async function upsertMaintenanceParticipantActivityReports(params: {
+  maintenanceId: string;
+  clienteId?: string | null;
+  fecha: string;
+  descripcion: string;
+  costoTecnicoTotal: number;
+  participants: MaintenanceParticipant[];
+}) {
+  if (!params.maintenanceId || !params.fecha || params.participants.length === 0) return;
+
+  const participantUserIds = Array.from(new Set(params.participants.map((participant) => participant.usuarioId).filter(Boolean)));
+  if (participantUserIds.length === 0) return;
+
+  const [{ data: users, error: usersError }, { data: existingReports, error: existingReportsError }, { data: periodo, error: periodoError }] = await Promise.all([
+    supabase
+      .from("usuarios")
+      .select("id, grupo_id")
+      .in("id", participantUserIds),
+    supabase
+      .from("reportes_actividad")
+      .select("id, tecnico_id, descripcion")
+      .eq("tipo", "mantenimiento_preventivo")
+      .eq("fecha", params.fecha)
+      .eq("mantenimiento_id", params.maintenanceId),
+    supabase
+      .from("periodos_liquidacion")
+      .select("id")
+      .eq("estado", "abierto")
+      .lte("fecha_inicio", params.fecha)
+      .gte("fecha_fin", params.fecha)
+      .order("fecha_inicio", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+  if (usersError) throw usersError;
+  if (existingReportsError) throw existingReportsError;
+  if (periodoError) throw periodoError;
+
+  let periodoId = periodo?.id || null;
+  if (!periodoId) {
+    const { data: recentPeriodo, error: recentPeriodoError } = await supabase
+      .from("periodos_liquidacion")
+      .select("id")
+      .eq("estado", "abierto")
+      .order("fecha_inicio", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (recentPeriodoError) throw recentPeriodoError;
+    periodoId = recentPeriodo?.id || null;
+  }
+
+  if (!periodoId) {
+    return;
+  }
+
+  const usersById = new Map((users || []).map((user: { id: string; grupo_id?: string | null }) => [user.id, user]));
+  const groupsById = new Map<string, string | null>();
+
+  await Promise.all(
+    Array.from(new Set((users || []).map((user: { grupo_id?: string | null }) => user.grupo_id).filter(Boolean) as string[])).map(async (groupId) => {
+      const { data: group, error: groupError } = await supabase
+        .from("grupos_trabajo")
+        .select("id, lider_id")
+        .eq("id", groupId)
+        .maybeSingle();
+      if (groupError) throw groupError;
+      groupsById.set(groupId, group?.lider_id || null);
+    })
+  );
+
+  const existingReportByParticipantKey = new Map(
+    (existingReports || []).map((report: { id: string; tecnico_id: string; descripcion?: string | null }) => [
+      `${report.tecnico_id}|${report.descripcion || ""}`,
+      report,
+    ])
+  );
+
+  await Promise.all(params.participants.map(async (participant) => {
+    const user = usersById.get(participant.usuarioId);
+    const grupoId = user?.grupo_id || null;
+    const liderId = grupoId ? (groupsById.get(grupoId) || null) : null;
+    const existingReport = existingReportByParticipantKey.get(`${participant.usuarioId}|${params.descripcion}`);
+    const payload = {
+      tipo: "mantenimiento_preventivo",
+      tecnico_id: participant.usuarioId,
+      lider_grupo_id: liderId,
+      grupo_id: grupoId,
+      cliente_id: params.clienteId || null,
+      fecha: params.fecha,
+      descripcion: params.descripcion,
+      costo_actividad_default: params.costoTecnicoTotal,
+      costo_actividad: Math.max(0, Math.round(Number(participant.valorCalculado ?? 0) || 0)),
+      costo_administrable: true,
+      valor_modificado: Math.max(0, Math.round(Number(participant.valorCalculado ?? 0) || 0)) !== Math.max(0, Math.round(Number(params.costoTecnicoTotal ?? 0) || 0)),
+      periodo_id: periodoId,
+      mantenimiento_id: params.maintenanceId,
+      mantenimiento_participante_id: participant.id || null,
+    };
+
+    if (!payload.grupo_id || !payload.lider_grupo_id) {
+      return;
+    }
+
+    if (existingReport?.id) {
+      const { error: updateError } = await supabase
+        .from("reportes_actividad")
+        .update(payload)
+        .eq("id", existingReport.id);
+      if (updateError) throw updateError;
+      return;
+    }
+
+    const { error: insertError } = await supabase
+      .from("reportes_actividad")
+      .insert(payload);
+    if (insertError) throw insertError;
+  }));
 }
 
 export async function getMantenimientos(): Promise<Maintenance[]> {
@@ -101,12 +321,21 @@ export async function getMantenimientos(): Promise<Maintenance[]> {
     }
 
     const contratosById = new Map((contratos || []).map((contrato) => [contrato.id, contrato]));
-    return [...(data || []).map(mapRow), ...mantenimientosContrato.map((mant) => mapContratoRow(mant, contratosById.get(mant.contrato_id)))]
+    const maintenanceRows = (data || []).map(mapRow);
+    const contractRows = mantenimientosContrato.map((mant) => mapContratoRow(mant, contratosById.get(mant.contrato_id)));
+    const participantsByMaintenance = await getMaintenanceParticipantsMap(maintenanceRows.map((row) => row.id));
+
+    return [...maintenanceRows, ...contractRows]
+      .map((maintenance) => ({
+        ...maintenance,
+        participantes: participantsByMaintenance.get(maintenance.id) || undefined,
+      }))
       .sort((a, b) => b.fechaProgramada.localeCompare(a.fechaProgramada));
   });
 }
 
 export async function createMantenimiento(m: Partial<Maintenance>): Promise<Maintenance> {
+  const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? m.valorRecaudado ?? 0) || 0));
   const { data, error } = await supabase
     .from("mantenimientos")
     .insert({
@@ -118,12 +347,22 @@ export async function createMantenimiento(m: Partial<Maintenance>): Promise<Main
       proxima_fecha: m.proximaFecha || null,
       estado: m.estado || "programado",
       observaciones: m.observaciones || null,
+      costo_tecnico_total: costoTecnicoTotal,
     })
     .select()
     .single();
   if (error) throw error;
+
+  await replaceMaintenanceParticipants(data.id, m.tecnicoId, m.participantes, costoTecnicoTotal);
   invalidateMantenimientosCache();
-  return mapRow(data);
+  return {
+    ...mapRow(data),
+    participantes: normalizeMaintenanceParticipants(data.id, m.tecnicoId, m.participantes, costoTecnicoTotal).map((participant) => ({
+      usuarioId: participant.usuario_id,
+      porcentaje: participant.porcentaje,
+      valorCalculado: participant.valor_calculado,
+    })),
+  };
 }
 
 export async function updateMantenimiento(id: string, m: Partial<Maintenance>): Promise<Maintenance> {
@@ -140,6 +379,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
     if (m.fechaProgramada !== undefined) contractUpdateData.fecha_programada = m.fechaProgramada;
     if (m.estado !== undefined) contractUpdateData.estado = m.estado;
     if (m.valorRecaudado !== undefined) contractUpdateData.valor_recaudado = m.valorRecaudado;
+    if (m.costoTecnicoTotal !== undefined) contractUpdateData.costo_tecnico_total = m.costoTecnicoTotal;
 
     const contratoMantQuery = supabase
       .from("contrato_mantenimientos")
@@ -177,6 +417,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
   if (m.proximaFecha !== undefined) updateData.proxima_fecha = m.proximaFecha;
   if (m.estado !== undefined) updateData.estado = m.estado;
   if (m.observaciones !== undefined) updateData.observaciones = m.observaciones;
+  if (m.costoTecnicoTotal !== undefined) updateData.costo_tecnico_total = m.costoTecnicoTotal;
 
   const { data, error } = await supabase
     .from("mantenimientos")
@@ -185,8 +426,34 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
     .select()
     .single();
   if (error) throw error;
+
+  const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? data.costo_tecnico_total ?? 0) || 0));
+  if (m.participantes !== undefined) {
+    await replaceMaintenanceParticipants(id, m.tecnicoId ?? data.tecnico_id, m.participantes, costoTecnicoTotal);
+
+    if (String(data.estado).toLowerCase() === "realizado" || String(data.estado).toLowerCase() === "completado") {
+      const participants = normalizeMaintenanceParticipants(id, m.tecnicoId ?? data.tecnico_id, m.participantes, costoTecnicoTotal).map((participant) => ({
+        usuarioId: participant.usuario_id,
+        porcentaje: participant.porcentaje,
+        valorCalculado: participant.valor_calculado,
+      }));
+
+      await upsertMaintenanceParticipantActivityReports({
+        maintenanceId: id,
+        clienteId: data.cliente_id,
+        fecha: toDateOnly(data.fecha_programada),
+        descripcion: (data.observaciones || "").trim() || "Mantenimiento preventivo realizado",
+        costoTecnicoTotal,
+        participants,
+      });
+    }
+  }
+
   invalidateMantenimientosCache();
-  return mapRow(data);
+  return {
+    ...mapRow(data),
+    participantes: m.participantes,
+  };
 }
 
 export async function deleteMantenimiento(id: string): Promise<void> {
@@ -357,80 +624,23 @@ export async function syncReporteMantenimientoToActividad(reporteId: string): Pr
   const mantenimientoId = reporte.mantenimiento_id || reporte.id;
   const { data: mantenimiento } = await supabase
     .from("mantenimientos")
-    .select("fecha_programada")
+    .select("id, tecnico_id, cliente_id, observaciones, fecha_programada, costo_tecnico_total")
     .eq("id", mantenimientoId)
     .single();
 
   const fecha = mantenimiento?.fecha_programada?.split("T")[0] || reporte.fecha_generacion?.split("T")[0] || new Date().toISOString().split("T")[0];
 
-  // Buscar grupo y líder del técnico
-  let grupoId: string | undefined;
-  let liderGrupoId: string | undefined;
-  if (reporte.tecnico_id) {
-    const { data: tecnico } = await supabase
-      .from("usuarios")
-      .select("grupo_id")
-      .eq("id", reporte.tecnico_id)
-      .single();
-    grupoId = tecnico?.grupo_id || undefined;
+  const participantsByMaintenance = await getMaintenanceParticipantsMap([mantenimientoId]);
+  const participants = participantsByMaintenance.get(mantenimientoId)
+    || (reporte.tecnico_id ? [{ usuarioId: reporte.tecnico_id, porcentaje: 100, valorCalculado: Number(mantenimiento?.costo_tecnico_total ?? 0) || 0 }] : []);
 
-    if (grupoId) {
-      const { data: grupo } = await supabase
-        .from("grupos_trabajo")
-        .select("lider_id")
-        .eq("id", grupoId)
-        .single();
-      liderGrupoId = grupo?.lider_id || undefined;
-    }
-  }
-
-  // Buscar período activo
-  const { data: periodo } = await supabase
-    .from("periodos_liquidacion")
-    .select("id")
-    .eq("estado", "abierto")
-    .lte("fecha_inicio", fecha)
-    .gte("fecha_fin", fecha)
-    .maybeSingle();
-
-  let periodoId = periodo?.id;
-  if (!periodoId) {
-    const { data: periodoReciente } = await supabase
-      .from("periodos_liquidacion")
-      .select("id")
-      .eq("estado", "abierto")
-      .order("fecha_inicio", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    periodoId = periodoReciente?.id;
-  }
-
-  if (!periodoId) return;
-
-  // Evitar duplicados
-  const { data: existing } = await supabase
-    .from("reportes_actividad")
-    .select("id")
-    .eq("tipo", "mantenimiento_preventivo")
-    .eq("tecnico_id", reporte.tecnico_id)
-    .eq("fecha", fecha)
-    .eq("cliente_id", reporte.cliente_id)
-    .maybeSingle();
-
-  if (existing) return;
-
-  await supabase.from("reportes_actividad").insert({
-    tipo: "mantenimiento_preventivo",
-    tecnico_id: reporte.tecnico_id,
-    lider_grupo_id: liderGrupoId || null,
-    grupo_id: grupoId || null,
-    cliente_id: reporte.cliente_id || null,
+  await upsertMaintenanceParticipantActivityReports({
+    maintenanceId: mantenimientoId,
+    clienteId: mantenimiento?.cliente_id || reporte.cliente_id,
     fecha,
-    descripcion: reporte.observaciones || "Mantenimiento preventivo realizado",
-    estado_aprobacion_lider: "pendiente",
-    costo_actividad: 0,
-    costo_administrable: true,
-    periodo_id: periodoId,
+    descripcion: (reporte.observaciones || mantenimiento?.observaciones || "").trim() || "Mantenimiento preventivo realizado",
+    costoTecnicoTotal: Number(mantenimiento?.costo_tecnico_total ?? 0) || 0,
+    participants,
   });
 
   invalidateCachedValue(REPORTES_MANTENIMIENTO_CACHE_KEY);

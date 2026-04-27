@@ -62,6 +62,13 @@ export interface Client {
 
 export type MaintenanceStatus = "programado" | "en_ejecucion" | "realizado" | "pendiente";
 
+export interface MaintenanceParticipant {
+  id?: string;
+  usuarioId: string;
+  porcentaje: number;
+  valorCalculado: number;
+}
+
 export interface Maintenance {
   id: string;
   clienteId: string;
@@ -77,6 +84,8 @@ export interface Maintenance {
   tipoPendiente?: string;
   descripcionPendiente?: string;
   valorRecaudado?: number;
+  costoTecnicoTotal?: number;
+  participantes?: MaintenanceParticipant[];
   fechaCreacion: string;
   fechaCierre?: string;
 }
@@ -234,6 +243,8 @@ export type TipoRecorrido = "normal" | "con_herramienta";
 export interface ActivityReport {
   id: string;
   tipo: TipoInforme;
+  mantenimientoId?: string;
+  mantenimientoParticipanteId?: string;
   visitaTecnicaId?: string;
   tipoVisita?: "imprevisto" | "garantia" | "emergencia";
   registroActividadId?: string;

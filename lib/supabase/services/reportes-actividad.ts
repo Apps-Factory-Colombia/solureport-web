@@ -2,6 +2,7 @@ import { supabase } from "../client";
 import { ActivityReport, LeaderApprovalBatch, LeaderAccumulation } from "@/lib/types";
 import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
 import { getConfiguracion } from "./configuracion";
+import { syncReporteMantenimientoToActividad } from "./mantenimientos";
 
 const REPORTES_ACTIVIDAD_CACHE_KEY = "reportes-actividad:list";
 const REPORTES_ACTIVIDAD_CACHE_TTL = 60_000;
@@ -16,6 +17,8 @@ interface ReporteActividadRow {
   tecnico_id: string;
   lider_grupo_id: string;
   grupo_id: string;
+  mantenimiento_id?: string | null;
+  mantenimiento_participante_id?: string | null;
   fecha: string;
   cliente_id?: string | null;
   descripcion?: string | null;
@@ -95,6 +98,14 @@ interface ReporteActividadFotoRow {
   reporte_actividad_id: string;
   tipo: string;
   url: string;
+}
+
+interface MaintenanceParticipantRow {
+  id: string;
+  maintenance_id: string;
+  usuario_id: string;
+  porcentaje?: number | string | null;
+  valor_calculado?: number | string | null;
 }
 
 interface LeaderApprovalBatchRow {
@@ -195,6 +206,8 @@ interface SharedParticipantOverride {
   periodoId?: string | null;
   visitId?: string;
   defaultCost?: number;
+  maintenanceId?: string;
+  maintenanceParticipantId?: string;
 }
 
 function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues: string[]): ActivityReport {
@@ -208,6 +221,8 @@ function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues:
   return {
     id: row.id,
     tipo: normalizedTipo,
+    mantenimientoId: row.mantenimiento_id || undefined,
+    mantenimientoParticipanteId: row.mantenimiento_participante_id || undefined,
     tecnicoId: row.tecnico_id,
     liderGrupoId: row.lider_grupo_id,
     grupoId: row.grupo_id,
@@ -245,6 +260,118 @@ function addOneDay(date: string): string {
   const nextDate = new Date(`${date}T00:00:00`);
   nextDate.setDate(nextDate.getDate() + 1);
   return nextDate.toISOString().split("T")[0];
+}
+
+function getMaintenanceMirrorDescription(observaciones?: string | null) {
+  return (observaciones || "").trim() || "Mantenimiento preventivo realizado";
+}
+
+function buildMaintenanceMirrorKey(params: {
+  tecnicoId?: string | null;
+  clienteId?: string | null;
+  fecha?: string | null;
+  observaciones?: string | null;
+}) {
+  return [
+    params.tecnicoId || "",
+    params.clienteId || "",
+    params.fecha || "",
+    normalizeActivityMatchText(getMaintenanceMirrorDescription(params.observaciones)),
+  ].join("|");
+}
+
+async function ensurePreventiveMaintenanceMirrors(): Promise<boolean> {
+  const { data: maintenanceReports, error: maintenanceReportsError } = await supabase
+    .from("reportes_mantenimiento")
+    .select("id, mantenimiento_id, tecnico_id, cliente_id, observaciones, fecha_generacion");
+  if (maintenanceReportsError) throw maintenanceReportsError;
+
+  if (!maintenanceReports || maintenanceReports.length === 0) {
+    return false;
+  }
+
+  const mantenimientoIds = Array.from(new Set(
+    maintenanceReports
+      .map((row: { mantenimiento_id?: string | null; id: string }) => row.mantenimiento_id || row.id)
+      .filter(Boolean)
+  ));
+
+  const [{ data: maintenanceDates, error: maintenanceDatesError }, { data: mirroredReports, error: mirroredReportsError }] = await Promise.all([
+    mantenimientoIds.length > 0
+      ? supabase
+        .from("mantenimientos")
+        .select("id, fecha_programada")
+        .in("id", mantenimientoIds)
+      : Promise.resolve({ data: [], error: null }),
+    supabase
+      .from("reportes_actividad")
+      .select("tecnico_id, cliente_id, fecha, descripcion")
+      .eq("tipo", "mantenimiento_preventivo"),
+  ]);
+
+  if (maintenanceDatesError) throw maintenanceDatesError;
+  if (mirroredReportsError) throw mirroredReportsError;
+
+  const fechaByMantenimientoId = new Map<string, string>();
+  for (const row of maintenanceDates || []) {
+    if (!row?.id) continue;
+    const fecha = row.fecha_programada?.split("T")[0] || "";
+    if (fecha) {
+      fechaByMantenimientoId.set(row.id, fecha);
+    }
+  }
+
+  const existingKeys = new Set(
+    (mirroredReports || []).map((row: {
+      tecnico_id?: string | null;
+      cliente_id?: string | null;
+      fecha?: string | null;
+      descripcion?: string | null;
+    }) => buildMaintenanceMirrorKey({
+      tecnicoId: row.tecnico_id,
+      clienteId: row.cliente_id,
+      fecha: row.fecha,
+      observaciones: row.descripcion,
+    }))
+  );
+
+  const missingMirrorIds = (maintenanceReports || [])
+    .filter((row: {
+      id: string;
+      mantenimiento_id?: string | null;
+      tecnico_id?: string | null;
+      cliente_id?: string | null;
+      observaciones?: string | null;
+      fecha_generacion?: string | null;
+    }) => {
+      const mantenimientoId = row.mantenimiento_id || row.id;
+      const fecha = fechaByMantenimientoId.get(mantenimientoId) || row.fecha_generacion?.split("T")[0] || "";
+      if (!row.tecnico_id || !fecha) return false;
+
+      return !existingKeys.has(buildMaintenanceMirrorKey({
+        tecnicoId: row.tecnico_id,
+        clienteId: row.cliente_id,
+        fecha,
+        observaciones: row.observaciones,
+      }));
+    })
+    .map((row: { id: string }) => row.id);
+
+  if (missingMirrorIds.length === 0) {
+    return false;
+  }
+
+  const syncResults = await Promise.allSettled(
+    missingMirrorIds.map((reporteId) => syncReporteMantenimientoToActividad(reporteId))
+  );
+
+  syncResults.forEach((result, index) => {
+    if (result.status === "rejected") {
+      console.error("Error sincronizando reporte de mantenimiento preventivo:", missingMirrorIds[index], result.reason);
+    }
+  });
+
+  return syncResults.some((result) => result.status === "fulfilled");
 }
 
 function chunkArray<T>(items: T[], size: number): T[][] {
@@ -312,6 +439,86 @@ function dedupeSharedParticipantOverrides(overrides: SharedParticipantOverride[]
   });
 
   return Array.from(overridesByTechnician.values());
+}
+
+function buildMaintenanceSharedIdentity(report: Pick<ActivityReport, "tipo" | "mantenimientoId" | "fecha" | "periodoId" | "grupoId" | "clienteId" | "descripcion">) {
+  if (report.tipo !== "mantenimiento_preventivo") return report.mantenimientoId || report.fecha;
+
+  if (report.mantenimientoId) {
+    return `shared-maintenance:${report.mantenimientoId}`;
+  }
+
+  return [
+    "shared-maintenance-fallback",
+    report.fecha,
+    report.periodoId || "sin-periodo",
+    report.grupoId,
+    report.clienteId || "sin-cliente",
+    normalizeActivityMatchText(report.descripcion),
+  ].join("|");
+}
+
+function buildMaintenanceParticipantMaps(rows: MaintenanceParticipantRow[]) {
+  const byMaintenanceId = new Map<string, MaintenanceParticipantRow[]>();
+  const byParticipantId = new Map<string, MaintenanceParticipantRow>();
+
+  for (const row of rows) {
+    if (!row.maintenance_id) continue;
+    const current = byMaintenanceId.get(row.maintenance_id) || [];
+    current.push(row);
+    byMaintenanceId.set(row.maintenance_id, current);
+
+    if (row.id) {
+      byParticipantId.set(row.id, row);
+    }
+  }
+
+  return { byMaintenanceId, byParticipantId };
+}
+
+function enrichPreventiveMaintenanceReport(
+  report: ActivityReport,
+  row: ReporteActividadRow,
+  participantMaps?: ReturnType<typeof buildMaintenanceParticipantMaps>
+): ActivityReport {
+  if (report.tipo !== "mantenimiento_preventivo") return report;
+
+  const maintenanceId = row.mantenimiento_id || report.mantenimientoId;
+  if (!maintenanceId || !participantMaps) return report;
+
+  const maintenanceParticipants = participantMaps.byMaintenanceId.get(maintenanceId) || [];
+  const participantRow = (row.mantenimiento_participante_id
+    ? participantMaps.byParticipantId.get(row.mantenimiento_participante_id)
+    : undefined)
+    || maintenanceParticipants.find((participant) => participant.usuario_id === report.tecnicoId);
+  const participantsCount = maintenanceParticipants.length;
+  const derivedBaseValue = Number(report.costoActividadDefault ?? 0) || maintenanceParticipants.reduce(
+    (sum, participant) => sum + (Number(participant.valor_calculado ?? 0) || 0),
+    0
+  ) || Number(report.costoActividad ?? 0) || 0;
+  const explicitPercentage = Number(participantRow?.porcentaje ?? 0) || 0;
+  const derivedPercentage = explicitPercentage > 0
+    ? explicitPercentage
+    : participantsCount > 1 && derivedBaseValue > 0
+      ? Number((((Number(report.costoActividad ?? 0) || 0) / derivedBaseValue) * 100).toFixed(2))
+      : participantsCount > 1
+        ? Number((100 / participantsCount).toFixed(2))
+        : 100;
+  const participantValue = participantRow?.valor_calculado != null
+    ? Number(participantRow.valor_calculado ?? 0) || 0
+    : Number(report.costoActividad ?? 0) || 0;
+  const shouldTreatAsShared = participantsCount > 1;
+
+  return {
+    ...report,
+    mantenimientoId: maintenanceId,
+    mantenimientoParticipanteId: row.mantenimiento_participante_id || participantRow?.id || report.mantenimientoParticipanteId,
+    costoActividad: participantValue,
+    costoActividadDefault: derivedBaseValue,
+    porcentajeParticipacion: shouldTreatAsShared ? derivedPercentage : report.porcentajeParticipacion,
+    valorActividadBaseGlobal: shouldTreatAsShared ? derivedBaseValue : report.valorActividadBaseGlobal,
+    valorActividadAplicadoGlobal: shouldTreatAsShared ? derivedBaseValue : report.valorActividadAplicadoGlobal,
+  };
 }
 
 function normalizeActivityMatchText(value?: string | null) {
@@ -1729,6 +1936,11 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
 }
 
 export async function getReportesActividad(): Promise<ActivityReport[]> {
+  const createdMaintenanceMirrors = await ensurePreventiveMaintenanceMirrors();
+  if (createdMaintenanceMirrors) {
+    invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+  }
+
   return getCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY, REPORTES_ACTIVIDAD_CACHE_TTL, async () => {
     const companySettingsPromise = getConfiguracion();
     const { data, error } = await supabase
@@ -1738,6 +1950,12 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     if (error) throw error;
 
     const reportIds = (data || []).map((row: ReporteActividadRow) => row.id);
+    const preventiveMaintenanceIds = Array.from(new Set(
+      (data || [])
+        .filter((row: ReporteActividadRow) => row.tipo === "mantenimiento_preventivo")
+        .map((row: ReporteActividadRow) => row.mantenimiento_id)
+        .filter(Boolean)
+    ));
     let fotosData: ReporteActividadFotoRow[] = [];
 
     if (reportIds.length > 0) {
@@ -1803,6 +2021,15 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 
     if (visitLiquidationError) throw visitLiquidationError;
 
+    const { data: maintenanceParticipantRows, error: maintenanceParticipantRowsError } = preventiveMaintenanceIds.length > 0
+      ? await supabase
+        .from("mantenimiento_participantes")
+        .select("id, maintenance_id, usuario_id, porcentaje, valor_calculado")
+        .in("maintenance_id", preventiveMaintenanceIds)
+      : { data: [], error: null };
+
+    if (maintenanceParticipantRowsError) throw maintenanceParticipantRowsError;
+
     const companySettings = await companySettingsPromise;
 
     const visitMirrors: VisitMirrorMaps = {
@@ -1819,6 +2046,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       strict: new Map<string, RecorridoMirrorRow>(),
       fallback: new Map<string, RecorridoMirrorRow>(),
     };
+    const maintenanceParticipantMaps = buildMaintenanceParticipantMaps((maintenanceParticipantRows || []) as MaintenanceParticipantRow[]);
 
     for (const row of (visitMirrorData || []) as VisitMirrorRow[]) {
       const fecha = row.fecha_inicio?.split("T")[0] || "";
@@ -1906,7 +2134,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       const visitEnrichedReport = enrichVisitReport(mapReport(row, fotosAntes, fotosDespues), visitMirrors);
       const mappedReport = enrichRecorridoReport(
         enrichVisitLiquidationReport(
-          visitEnrichedReport,
+          enrichPreventiveMaintenanceReport(visitEnrichedReport, row, maintenanceParticipantMaps),
           visitEnrichedReport.tipo === "visita_tecnica"
             ? resolveVisitLiquidationRow({
               reportId: visitEnrichedReport.id,
@@ -2034,7 +2262,7 @@ export async function updateCostoActividadAdmin(
   costoActividad: number,
   options?: { sharedVisitParticipants?: SharedParticipantOverride[] }
 ): Promise<void> {
-  const normalizedSharedVisitParticipants = dedupeSharedParticipantOverrides(options?.sharedVisitParticipants);
+  const normalizedSharedParticipants = dedupeSharedParticipantOverrides(options?.sharedVisitParticipants);
 
   const legacyGroupActivity = parseLegacyGroupActivityReportId(id);
   if (legacyGroupActivity) {
@@ -2052,7 +2280,7 @@ export async function updateCostoActividadAdmin(
 
   const { data: report, error: reportLookupError } = await supabase
     .from("reportes_actividad")
-    .select("id, tipo, tecnico_id, grupo_id, cliente_id, descripcion, fecha, punto_partida, punto_llegada, tipo_recorrido, periodo_id, costo_actividad_default")
+    .select("id, tipo, tecnico_id, grupo_id, cliente_id, descripcion, fecha, punto_partida, punto_llegada, tipo_recorrido, periodo_id, costo_actividad_default, mantenimiento_id")
     .eq("id", id)
     .single();
   if (reportLookupError) throw reportLookupError;
@@ -2067,7 +2295,7 @@ export async function updateCostoActividadAdmin(
       periodoId: report.periodo_id,
       defaultCost: report.costo_actividad_default,
       costoActividad,
-      participantOverrides: normalizedSharedVisitParticipants,
+      participantOverrides: normalizedSharedParticipants,
     });
 
     if (wasSharedVisitUpdated) {
@@ -2077,7 +2305,7 @@ export async function updateCostoActividadAdmin(
   }
 
   const normalizedDefaultCost = Number(report?.costo_actividad_default ?? 0) || 0;
-  const isVisitValueModified = report?.tipo === "visita_tecnica"
+  const isAdminValueModified = report?.tipo === "visita_tecnica" || report?.tipo === "mantenimiento_preventivo"
     ? costoActividad !== normalizedDefaultCost
     : undefined;
 
@@ -2087,10 +2315,155 @@ export async function updateCostoActividadAdmin(
       costo_actividad: costoActividad,
       valor_modificado: report?.tipo === "recorrido"
         ? true
-        : isVisitValueModified,
+        : isAdminValueModified,
     })
     .eq("id", id);
   if (error) throw error;
+
+  if (report?.tipo === "mantenimiento_preventivo") {
+    const maintenanceIdentity = buildMaintenanceSharedIdentity({
+      tipo: "mantenimiento_preventivo",
+      mantenimientoId: report.mantenimiento_id || undefined,
+      fecha: report.fecha,
+      periodoId: report.periodo_id,
+      grupoId: report.grupo_id,
+      clienteId: report.cliente_id,
+      descripcion: report.descripcion,
+    });
+
+    const { data: maintenanceReports, error: maintenanceReportsError } = await supabase
+      .from("reportes_actividad")
+      .select("id, tecnico_id, periodo_id, mantenimiento_id, mantenimiento_participante_id")
+      .eq("tipo", "mantenimiento_preventivo")
+      .eq("fecha", report.fecha)
+      .eq("grupo_id", report.grupo_id)
+      .eq("periodo_id", report.periodo_id);
+    if (maintenanceReportsError) throw maintenanceReportsError;
+
+    const relatedReports = (maintenanceReports || []).filter((candidate: {
+      id: string;
+      tecnico_id: string;
+      periodo_id?: string | null;
+      mantenimiento_id?: string | null;
+    }) => buildMaintenanceSharedIdentity({
+      tipo: "mantenimiento_preventivo",
+      mantenimientoId: candidate.mantenimiento_id || undefined,
+      fecha: report.fecha,
+      periodoId: candidate.periodo_id || report.periodo_id,
+      grupoId: report.grupo_id,
+      clienteId: report.cliente_id,
+      descripcion: report.descripcion,
+    }) === maintenanceIdentity);
+
+    const shouldUseSharedMaintenanceFlow = relatedReports.length > 1 || normalizedSharedParticipants.length > 0;
+
+    if (shouldUseSharedMaintenanceFlow) {
+      const participantOverrides = normalizedSharedParticipants.length > 0
+        ? normalizedSharedParticipants
+        : relatedReports.map((candidate: {
+          id: string;
+          tecnico_id: string;
+          periodo_id?: string | null;
+          mantenimiento_participante_id?: string | null;
+        }) => ({
+          reportId: candidate.id,
+          tecnicoId: candidate.tecnico_id,
+          percentage: relatedReports.length > 0 ? Number((100 / relatedReports.length).toFixed(2)) : 100,
+          valorGanado: relatedReports.length > 0 ? Math.round(costoActividad / relatedReports.length) : costoActividad,
+          periodoId: candidate.periodo_id || report.periodo_id,
+          maintenanceId: report.mantenimiento_id || undefined,
+          maintenanceParticipantId: candidate.mantenimiento_participante_id || undefined,
+          defaultCost: normalizedDefaultCost,
+        }));
+
+      const maintenanceId = report.mantenimiento_id || participantOverrides.find((participant) => participant.maintenanceId)?.maintenanceId;
+
+      await Promise.all(participantOverrides.map(async (participant, index) => {
+        const fallbackParticipantValue = Math.max(0, Math.round(((costoActividad * (Number(participant.percentage ?? 0) || 0)) / 100) || 0));
+        const assignedBeforeLast = participantOverrides.slice(0, index).reduce((sum, current) => {
+          const currentValue = current.valorGanado != null
+            ? Math.max(0, Math.round(Number(current.valorGanado ?? 0) || 0))
+            : Math.max(0, Math.round(((costoActividad * (Number(current.percentage ?? 0) || 0)) / 100) || 0));
+          return sum + currentValue;
+        }, 0);
+        const participantValue = participant.valorGanado
+          ?? (index === participantOverrides.length - 1
+            ? Math.max(0, Math.round(costoActividad - assignedBeforeLast))
+            : fallbackParticipantValue);
+
+        const { error: participantReportUpdateError } = await supabase
+          .from("reportes_actividad")
+          .update({
+            costo_actividad: participantValue,
+            costo_actividad_default: costoActividad,
+            valor_modificado: participantValue !== costoActividad,
+          })
+          .eq("id", participant.reportId || report.id);
+        if (participantReportUpdateError) throw participantReportUpdateError;
+
+        if (participant.maintenanceParticipantId) {
+          const { error: participantUpdateError } = await supabase
+            .from("mantenimiento_participantes")
+            .update({
+              porcentaje: participant.percentage,
+              valor_calculado: participantValue,
+            })
+            .eq("id", participant.maintenanceParticipantId);
+          if (participantUpdateError) throw participantUpdateError;
+        }
+
+        await syncGroupedActivityApprovalValue({
+          tecnicoId: participant.tecnicoId,
+          fecha: report.fecha,
+          valor: participantValue,
+          referenceIds: [participant.reportId || report.id],
+        });
+
+        await syncGroupedActivityLiquidationValue({
+          tecnicoId: participant.tecnicoId,
+          fecha: report.fecha,
+          valorBase: costoActividad,
+          valorGanado: participantValue,
+          porcentaje: participant.percentage,
+          periodoId: participant.periodoId || report.periodo_id,
+          referenceIds: [participant.reportId || report.id],
+        });
+      }));
+
+      if (maintenanceId) {
+        const { error: maintenanceUpdateError } = await supabase
+          .from("mantenimientos")
+          .update({ costo_tecnico_total: costoActividad })
+          .eq("id", maintenanceId);
+        if (maintenanceUpdateError) throw maintenanceUpdateError;
+      }
+
+      invalidateCachedValue("liquidacion:entries");
+      invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+      return;
+    }
+
+    await syncGroupedActivityApprovalValue({
+      tecnicoId: report.tecnico_id,
+      fecha: report.fecha,
+      valor: costoActividad,
+      referenceIds: [report.id],
+    });
+
+    await syncGroupedActivityLiquidationValue({
+      tecnicoId: report.tecnico_id,
+      fecha: report.fecha,
+      valorBase: costoActividad,
+      valorGanado: costoActividad,
+      porcentaje: 100,
+      periodoId: report.periodo_id,
+      referenceIds: [report.id],
+    });
+
+    invalidateCachedValue("liquidacion:entries");
+    invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+    return;
+  }
 
   if (report?.tipo === "recorrido") {
     let recorridoUpdate = supabase
@@ -2620,7 +2993,7 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
     .eq("id", id);
   if (error) throw error;
 
-  if (report.tipo === "actividad_grupal" || report.tipo === "actividad") {
+  if (report.tipo === "actividad_grupal" || report.tipo === "actividad" || report.tipo === "mantenimiento_preventivo") {
     const estadoDB = estado === "aprobado"
       ? "aprobada"
       : estado === "rechazado"
@@ -2916,7 +3289,7 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
 
   const { data: report, error: reportError } = await supabase
     .from("reportes_actividad")
-    .select("id, tipo, tecnico_id, grupo_id, cliente_id, periodo_id, fecha, punto_partida, punto_llegada")
+    .select("id, tipo, tecnico_id, grupo_id, cliente_id, periodo_id, fecha, punto_partida, punto_llegada, mantenimiento_id")
     .eq("id", id)
     .single();
 
@@ -2941,17 +3314,29 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
       : null;
 
   if (report) {
+    const maintenanceRelatedReports = report.tipo === "mantenimiento_preventivo" && report.mantenimiento_id
+      ? await supabase
+        .from("reportes_actividad")
+        .select("id")
+        .eq("tipo", "mantenimiento_preventivo")
+        .eq("mantenimiento_id", report.mantenimiento_id)
+      : { data: [], error: null };
+    if (maintenanceRelatedReports.error) throw maintenanceRelatedReports.error;
+    const maintenanceReportIds = report.tipo === "mantenimiento_preventivo"
+      ? Array.from(new Set(([report.id, ...((maintenanceRelatedReports.data || []).map((item: { id: string }) => item.id))]).filter(Boolean)))
+      : [id];
+
     // Limpieza de tabla usada por la app para liquidación individual
     await supabase
       .from("items_liquidacion")
       .delete()
-      .or(`referencia_id.eq.${id},and(tecnico_id.eq.${report.tecnico_id},periodo_id.eq.${report.periodo_id},fecha.eq.${report.fecha},tipo.eq.${legacyTipo})`);
+      .or(maintenanceReportIds.map((reportId) => `referencia_id.eq.${reportId}`).concat(`and(tecnico_id.eq.${report.tecnico_id},periodo_id.eq.${report.periodo_id},fecha.eq.${report.fecha},tipo.eq.${legacyTipo})`).join(","));
 
     // Limpieza de cola/aprobación para evitar que la actividad siga apareciendo en app
     let approvalDelete = supabase
       .from("items_aprobacion")
       .delete()
-      .or(`referencia_id.eq.${id},and(tecnico_id.eq.${report.tecnico_id},fecha.eq.${report.fecha})`);
+      .or(maintenanceReportIds.map((reportId) => `referencia_id.eq.${reportId}`).concat(`and(tecnico_id.eq.${report.tecnico_id},fecha.eq.${report.fecha})`).join(","));
 
     if (approvalTipo) {
       approvalDelete = approvalDelete.eq("tipo", approvalTipo);
@@ -3015,20 +3400,18 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
   }
 
   if (report?.tipo === "mantenimiento_preventivo") {
-    const startDate = `${report.fecha}T00:00:00`;
-    const endDate = `${report.fecha}T23:59:59`;
-    let query = supabase
-      .from("reportes_mantenimiento")
-      .delete()
-      .eq("tecnico_id", report.tecnico_id)
-      .gte("fecha_generacion", startDate)
-      .lte("fecha_generacion", endDate);
-
-    if (report.cliente_id) {
-      query = query.eq("cliente_id", report.cliente_id);
+    if (report.mantenimiento_id) {
+      const { error: deleteMirrorReportsError } = await supabase
+        .from("reportes_actividad")
+        .delete()
+        .eq("tipo", "mantenimiento_preventivo")
+        .eq("mantenimiento_id", report.mantenimiento_id);
+      if (deleteMirrorReportsError) throw deleteMirrorReportsError;
+      invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+      invalidateCachedValue(ACUMULACIONES_LIDER_CACHE_KEY);
+      invalidateCachedValue("mantenimientos:reportes");
+      return;
     }
-
-    await query;
   }
 
   const { error: deleteError } = await supabase

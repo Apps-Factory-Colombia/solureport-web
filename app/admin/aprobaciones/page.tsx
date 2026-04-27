@@ -198,7 +198,8 @@ function isGroupActivity(report: ActivityReport) {
 }
 
 function isSharedVisit(report: ActivityReport) {
-  return report.tipo === "visita_tecnica"
+  return (report.tipo === "visita_tecnica"
+    || report.tipo === "mantenimiento_preventivo")
     && ((report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal) != null
       || Number(report.porcentajeParticipacion ?? 0) > 0);
 }
@@ -230,8 +231,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   }
 
   if (isSharedVisit(report)) {
+    const identityPrefix = report.tipo === "mantenimiento_preventivo" ? "shared-maintenance-visual" : "shared-visit-visual";
     return [
-      "shared-visit-visual",
+      identityPrefix,
+      report.mantenimientoId || "sin-mantenimiento",
       report.fecha,
       report.periodoId || "sin-periodo",
       report.grupoId,
@@ -249,8 +252,10 @@ function getSharedPricingIdentity(report: ActivityReport) {
   }
 
   if (isSharedVisit(report)) {
+    const identityPrefix = report.tipo === "mantenimiento_preventivo" ? "shared-maintenance" : "shared-visit";
     return [
-      "shared-visit",
+      identityPrefix,
+      report.mantenimientoId || "sin-mantenimiento",
       report.fecha,
       report.periodoId || "sin-periodo",
       report.grupoId,
@@ -1059,6 +1064,7 @@ export default function AprobacionesPage() {
             valorGanado: participant.amount,
             periodoId: participant.periodoId,
             visitId: participant.visitId,
+            maintenanceId: report.mantenimientoId,
             defaultCost: participant.defaultCost,
           })),
         });
@@ -1092,21 +1098,21 @@ export default function AprobacionesPage() {
     }
 
     await updateCostoActividadAdmin(report.id, nextCost);
-    const nextVisitModifiedFlag = report.tipo === "visita_tecnica"
+    const nextVisitModifiedFlag = report.tipo === "visita_tecnica" || report.tipo === "mantenimiento_preventivo"
       ? nextCost !== getDefaultCostForReport(report)
       : report.valorModificado;
     setReports((prev) => prev.map((item) => item.id === report.id
       ? {
         ...item,
         costoActividad: nextCost,
-        valorModificado: item.tipo === "visita_tecnica" ? nextVisitModifiedFlag : item.valorModificado,
+        valorModificado: item.tipo === "visita_tecnica" || item.tipo === "mantenimiento_preventivo" ? nextVisitModifiedFlag : item.valorModificado,
       }
       : item));
     setSelectedReport((prev) => prev && prev.id === report.id
       ? {
         ...prev,
         costoActividad: nextCost,
-        valorModificado: prev.tipo === "visita_tecnica" ? nextVisitModifiedFlag : prev.valorModificado,
+        valorModificado: prev.tipo === "visita_tecnica" || prev.tipo === "mantenimiento_preventivo" ? nextVisitModifiedFlag : prev.valorModificado,
       }
       : prev);
   }, [applySharedGroupBaseToReport, getDefaultCostForReport]);

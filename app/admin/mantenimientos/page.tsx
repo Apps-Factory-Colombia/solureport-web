@@ -61,7 +61,7 @@ import {
 } from "lucide-react";
 import { Maintenance, MaintenanceStatus, Client, User, CompanySettings } from "@/lib/types";
 import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/supabase/services/mantenimientos";
-import { getContratos } from "@/lib/supabase/services/contratos";
+import { getContratos, createContrato } from "@/lib/supabase/services/contratos";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
@@ -110,6 +110,10 @@ const defaultStatusConfig = {
 };
 
 const daysOfWeek = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+const monthNames = [
+  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+];
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
@@ -117,6 +121,10 @@ function formatCurrency(value: number) {
     currency: "COP",
     minimumFractionDigits: 0,
   }).format(value);
+}
+
+function formatDateInput(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 interface MiniCalendarProps {
@@ -242,6 +250,7 @@ export default function MantenimientosPage() {
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [overdueSearch, setOverdueSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("todos");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingMaintenance, setEditingMaintenance] = useState<Maintenance | null>(null);
@@ -252,6 +261,13 @@ export default function MantenimientosPage() {
   const [scheduleTime, setScheduleTime] = useState("");
   const [maintenanceToDelete, setMaintenanceToDelete] = useState<Maintenance | null>(null);
   const [deletingMaintenanceId, setDeletingMaintenanceId] = useState<string | null>(null);
+  const [uncoveredSearch, setUncoveredSearch] = useState("");
+  const [reactivateOpen, setReactivateOpen] = useState(false);
+  const [reactivatingContract, setReactivatingContract] = useState<MaintenanceContract | null>(null);
+  const [reactivateStartMonth, setReactivateStartMonth] = useState(String(new Date().getMonth() + 1));
+  const [reactivateStartDay, setReactivateStartDay] = useState(String(new Date().getDate()));
+  const [reactivateStartYear, setReactivateStartYear] = useState(String(new Date().getFullYear()));
+  const [reactivateLoading, setReactivateLoading] = useState(false);
 
   const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
   const [calendarSelectedDate, setCalendarSelectedDate] = useState<Date | null>(null);
@@ -354,6 +370,10 @@ export default function MantenimientosPage() {
   }, [getMaintenanceContract]);
 
   const getMaintenancePaymentCost = useCallback((maintenance: Maintenance) => {
+    if ((Number(maintenance.costoTecnicoTotal ?? 0) || 0) > 0) {
+      return Number(maintenance.costoTecnicoTotal ?? 0) || 0;
+    }
+
     const contract = getMaintenanceContract(maintenance);
     if (maintenance.valorRecaudado && maintenance.valorRecaudado > 0) {
       return maintenance.valorRecaudado;
@@ -366,30 +386,79 @@ export default function MantenimientosPage() {
     return getMaintenanceContract(maintenance)?.costoTotalAnual || 0;
   }, [getMaintenanceContract]);
 
+  const isMaintenanceCompleted = useCallback((maintenance: Maintenance) => {
+    const status = String(maintenance.estado).toLowerCase();
+    return status === "realizado" || status === "completado";
+  }, []);
+
+  const canScheduleMaintenance = useCallback((maintenance: Maintenance) => {
+    return String(maintenance.estado).toLowerCase() === "pendiente";
+  }, []);
+
   const isMaintenanceOverdue = useCallback((maintenance: Maintenance) => {
     if (!maintenance.fechaProgramada) return false;
-    if (maintenance.estado === "realizado") return false;
+    if (isMaintenanceCompleted(maintenance)) return false;
     const maintenanceDate = parseLocalDate(maintenance.fechaProgramada);
     return maintenanceDate.getTime() < todayStart.getTime();
-  }, [todayStart]);
+  }, [isMaintenanceCompleted, todayStart]);
+
+  const openScheduleDialog = useCallback((maintenance: Maintenance) => {
+    setSchedulingMaint(maintenance);
+    setScheduleTecnico(maintenance.tecnicoId);
+    setScheduleDate(maintenance.fechaProgramada);
+    setScheduleTime(maintenance.horaProgramada || "");
+    setScheduleOpen(true);
+  }, []);
 
   const proximosMantenimientos = useMemo(() => {
     return maintenances.filter((m) => {
-      if (m.estado !== "pendiente") return false;
+      if (!canScheduleMaintenance(m)) return false;
       const fecha = parseLocalDate(m.fechaProgramada);
       const diffTime = fecha.getTime() - todayStart.getTime();
       const diffDays = diffTime / (1000 * 60 * 60 * 24);
       return diffDays >= 0 && diffDays <= 3;
     });
-  }, [maintenances, todayStart]);
+  }, [canScheduleMaintenance, maintenances, todayStart]);
 
   const programados = useMemo(() => {
-    return maintenances.filter((m) => m.estado === "programado" && !isMaintenanceOverdue(m));
-  }, [maintenances, isMaintenanceOverdue]);
+    return maintenances.filter((m) => String(m.estado).toLowerCase() === "programado");
+  }, [maintenances]);
 
   const vencidos = useMemo(() => {
-    return maintenances.filter((m) => isMaintenanceOverdue(m));
-  }, [maintenances, isMaintenanceOverdue]);
+    return maintenances.filter((m) => canScheduleMaintenance(m) && isMaintenanceOverdue(m));
+  }, [canScheduleMaintenance, maintenances, isMaintenanceOverdue]);
+
+  const activeCoverageClientIds = useMemo(() => {
+    return new Set(
+      contracts
+        .filter((contract) => contract.estado === "activo")
+        .map((contract) => contract.clienteId)
+    );
+  }, [contracts]);
+
+  const uncoveredContracts = useMemo(() => {
+    const latestClosedByClient = new Map<string, MaintenanceContract>();
+
+    contracts.forEach((contract) => {
+      if (contract.estado !== "cerrado" || activeCoverageClientIds.has(contract.clienteId)) {
+        return;
+      }
+
+      const current = latestClosedByClient.get(contract.clienteId);
+      if (!current) {
+        latestClosedByClient.set(contract.clienteId, contract);
+        return;
+      }
+
+      const currentDate = `${current.anio}-${String(current.mesInicio || 1).padStart(2, "0")}-${current.fechaCreacion}`;
+      const nextDate = `${contract.anio}-${String(contract.mesInicio || 1).padStart(2, "0")}-${contract.fechaCreacion}`;
+      if (nextDate > currentDate) {
+        latestClosedByClient.set(contract.clienteId, contract);
+      }
+    });
+
+    return Array.from(latestClosedByClient.values());
+  }, [activeCoverageClientIds, contracts]);
 
   const assignableUsers = users.filter(
     (u) =>
@@ -433,18 +502,44 @@ export default function MantenimientosPage() {
     }
   };
 
+  const maintenanceMatchesSearch = useCallback((maintenance: Maintenance, query: string) => {
+    const normalizedQuery = query.trim().toLowerCase();
+    if (!normalizedQuery) return true;
+
+    const client = clients.find((c) => c.id === maintenance.clienteId);
+    const tech = users.find((u) => u.id === maintenance.tecnicoId);
+
+    return Boolean(
+      client?.edificio.toLowerCase().includes(normalizedQuery) ||
+      client?.nombre.toLowerCase().includes(normalizedQuery) ||
+      tech?.nombre.toLowerCase().includes(normalizedQuery) ||
+      tech?.apellido.toLowerCase().includes(normalizedQuery)
+    );
+  }, [clients, users]);
+
   const filtered = maintenances.filter((m) => {
-    const client = clients.find((c) => c.id === m.clienteId);
-    const tech = users.find((u) => u.id === m.tecnicoId);
-    const matchesSearch =
-      client?.edificio.toLowerCase().includes(search.toLowerCase()) ||
-      client?.nombre.toLowerCase().includes(search.toLowerCase()) ||
-      tech?.nombre.toLowerCase().includes(search.toLowerCase()) ||
-      tech?.apellido.toLowerCase().includes(search.toLowerCase());
+    const matchesSearch = maintenanceMatchesSearch(m, search);
     const matchesStatus = statusFilter === "todos"
-      || (statusFilter === "vencido" ? isMaintenanceOverdue(m) : m.estado === statusFilter);
+      || (statusFilter === "vencido" ? canScheduleMaintenance(m) && isMaintenanceOverdue(m) : m.estado === statusFilter);
     return matchesSearch && matchesStatus;
   });
+
+  const filteredOverdueMaintenances = useMemo(() => {
+    return vencidos.filter((maintenance) => maintenanceMatchesSearch(maintenance, overdueSearch));
+  }, [maintenanceMatchesSearch, overdueSearch, vencidos]);
+
+  const filteredUncoveredContracts = useMemo(() => {
+    return uncoveredContracts.filter((contract) => {
+      const client = clientsById.get(contract.clienteId);
+      const query = uncoveredSearch.trim().toLowerCase();
+      if (!query) return true;
+
+      return Boolean(
+        client?.edificio?.toLowerCase().includes(query) ||
+        client?.nombre?.toLowerCase().includes(query)
+      );
+    });
+  }, [clientsById, uncoveredContracts, uncoveredSearch]);
 
   const calendarFilteredMaintenances = useMemo(() => {
     return filtered.filter((m) => {
@@ -468,10 +563,25 @@ export default function MantenimientosPage() {
     return client?.edificio || client?.nombre || "Cliente no registrado";
   };
 
+  const getMaintenanceParticipantNames = useCallback((maintenance: Maintenance) => {
+    const participantIds = maintenance.participantes?.map((participant) => participant.usuarioId).filter(Boolean) || [];
+
+    if (participantIds.length === 0 && maintenance.tecnicoId) {
+      const tech = usersById.get(maintenance.tecnicoId);
+      return tech ? [`${tech.nombre} ${tech.apellido}`.trim()] : [];
+    }
+
+    return participantIds.map((participantId) => {
+      const participant = usersById.get(participantId);
+      return participant ? `${participant.nombre} ${participant.apellido}`.trim() : "Participante sin nombre";
+    });
+  }, [usersById]);
+
   const getMaintenanceTechnicianLabel = (maintenance: Maintenance) => {
-    const tech = usersById.get(maintenance.tecnicoId);
-    if (!tech) return "Sin técnico asignado";
-    return `${tech.nombre} ${tech.apellido}`.trim();
+    const participantNames = getMaintenanceParticipantNames(maintenance);
+    if (participantNames.length === 0) return "Sin técnico asignado";
+    if (participantNames.length === 1) return participantNames[0];
+    return `${participantNames.length} participantes`;
   };
 
   const getMaintenanceStatusLabel = (maintenance: Maintenance) => {
@@ -591,6 +701,74 @@ export default function MantenimientosPage() {
     }
   };
 
+  const openReactivateDialog = useCallback((contract: MaintenanceContract) => {
+    const nextDate = new Date();
+    setReactivatingContract(contract);
+    setReactivateStartYear(String(nextDate.getFullYear()));
+    setReactivateStartMonth(String(nextDate.getMonth() + 1));
+    setReactivateStartDay(String(Math.min(nextDate.getDate(), 28)));
+    setReactivateOpen(true);
+  }, []);
+
+  const buildContractMaintenances = useCallback((cantidad: number, anio: number, mesInicio: number, dia: number) => {
+    const intervalo = Math.floor(12 / cantidad);
+    return Array.from({ length: cantidad }, (_, index) => {
+      const monthValue = ((mesInicio - 1 + index * intervalo) % 12) + 1;
+      const yearValue = anio + Math.floor((mesInicio - 1 + index * intervalo) / 12);
+      const dateValue = formatDateInput(new Date(yearValue, monthValue - 1, Math.min(dia, 28)));
+
+      return {
+        id: `reactivated-${index}`,
+        mes: monthValue,
+        fechaProgramada: dateValue,
+        estado: "pendiente" as const,
+        valorRecaudado: 0,
+      };
+    });
+  }, []);
+
+  const handleReactivateCoverage = async () => {
+    if (!reactivatingContract) return;
+
+    const year = Number(reactivateStartYear);
+    const month = Number(reactivateStartMonth);
+    const day = Math.min(Number(reactivateStartDay), 28);
+
+    if (!year || !month || !day) {
+      alert("Debes definir una fecha de reinicio válida para reactivar la cobertura.");
+      return;
+    }
+
+    setReactivateLoading(true);
+    try {
+      await createContrato({
+        clienteId: reactivatingContract.clienteId,
+        anio: year,
+        mesInicio: month,
+        diaInicio: day,
+        costoTotalAnual: reactivatingContract.costoTotalAnual,
+        cantidadMantenimientos: reactivatingContract.cantidadMantenimientos,
+        costoPorMantenimiento: reactivatingContract.costoPorMantenimiento,
+        mantenimientosRealizados: buildContractMaintenances(
+          reactivatingContract.cantidadMantenimientos,
+          year,
+          month,
+          day
+        ),
+        estado: "activo",
+      });
+
+      setReactivateOpen(false);
+      setReactivatingContract(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error reactivando cobertura:", err);
+      alert("No se pudo reactivar la cobertura. Intenta nuevamente.");
+    } finally {
+      setReactivateLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div>
@@ -696,6 +874,18 @@ export default function MantenimientosPage() {
                 </Badge>
               )}
             </TabsTrigger>
+            <TabsTrigger
+              value="sin-cubrimiento"
+              className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
+            >
+              <Clock className="h-4 w-4 mr-2" />
+              Sin Cubrimiento
+              {uncoveredContracts.length > 0 && (
+                <Badge className="ml-1.5 bg-muted text-muted-foreground text-[10px] border-0 px-1.5">
+                  {uncoveredContracts.length}
+                </Badge>
+              )}
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="proximos">
@@ -719,7 +909,7 @@ export default function MantenimientosPage() {
                   <div className="space-y-3">
                     {proximosMantenimientos.map((m) => {
                       const client = clients.find((c) => c.id === m.clienteId);
-                      const tech = users.find((u) => u.id === m.tecnicoId);
+                      const participantNames = getMaintenanceParticipantNames(m);
                       const fecha = parseLocalDate(m.fechaProgramada);
                       const diffDays = Math.floor(
                         (fecha.getTime() - todayStart.getTime()) / (1000 * 60 * 60 * 24)
@@ -739,9 +929,9 @@ export default function MantenimientosPage() {
                               <p className="text-xs text-muted-foreground">
                                 {client?.nombre} · Fecha: {m.fechaProgramada}
                               </p>
-                              {tech && (
+                              {participantNames.length > 0 && (
                                 <p className="text-xs text-foreground/60">
-                                  Técnico actual: {tech.nombre} {tech.apellido}
+                                  Asignados: {participantNames.join(", ")}
                                 </p>
                               )}
                             </div>
@@ -761,13 +951,7 @@ export default function MantenimientosPage() {
                               {diffDays <= 0 ? "HOY" : `En ${diffDays} día(s)`}
                             </Badge>
                             <Button
-                              onClick={() => {
-                                setSchedulingMaint(m);
-                                setScheduleTecnico(m.tecnicoId);
-                                setScheduleDate(m.fechaProgramada);
-                                setScheduleTime("");
-                                setScheduleOpen(true);
-                              }}
+                              onClick={() => openScheduleDialog(m)}
                               size="sm"
                               className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
                             >
@@ -830,7 +1014,6 @@ export default function MantenimientosPage() {
                     ) : (
                       programados.map((m) => {
                         const client = clients.find((c) => c.id === m.clienteId);
-                        const tech = users.find((u) => u.id === m.tecnicoId);
                         return (
                           <TableRow key={m.id} className="border-border/50 hover:bg-secondary/30">
                             <TableCell>
@@ -838,7 +1021,10 @@ export default function MantenimientosPage() {
                               <p className="text-xs text-muted-foreground">{client?.nombre}</p>
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80">
-                              {tech?.nombre} {tech?.apellido}
+                              <p>{getMaintenanceTechnicianLabel(m)}</p>
+                              {m.participantes && m.participantes.length > 1 && (
+                                <p className="text-xs text-muted-foreground truncate">{getMaintenanceParticipantNames(m).join(", ")}</p>
+                              )}
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80">
                               <p>{m.fechaProgramada}</p>
@@ -988,7 +1174,6 @@ export default function MantenimientosPage() {
                 ) : (
                   calendarFilteredMaintenances.map((m) => {
                     const client = clientsById.get(m.clienteId);
-                    const tech = usersById.get(m.tecnicoId);
                     const status = statusConfig[m.estado] || defaultStatusConfig;
                     const StatusIcon = status.icon;
 
@@ -1004,7 +1189,7 @@ export default function MantenimientosPage() {
                           <div>
                             <p className="font-medium text-foreground">{client?.edificio}</p>
                             <p className="text-xs text-muted-foreground">
-                              {tech?.nombre} {tech?.apellido} · {m.fechaProgramada} {m.horaProgramada ? `· ${m.horaProgramada}` : ""}
+                              {getMaintenanceParticipantNames(m).join(", ") || "Sin asignados"} · {m.fechaProgramada} {m.horaProgramada ? `· ${m.horaProgramada}` : ""}
                             </p>
                             <p className="text-xs text-muted-foreground">
                               {getMaintenanceDoorCount(m)} puertas · avance {getMaintenanceProgressLabel(m)} · valor {formatCurrency(getMaintenanceAnnualValue(m))} · pago {formatCurrency(getMaintenancePaymentCost(m))}
@@ -1032,6 +1217,15 @@ export default function MantenimientosPage() {
                 <p className="text-sm text-muted-foreground">
                   Mantenimientos cuya fecha ya pasó y aún no fueron realizados.
                 </p>
+                <div className="relative max-w-sm pt-2">
+                  <Search className="absolute left-3 top-1/2 mt-1 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    placeholder="Buscar en vencidos por cliente o técnico..."
+                    value={overdueSearch}
+                    onChange={(e) => setOverdueSearch(e.target.value)}
+                    className="pl-10 bg-secondary/50 border-border/50"
+                  />
+                </div>
               </CardHeader>
               <CardContent className="p-0">
                 <Table>
@@ -1043,17 +1237,20 @@ export default function MantenimientosPage() {
                       <TableHead className="text-muted-foreground">Avance</TableHead>
                       <TableHead className="text-muted-foreground">Costo mant.</TableHead>
                       <TableHead className="text-muted-foreground">Estado</TableHead>
+                      <TableHead className="text-muted-foreground text-right">Acción</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {vencidos.length === 0 ? (
+                    {filteredOverdueMaintenances.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                          No hay mantenimientos vencidos
+                        <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                          {vencidos.length === 0
+                            ? "No hay mantenimientos vencidos"
+                            : "No se encontraron mantenimientos vencidos con esa búsqueda"}
                         </TableCell>
                       </TableRow>
                     ) : (
-                      vencidos.map((m) => {
+                      filteredOverdueMaintenances.map((m) => {
                         const status = statusConfig[m.estado] || defaultStatusConfig;
                         return (
                           <TableRow key={m.id} className="border-border/50 hover:bg-secondary/30">
@@ -1077,6 +1274,102 @@ export default function MantenimientosPage() {
                               <Badge variant="outline" className={cn("text-xs", status.color)}>
                                 {status.label}
                               </Badge>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                onClick={() => openScheduleDialog(m)}
+                                size="sm"
+                                className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+                              >
+                                <UserCheck className="h-4 w-4" />
+                                Programar
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="sin-cubrimiento">
+            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                  <Clock className="h-5 w-5 text-muted-foreground" />
+                  Clientes Sin Cubrimiento
+                </CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Clientes cuyo ultimo contrato de mantenimiento fue cerrado y actualmente no tienen una cobertura activa.
+                </p>
+                <div className="relative max-w-sm pt-2">
+                  <Search className="absolute left-3 top-1/2 mt-1 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    placeholder="Buscar cliente sin cubrimiento..."
+                    value={uncoveredSearch}
+                    onChange={(e) => setUncoveredSearch(e.target.value)}
+                    className="pl-10 bg-secondary/50 border-border/50"
+                  />
+                </div>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-border/50 hover:bg-transparent">
+                      <TableHead className="text-muted-foreground">Cliente</TableHead>
+                      <TableHead className="text-muted-foreground">Ultimo contrato</TableHead>
+                      <TableHead className="text-muted-foreground">Cantidad mant.</TableHead>
+                      <TableHead className="text-muted-foreground">Valor anual</TableHead>
+                      <TableHead className="text-muted-foreground">Estado</TableHead>
+                      <TableHead className="text-muted-foreground text-right">Accion</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredUncoveredContracts.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                          {uncoveredContracts.length === 0
+                            ? "No hay clientes sin cubrimiento"
+                            : "No se encontraron clientes sin cubrimiento con esa busqueda"}
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      filteredUncoveredContracts.map((contract) => {
+                        const client = clientsById.get(contract.clienteId);
+
+                        return (
+                          <TableRow key={contract.id} className="border-border/50 hover:bg-secondary/30">
+                            <TableCell>
+                              <p className="font-medium text-foreground">{client?.edificio || client?.nombre}</p>
+                              <p className="text-xs text-muted-foreground">{client?.nombre || "Cliente no registrado"}</p>
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">
+                              <p>{contract.anio}</p>
+                              <p className="text-xs text-muted-foreground">Desde {monthNames[(contract.mesInicio || 1) - 1]}</p>
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">
+                              {contract.cantidadMantenimientos}
+                            </TableCell>
+                            <TableCell className="text-sm font-medium text-gold">
+                              {formatCurrency(contract.costoTotalAnual)}
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className="text-xs bg-muted text-muted-foreground border-border/50">
+                                Sin cubrimiento
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                onClick={() => openReactivateDialog(contract)}
+                                size="sm"
+                                className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+                              >
+                                <ArrowRight className="h-4 w-4" />
+                                Reactivar
+                              </Button>
                             </TableCell>
                           </TableRow>
                         );
@@ -1206,6 +1499,109 @@ export default function MantenimientosPage() {
                 <Trash2 className="h-4 w-4" />
               )}
               {deletingMaintenanceId ? "Eliminando..." : "Sí, eliminar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={reactivateOpen}
+        onOpenChange={(open) => {
+          if (!reactivateLoading) {
+            setReactivateOpen(open);
+            if (!open) setReactivatingContract(null);
+          }
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Reactivar Cobertura</DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              Se creara un nuevo contrato activo con mantenimientos pendientes a partir de la fecha de reinicio definida.
+            </DialogDescription>
+          </DialogHeader>
+
+          {reactivatingContract && (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-border/50 bg-secondary/30 p-3">
+                {(() => {
+                  const client = clientsById.get(reactivatingContract.clienteId);
+                  return (
+                    <>
+                      <p className="text-sm font-medium text-foreground">
+                        {client?.edificio || client?.nombre || "Cliente no registrado"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Se reutilizaran {reactivatingContract.cantidadMantenimientos} mantenimientos por {formatCurrency(reactivatingContract.costoTotalAnual)} anuales.
+                      </p>
+                    </>
+                  );
+                })()}
+              </div>
+
+              <div className="grid grid-cols-3 gap-4">
+                <div className="space-y-2">
+                  <Label className="text-foreground/80">Ano inicio</Label>
+                  <Input
+                    type="number"
+                    value={reactivateStartYear}
+                    onChange={(e) => setReactivateStartYear(e.target.value)}
+                    className="bg-secondary/50 border-border/50"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-foreground/80">Mes inicio</Label>
+                  <Select value={reactivateStartMonth} onValueChange={setReactivateStartMonth}>
+                    <SelectTrigger className="bg-secondary/50 border-border/50">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-card border-border">
+                      {monthNames.map((monthName, index) => (
+                        <SelectItem key={monthName} value={String(index + 1)}>
+                          {monthName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-foreground/80">Dia</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    max="28"
+                    value={reactivateStartDay}
+                    onChange={(e) => setReactivateStartDay(e.target.value)}
+                    className="bg-secondary/50 border-border/50"
+                  />
+                </div>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                El contrato anterior permanece cerrado para conservar el historico. La reactivacion genera un nuevo ciclo de cobertura activo para el cliente.
+              </p>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setReactivateOpen(false);
+                setReactivatingContract(null);
+              }}
+              disabled={reactivateLoading}
+              className="text-muted-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleReactivateCoverage}
+              disabled={reactivateLoading || !reactivatingContract}
+              className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+            >
+              {reactivateLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
+              {reactivateLoading ? "Reactivando..." : "Crear nueva cobertura"}
             </Button>
           </DialogFooter>
         </DialogContent>
