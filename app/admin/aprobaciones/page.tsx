@@ -67,7 +67,7 @@ import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
-import { sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
+import { formatClientDoorBreakdown, sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
 import { CompanySettings, LiquidationPeriod } from "@/lib/types";
 import {
   Pagination,
@@ -853,6 +853,9 @@ export default function AprobacionesPage() {
     const tecnicoNombre = tech ? `${tech.nombre} ${tech.apellido}`.trim() : "No disponible";
     const clienteNombre = client?.contacto || client?.nombre || "Cliente";
     const edificio = client?.edificio || group?.nombre || tipo.label;
+    const puertasDetalle = report.tipo === "mantenimiento_preventivo" || report.tipo === "visita_tecnica"
+      ? formatClientDoorBreakdown(client)
+      : undefined;
     const fileBaseName = getSafeFileSegment(client?.edificio || group?.nombre || tipo.label);
     const normalizedObservaciones = report.tipo === "actividad_grupal"
       ? sanitizeGroupActivityObservations(report.observaciones)
@@ -915,6 +918,7 @@ export default function AprobacionesPage() {
       tecnico: tecnicoNombre,
       cliente: client?.nombre || "—",
       edificio,
+      puertasDetalle,
       direccionCliente: client?.direccion || "—",
       correoCliente: client?.correo || "—",
       observaciones: detailLines || resumen,

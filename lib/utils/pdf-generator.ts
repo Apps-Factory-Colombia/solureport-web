@@ -10,6 +10,7 @@ interface PDFReportData {
   tecnico?: string;
   cliente?: string;
   edificio?: string;
+  puertasDetalle?: string;
   direccionCliente?: string;
   correoCliente?: string;
   observaciones?: string;
@@ -311,6 +312,7 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
   if (data.tecnico) infoItems.push(["Técnico:", data.tecnico]);
   if (data.cliente) infoItems.push(["Cliente:", data.cliente]);
   if (data.edificio) infoItems.push(["Edificio:", data.edificio]);
+  if (data.puertasDetalle) infoItems.push(["Puertas:", data.puertasDetalle]);
   if (data.direccionCliente) infoItems.push(["Dirección:", data.direccionCliente]);
   if (data.correoCliente) infoItems.push(["Correo:", data.correoCliente]);
 

@@ -75,7 +75,7 @@ import { getContratos } from "@/lib/supabase/services/contratos";
 import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
-import { sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
+import { formatClientDoorBreakdown, sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
 
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 const TABLE_PAGE_SIZE = 10;
@@ -1053,6 +1053,9 @@ export default function InformesPage() {
     const tipoLabel = getTipoLabel(report.tipo);
     const edificio = client?.edificio || group?.nombre || tipoLabel;
     const visitCategoryLabel = report.tipo === "visita_tecnica" ? getVisitCategoryLabel(report.tipoVisita) : undefined;
+    const puertasDetalle = report.tipo === "mantenimiento_preventivo" || report.tipo === "visita_tecnica"
+      ? formatClientDoorBreakdown(client)
+      : undefined;
     const normalizedObservaciones = report.tipo === "actividad_grupal"
       ? sanitizeGroupActivityObservations(report.observaciones)
       : report.tipo === "visita_tecnica"
@@ -1121,6 +1124,7 @@ export default function InformesPage() {
         tecnico: tecnicoNombre,
         cliente: client?.nombre || "—",
         edificio,
+        puertasDetalle,
         direccionCliente: client?.direccion || "—",
         correoCliente: client?.correo || "—",
         observaciones: observaciones || report.descripcion || "Sin detalle registrado.",

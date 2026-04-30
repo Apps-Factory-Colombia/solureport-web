@@ -323,7 +323,8 @@ export async function getMantenimientos(): Promise<Maintenance[]> {
     const contratosById = new Map((contratos || []).map((contrato) => [contrato.id, contrato]));
     const maintenanceRows = (data || []).map(mapRow);
     const contractRows = mantenimientosContrato.map((mant) => mapContratoRow(mant, contratosById.get(mant.contrato_id)));
-    const participantsByMaintenance = await getMaintenanceParticipantsMap(maintenanceRows.map((row) => row.id));
+    const allMaintenanceIds = [...maintenanceRows, ...contractRows].map((row) => row.id).filter(Boolean);
+    const participantsByMaintenance = await getMaintenanceParticipantsMap(allMaintenanceIds);
 
     return [...maintenanceRows, ...contractRows]
       .map((maintenance) => ({
@@ -406,7 +407,40 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
     if (contratoError) throw contratoError;
 
     invalidateMantenimientosCache();
-    return mapContratoRow(contratoMant, contrato);
+    const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? contratoMant.costo_tecnico_total ?? 0) || 0));
+
+    if (m.participantes !== undefined) {
+      await replaceMaintenanceParticipants(id, m.tecnicoId ?? contratoMant.tecnico_id, m.participantes, costoTecnicoTotal);
+
+      if (String(contratoMant.estado).toLowerCase() === "realizado" || String(contratoMant.estado).toLowerCase() === "completado") {
+        const participants = normalizeMaintenanceParticipants(id, m.tecnicoId ?? contratoMant.tecnico_id, m.participantes, costoTecnicoTotal).map((participant) => ({
+          usuarioId: participant.usuario_id,
+          porcentaje: participant.porcentaje,
+          valorCalculado: participant.valor_calculado,
+        }));
+
+        await upsertMaintenanceParticipantActivityReports({
+          maintenanceId: id,
+          clienteId: contrato?.cliente_id,
+          fecha: toDateOnly(contratoMant.fecha_programada),
+          descripcion: "Mantenimiento preventivo realizado",
+          costoTecnicoTotal,
+          participants,
+        });
+      }
+    }
+
+    invalidateMantenimientosCache();
+    return {
+      ...mapContratoRow(contratoMant, contrato),
+      participantes: m.participantes !== undefined
+        ? normalizeMaintenanceParticipants(id, m.tecnicoId ?? contratoMant.tecnico_id, m.participantes, costoTecnicoTotal).map((participant) => ({
+          usuarioId: participant.usuario_id,
+          porcentaje: participant.porcentaje,
+          valorCalculado: participant.valor_calculado,
+        }))
+        : undefined,
+    };
   }
 
   const updateData: any = {};

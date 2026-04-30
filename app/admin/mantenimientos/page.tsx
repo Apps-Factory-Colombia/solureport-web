@@ -68,6 +68,7 @@ import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
+import { formatClientDoorBreakdown } from "@/lib/utils/report-content";
 import type { MaintenanceContract } from "@/lib/types";
 
 const statusConfig: Record<string, { label: string; color: string; icon: React.ElementType }> = {
@@ -649,7 +650,7 @@ export default function MantenimientosPage() {
       headers: ["Cliente", "Puertas", "Avance", "Valor total", "Costo mant.", "Técnico", "Fecha", "Estado"],
       rows: calendarFilteredMaintenances.map((maintenance) => [
         getMaintenanceClientLabel(maintenance),
-        String(getMaintenanceDoorCount(maintenance)),
+        formatClientDoorBreakdown(clientsById.get(maintenance.clienteId)) || `${getMaintenanceDoorCount(maintenance)} puertas`,
         getMaintenanceProgressLabel(maintenance),
         formatCurrency(getMaintenanceAnnualValue(maintenance)),
         formatCurrency(getMaintenancePaymentCost(maintenance)),
@@ -1384,6 +1385,7 @@ export default function MantenimientosPage() {
       </div>
 
       <MaintenanceDialog
+        key={`${dialogOpen ? "open" : "closed"}-${editingMaintenance?.id || "new"}`}
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         maintenance={editingMaintenance}

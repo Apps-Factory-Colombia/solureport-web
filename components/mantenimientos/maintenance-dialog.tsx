@@ -28,6 +28,11 @@ import { Search, X } from "lucide-react";
 type ParticipantDraft = {
   usuarioId: string;
   porcentaje: string;
+};
+
+type CalculatedParticipantDraft = {
+  usuarioId: string;
+  porcentaje: string;
   valorCalculado: string;
 };
 
@@ -39,92 +44,82 @@ function formatCurrency(value: number) {
   }).format(value);
 }
 
-function buildDefaultParticipantDrafts(tecnicoId?: string, costoTecnicoTotal?: number): ParticipantDraft[] {
+function buildDefaultParticipantDrafts(tecnicoId?: string): ParticipantDraft[] {
   if (!tecnicoId) return [];
 
   return [{
     usuarioId: tecnicoId,
     porcentaje: "100",
-    valorCalculado: String(Math.max(0, Math.round(Number(costoTecnicoTotal ?? 0) || 0))),
   }];
 }
 
-function normalizeParticipantDrafts(drafts: ParticipantDraft[]) {
-  return drafts.map((draft) => ({
-    ...draft,
-    porcentaje: String(Math.max(0, Number(draft.porcentaje || 0) || 0)),
-    valorCalculado: String(Math.max(0, Math.round(Number(draft.valorCalculado || 0) || 0))),
-  }));
-}
+function calculateParticipantBreakdown(drafts: ParticipantDraft[], totalCost: number) {
+  const visibleDrafts = drafts.filter((draft) => !!draft.usuarioId);
+  if (visibleDrafts.length === 0) {
+    return {
+      drafts: [] as CalculatedParticipantDraft[],
+      totalCost: Math.max(0, Math.round(Number(totalCost) || 0)),
+      totalPercentage: 0,
+      totalAssigned: 0,
+      isBalanced: false,
+    };
+  }
 
-function redistributeParticipantValues(drafts: ParticipantDraft[], totalCost: number) {
-  if (drafts.length === 0) return drafts;
-
-  const normalizedDrafts = normalizeParticipantDrafts(drafts);
   const normalizedTotal = Math.max(0, Math.round(Number(totalCost) || 0));
-  const totalPercentage = normalizedDrafts.reduce((sum, draft) => sum + (Number(draft.porcentaje || 0) || 0), 0);
-
-  const percentages = totalPercentage > 0
-    ? normalizedDrafts.map((draft, index) => {
-      if (index === normalizedDrafts.length - 1) {
-        const assigned = normalizedDrafts.slice(0, index).reduce((sum, item) => {
-          const currentPercentage = Number(item.porcentaje || 0) || 0;
-          return sum + Number(((currentPercentage / totalPercentage) * 100).toFixed(2));
-        }, 0);
-
-        return Number((100 - assigned).toFixed(2));
-      }
-
-      return Number((((Number(draft.porcentaje || 0) || 0) / totalPercentage) * 100).toFixed(2));
-    })
-    : normalizedDrafts.map((_, index) => index === normalizedDrafts.length - 1
-      ? Number((100 - ((100 / normalizedDrafts.length) * index)).toFixed(2))
-      : Number((100 / normalizedDrafts.length).toFixed(2))
-    );
+  const normalizedDrafts = visibleDrafts.map((draft) => ({
+    usuarioId: draft.usuarioId,
+    porcentaje: Number((Math.max(0, Number(draft.porcentaje || 0) || 0)).toFixed(2)),
+  }));
+  const totalPercentage = Number(normalizedDrafts.reduce((sum, draft) => sum + draft.porcentaje, 0).toFixed(2));
 
   let assigned = 0;
 
-  return normalizedDrafts.map((draft, index) => {
-    const porcentaje = Math.max(0, percentages[index] || 0);
-    const valorCalculado = index === normalizedDrafts.length - 1
+  const calculatedDrafts = normalizedDrafts.map((draft, index) => {
+    const valorCalculado = totalPercentage === 100 && index === normalizedDrafts.length - 1
       ? Math.max(0, normalizedTotal - assigned)
-      : Math.max(0, Math.round((porcentaje / 100) * normalizedTotal));
+      : Math.max(0, Math.round((draft.porcentaje / 100) * normalizedTotal));
 
     assigned += valorCalculado;
 
     return {
-      ...draft,
-      porcentaje: String(porcentaje),
+      usuarioId: draft.usuarioId,
+      porcentaje: String(draft.porcentaje),
       valorCalculado: String(valorCalculado),
     };
   });
+
+  const totalAssigned = calculatedDrafts.reduce((sum, draft) => sum + (Number(draft.valorCalculado || 0) || 0), 0);
+
+  return {
+    drafts: calculatedDrafts,
+    totalCost: normalizedTotal,
+    totalPercentage,
+    totalAssigned,
+    isBalanced: calculatedDrafts.length > 0 && totalPercentage === 100 && totalAssigned === normalizedTotal,
+  };
 }
 
-function syncParticipantPercentages(drafts: ParticipantDraft[], totalCost: number) {
-  if (drafts.length === 0) return drafts;
+function buildInitialFormData(maintenance?: Maintenance | null) {
+  return {
+    clienteId: maintenance?.clienteId || "",
+    tecnicoId: maintenance?.tecnicoId || "",
+    fechaProgramada: maintenance?.fechaProgramada || "",
+    horaProgramada: maintenance?.horaProgramada || "",
+    estado: maintenance?.estado || "programado" as MaintenanceStatus,
+    observaciones: maintenance?.observaciones || "",
+    costoTecnicoTotal: String(Math.max(0, Math.round(Number(maintenance?.costoTecnicoTotal ?? maintenance?.valorRecaudado ?? 0) || 0))),
+  };
+}
 
-  const normalizedDrafts = normalizeParticipantDrafts(drafts);
-  const normalizedTotal = Math.max(0, Math.round(Number(totalCost) || 0));
-  const totalAmount = normalizedDrafts.reduce((sum, draft) => sum + (Number(draft.valorCalculado || 0) || 0), 0);
-  const isFullyAssigned = normalizedTotal > 0 && totalAmount === normalizedTotal;
+function buildInitialParticipantDrafts(maintenance?: Maintenance | null): ParticipantDraft[] {
+  if (maintenance?.participantes && maintenance.participantes.length > 0) {
+    return maintenance.participantes.map((participant) => ({
+      usuarioId: participant.usuarioId,
+      porcentaje: String(participant.porcentaje),
+    }));
+  }
 
-  return normalizedDrafts.map((draft, index) => {
-    const amount = Math.max(0, Number(draft.valorCalculado || 0) || 0);
-    const porcentaje = normalizedTotal > 0
-      ? isFullyAssigned && index === normalizedDrafts.length - 1
-        ? Number((100 - normalizedDrafts.slice(0, index).reduce((sum, item) => {
-          const currentAmount = Math.max(0, Number(item.valorCalculado || 0) || 0);
-          return sum + Number(((currentAmount / normalizedTotal) * 100).toFixed(2));
-        }, 0)).toFixed(2))
-        : Number(((amount / normalizedTotal) * 100).toFixed(2))
-      : Number((100 / normalizedDrafts.length).toFixed(2));
-
-    return {
-      ...draft,
-      porcentaje: String(Math.max(0, porcentaje)),
-      valorCalculado: String(amount),
-    };
-  });
+  return buildDefaultParticipantDrafts(maintenance?.tecnicoId);
 }
 
 interface MaintenanceDialogProps {
@@ -140,20 +135,12 @@ export function MaintenanceDialog({
   maintenance,
   onSave,
 }: MaintenanceDialogProps) {
-  const [formData, setFormData] = useState({
-    clienteId: "",
-    tecnicoId: "",
-    fechaProgramada: "",
-    horaProgramada: "",
-    estado: "programado" as MaintenanceStatus,
-    observaciones: "",
-    costoTecnicoTotal: "0",
-  });
+  const [formData, setFormData] = useState(() => buildInitialFormData(maintenance));
   const [technicians, setTechnicians] = useState<User[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [clientQuery, setClientQuery] = useState("");
   const [isClientListOpen, setIsClientListOpen] = useState(false);
-  const [participantDrafts, setParticipantDrafts] = useState<ParticipantDraft[]>([]);
+  const [participantDrafts, setParticipantDrafts] = useState<ParticipantDraft[]>(() => buildInitialParticipantDrafts(maintenance));
   const [participantSearch, setParticipantSearch] = useState("");
   const [isParticipantListOpen, setIsParticipantListOpen] = useState(false);
 
@@ -174,79 +161,25 @@ export function MaintenanceDialog({
     }
   }, [open]);
 
-  useEffect(() => {
-    if (!open) {
-      setClientQuery("");
-      setIsClientListOpen(false);
-      setParticipantSearch("");
-      setIsParticipantListOpen(false);
-    }
-  }, [open]);
-
-  useEffect(() => {
-    const selectedClient = clients.find((client) => client.id === formData.clienteId);
-
-    if (!selectedClient) {
-      if (!formData.clienteId) {
-        setClientQuery("");
-      }
-      return;
-    }
-
-    setClientQuery(`${selectedClient.edificio} - ${selectedClient.nombre}`);
-  }, [clients, formData.clienteId]);
-
-  useEffect(() => {
-    if (maintenance) {
-      setFormData({
-        clienteId: maintenance.clienteId,
-        tecnicoId: maintenance.tecnicoId,
-        fechaProgramada: maintenance.fechaProgramada,
-        horaProgramada: maintenance.horaProgramada || "",
-        estado: maintenance.estado,
-        observaciones: maintenance.observaciones || "",
-        costoTecnicoTotal: String(Math.max(0, Math.round(Number(maintenance.costoTecnicoTotal ?? maintenance.valorRecaudado ?? 0) || 0))),
-      });
-      setParticipantDrafts(
-        maintenance.participantes && maintenance.participantes.length > 0
-          ? maintenance.participantes.map((participant) => ({
-            usuarioId: participant.usuarioId,
-            porcentaje: String(participant.porcentaje),
-            valorCalculado: String(participant.valorCalculado),
-          }))
-          : buildDefaultParticipantDrafts(maintenance.tecnicoId, maintenance.costoTecnicoTotal)
-      );
-    } else {
-      setFormData({
-        clienteId: "",
-        tecnicoId: "",
-        fechaProgramada: "",
-        horaProgramada: "",
-        estado: "programado",
-        observaciones: "",
-        costoTecnicoTotal: "0",
-      });
-      setParticipantDrafts([]);
-    }
-  }, [maintenance, open]);
-
-  const normalizedParticipantDrafts = useMemo(
-    () => normalizeParticipantDrafts(participantDrafts).filter((draft) => !!draft.usuarioId),
+  const visibleParticipantDrafts = useMemo(
+    () => participantDrafts.filter((draft) => !!draft.usuarioId),
     [participantDrafts]
   );
 
-  const participantSummary = useMemo(() => {
-    const totalCost = Math.max(0, Math.round(Number(formData.costoTecnicoTotal || 0) || 0));
-    const totalPercentage = Number(normalizedParticipantDrafts.reduce((sum, draft) => sum + (Number(draft.porcentaje || 0) || 0), 0).toFixed(2));
-    const totalAssigned = normalizedParticipantDrafts.reduce((sum, draft) => sum + (Number(draft.valorCalculado || 0) || 0), 0);
+  const selectedClientLabel = useMemo(() => {
+    const selectedClient = clients.find((client) => client.id === formData.clienteId);
+    return selectedClient ? `${selectedClient.edificio} - ${selectedClient.nombre}` : "";
+  }, [clients, formData.clienteId]);
 
-    return {
-      totalCost,
-      totalPercentage,
-      totalAssigned,
-      isBalanced: normalizedParticipantDrafts.length > 0 && totalPercentage === 100 && totalAssigned === totalCost,
-    };
-  }, [formData.costoTecnicoTotal, normalizedParticipantDrafts]);
+  const participantSummary = useMemo(
+    () => calculateParticipantBreakdown(visibleParticipantDrafts, Number(formData.costoTecnicoTotal || 0)),
+    [formData.costoTecnicoTotal, visibleParticipantDrafts]
+  );
+
+  const calculatedParticipantsByUserId = useMemo(
+    () => new Map(participantSummary.drafts.map((draft) => [draft.usuarioId, draft])),
+    [participantSummary.drafts]
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -269,7 +202,7 @@ export function MaintenanceDialog({
       id: maintenance?.id || `m${Date.now()}`,
       proximaFecha,
       costoTecnicoTotal: participantSummary.totalCost,
-      participantes: normalizedParticipantDrafts.map((draft): MaintenanceParticipant => ({
+      participantes: participantSummary.drafts.map((draft): MaintenanceParticipant => ({
         usuarioId: draft.usuarioId,
         porcentaje: Number(draft.porcentaje || 0) || 0,
         valorCalculado: Number(draft.valorCalculado || 0) || 0,
@@ -282,30 +215,38 @@ export function MaintenanceDialog({
 
   const filteredClients = clients.filter((client) => {
     const query = clientQuery.trim().toLowerCase();
+    if (!query) return true;
     const searchableText = `${client.edificio} ${client.nombre}`.toLowerCase();
     return searchableText.includes(query);
   });
 
   const handleClientSelect = (client: Client) => {
     setFormData({ ...formData, clienteId: client.id });
-    setClientQuery(`${client.edificio} - ${client.nombre}`);
+    setClientQuery("");
     setIsClientListOpen(false);
   };
 
   const handleParticipantToggle = (user: User, checked: boolean) => {
     setParticipantDrafts((current) => {
+      const filteredCurrent = current.filter((draft) => !!draft.usuarioId);
       const nextDrafts = checked
-        ? [...current, { usuarioId: user.id, porcentaje: current.length === 0 ? "100" : "0", valorCalculado: current.length === 0 ? formData.costoTecnicoTotal : "0" }]
-        : current.filter((draft) => draft.usuarioId !== user.id);
+        ? [...filteredCurrent, { usuarioId: user.id, porcentaje: filteredCurrent.length === 0 ? "100" : "0" }]
+        : filteredCurrent.filter((draft) => draft.usuarioId !== user.id);
 
-      const redistributed = redistributeParticipantValues(nextDrafts, Number(formData.costoTecnicoTotal || 0));
-      const fallbackUserId = redistributed[0]?.usuarioId || user.id;
+      if (nextDrafts.length === 1) {
+        nextDrafts[0] = {
+          ...nextDrafts[0],
+          porcentaje: "100",
+        };
+      }
+
+      const fallbackUserId = nextDrafts[0]?.usuarioId || user.id;
       if (checked && !formData.tecnicoId) {
         setFormData((previous) => ({ ...previous, tecnicoId: fallbackUserId }));
       } else if (!checked && formData.tecnicoId === user.id) {
-        setFormData((previous) => ({ ...previous, tecnicoId: redistributed[0]?.usuarioId || "" }));
+        setFormData((previous) => ({ ...previous, tecnicoId: nextDrafts[0]?.usuarioId || "" }));
       }
-      return redistributed;
+      return nextDrafts;
     });
 
     if (checked) {
@@ -321,7 +262,7 @@ export function MaintenanceDialog({
     return searchable.includes(search);
   });
 
-  const selectedParticipantLabels = normalizedParticipantDrafts.map((draft) => {
+  const selectedParticipantLabels = visibleParticipantDrafts.map((draft) => {
     const user = technicians.find((candidate) => candidate.id === draft.usuarioId);
     return {
       id: draft.usuarioId,
@@ -342,7 +283,7 @@ export function MaintenanceDialog({
             <Label className="text-foreground/80">Cliente</Label>
             <div className="relative">
               <Input
-                value={clientQuery}
+                value={clientQuery || selectedClientLabel}
                 onFocus={() => setIsClientListOpen(true)}
                 onChange={(e) => {
                   setClientQuery(e.target.value);
@@ -441,24 +382,23 @@ export function MaintenanceDialog({
 
           <div className="space-y-2">
             <Label className="text-foreground/80">Costo técnico total</Label>
-            <Input
-              type="number"
-              min="0"
-              value={formData.costoTecnicoTotal}
-              onChange={(e) => {
-                const nextValue = e.target.value;
-                setFormData({ ...formData, costoTecnicoTotal: nextValue });
-                setParticipantDrafts((current) => redistributeParticipantValues(current, Number(nextValue || 0)));
-              }}
-              className="bg-secondary/50 border-border/50"
-              required
-            />
+              <Input
+                type="number"
+                min="0"
+                value={formData.costoTecnicoTotal}
+                onChange={(e) => {
+                  const nextValue = e.target.value;
+                  setFormData({ ...formData, costoTecnicoTotal: nextValue });
+                }}
+                className="bg-secondary/50 border-border/50"
+                required
+              />
           </div>
 
           <div className="space-y-3 rounded-lg border border-border/50 bg-secondary/20 p-4">
             <div>
               <p className="text-sm font-medium text-foreground">Participantes del mantenimiento</p>
-              <p className="text-xs text-muted-foreground">Elige en un solo lugar los líderes o técnicos asignados y reparte el pago.</p>
+              <p className="text-xs text-muted-foreground">Elige los técnicos asignados, configura el porcentaje de cada uno y el pago se calcula automáticamente con base en el total.</p>
             </div>
 
             <div className="space-y-3">
@@ -484,7 +424,7 @@ export function MaintenanceDialog({
               {isParticipantListOpen && (
                 <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border border-border/40 bg-background/40 p-2">
                   {filteredParticipantOptions.length > 0 ? filteredParticipantOptions.map((user) => {
-                    const checked = normalizedParticipantDrafts.some((draft) => draft.usuarioId === user.id);
+                    const checked = visibleParticipantDrafts.some((draft) => draft.usuarioId === user.id);
                     return (
                       <button
                         key={user.id}
@@ -531,55 +471,54 @@ export function MaintenanceDialog({
               )}
             </div>
 
-            {normalizedParticipantDrafts.length > 0 && (
-              <div className="space-y-2">
-                {normalizedParticipantDrafts.map((draft) => {
-                  const user = technicians.find((item) => item.id === draft.usuarioId);
-                  return (
-                    <div key={draft.usuarioId} className="grid grid-cols-1 gap-3 rounded-md border border-border/40 bg-background/40 p-3 sm:grid-cols-[minmax(0,1fr)_120px_140px]">
-                      <div>
-                        <p className="text-sm font-medium text-foreground">{user?.nombre} {user?.apellido}</p>
-                        <p className="text-xs text-muted-foreground">{user?.rol === "lider" || user?.esLider ? "Líder" : "Técnico"}</p>
+              {visibleParticipantDrafts.length > 0 && (
+                <div className="space-y-2">
+                  {visibleParticipantDrafts.map((draft) => {
+                    const user = technicians.find((item) => item.id === draft.usuarioId);
+                    const calculatedDraft = calculatedParticipantsByUserId.get(draft.usuarioId);
+                    return (
+                      <div key={draft.usuarioId} className="grid grid-cols-1 gap-3 rounded-md border border-border/40 bg-background/40 p-3 sm:grid-cols-[minmax(0,1fr)_120px_140px]">
+                        <div>
+                          <p className="text-sm font-medium text-foreground">{user?.nombre} {user?.apellido}</p>
+                          <p className="text-xs text-muted-foreground">{user?.rol === "lider" || user?.esLider ? "Líder" : "Técnico"}</p>
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs text-muted-foreground">Porcentaje</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="0.01"
+                            value={draft.porcentaje}
+                            onChange={(event) => {
+                              const nextValue = event.target.value;
+                              setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
+                                ? { ...item, porcentaje: nextValue }
+                                : item));
+                            }}
+                            className="bg-secondary/50 border-border/50"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs text-muted-foreground">Pago</Label>
+                          <Input
+                            type="number"
+                            value={calculatedDraft?.valorCalculado || "0"}
+                            readOnly
+                            tabIndex={-1}
+                            className="bg-secondary/30 border-border/40 text-muted-foreground"
+                          />
+                        </div>
                       </div>
-                      <div className="space-y-1">
-                        <Label className="text-xs text-muted-foreground">Porcentaje</Label>
-                        <Input
-                          type="number"
-                          value={draft.porcentaje}
-                          readOnly
-                          tabIndex={-1}
-                          className="bg-secondary/30 border-border/40 text-muted-foreground"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-xs text-muted-foreground">Pago</Label>
-                        <Input
-                          type="number"
-                          min="0"
-                          max={Math.max(0, participantSummary.totalCost - normalizedParticipantDrafts.reduce((sum, item) => item.usuarioId === draft.usuarioId ? sum : sum + (Number(item.valorCalculado || 0) || 0), 0))}
-                          value={draft.valorCalculado}
-                          onChange={(event) => {
-                            const otherAssigned = normalizedParticipantDrafts.reduce((sum, item) => item.usuarioId === draft.usuarioId ? sum : sum + (Number(item.valorCalculado || 0) || 0), 0);
-                            const maxAllowed = Math.max(0, participantSummary.totalCost - otherAssigned);
-                            const nextAmount = Math.min(Math.max(0, Number(event.target.value || 0)), maxAllowed);
-                            const nextDrafts = normalizedParticipantDrafts.map((item) => item.usuarioId === draft.usuarioId
-                              ? { ...item, valorCalculado: String(nextAmount) }
-                              : item);
-                            setParticipantDrafts(syncParticipantPercentages(nextDrafts, participantSummary.totalCost));
-                          }}
-                          className="bg-secondary/50 border-border/50"
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+                    );
+                  })}
+                </div>
+              )}
 
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/40 bg-background/40 px-3 py-2 text-xs">
-              <span className="text-muted-foreground">Participantes: {normalizedParticipantDrafts.length}</span>
+              <span className="text-muted-foreground">Participantes: {visibleParticipantDrafts.length}</span>
               <span className={participantSummary.totalPercentage === 100 ? "text-foreground" : "text-amber-400"}>Porcentaje: {participantSummary.totalPercentage}%</span>
-              <span className={participantSummary.totalAssigned === participantSummary.totalCost ? "text-foreground" : "text-amber-400"}>Pago repartido: {formatCurrency(participantSummary.totalAssigned)}</span>
+              <span className={participantSummary.totalAssigned === participantSummary.totalCost ? "text-foreground" : "text-amber-400"}>Pago calculado: {formatCurrency(participantSummary.totalAssigned)}</span>
               <span className="font-medium text-gold">Total: {formatCurrency(participantSummary.totalCost)}</span>
             </div>
           </div>
