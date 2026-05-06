@@ -246,7 +246,7 @@ export interface ActivityReport {
   mantenimientoId?: string;
   mantenimientoParticipanteId?: string;
   visitaTecnicaId?: string;
-  tipoVisita?: "imprevisto" | "garantia" | "emergencia";
+  tipoVisita?: "imprevisto" | "garantia" | "emergencia" | "entregas";
   registroActividadId?: string;
   tecnicoId: string;
   liderGrupoId: string;
@@ -271,6 +271,9 @@ export interface ActivityReport {
   fechaAprobacionLider?: string;
   costoCliente?: number;
   costoActividadDefault?: number;
+  valorSugerido?: number;
+  valorSugeridoGlobal?: number;
+  motivoSugerenciaValor?: string;
   valorModificado?: boolean;
   motivoModificacionValor?: string;
   costoActividad: number;

@@ -59,13 +59,14 @@ import {
   Loader2,
   Download,
 } from "lucide-react";
-import { Maintenance, MaintenanceStatus, Client, User, CompanySettings } from "@/lib/types";
+import { Maintenance, MaintenanceStatus, Client, User, CompanySettings, LiquidationPeriod } from "@/lib/types";
 import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/supabase/services/mantenimientos";
 import { getContratos, createContrato } from "@/lib/supabase/services/contratos";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
+import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 import { formatClientDoorBreakdown } from "@/lib/utils/report-content";
@@ -126,6 +127,11 @@ function formatCurrency(value: number) {
 
 function formatDateInput(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function formatPeriodLabel(period?: LiquidationPeriod) {
+  if (!period) return "Sin corte disponible";
+  return `${period.fechaInicio} al ${period.fechaFin}`;
 }
 
 interface MiniCalendarProps {
@@ -248,6 +254,7 @@ export default function MantenimientosPage() {
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -281,7 +288,7 @@ export default function MantenimientosPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, ct, c, u, s] = await Promise.all([
+      const [m, ct, c, u, s, p] = await Promise.all([
         getMantenimientos(),
         getContratos(),
         getClientes(),
@@ -290,12 +297,14 @@ export default function MantenimientosPage() {
           console.error("Error cargando configuración de empresa:", error);
           return null;
         }),
+        getPeriodos(),
       ]);
       setMaintenances(m);
       setContracts(ct);
       setClients(c);
       setUsers(u);
       setCompanySettings(s);
+      setPeriods(p);
     } catch (err) {
       console.error("Error cargando mantenimientos:", err);
     } finally {
@@ -309,6 +318,8 @@ export default function MantenimientosPage() {
     const today = new Date();
     return new Date(today.getFullYear(), today.getMonth(), today.getDate());
   }, []);
+
+  const latestPeriod = useMemo(() => periods[0], [periods]);
 
   const clientsById = useMemo(
     () => new Map(clients.map((client) => [client.id, client])),
@@ -422,8 +433,17 @@ export default function MantenimientosPage() {
   }, [canScheduleMaintenance, maintenances, todayStart]);
 
   const programados = useMemo(() => {
-    return maintenances.filter((m) => String(m.estado).toLowerCase() === "programado");
-  }, [maintenances]);
+    const scheduledMaintenances = maintenances.filter((m) => String(m.estado).toLowerCase() === "programado");
+    if (scheduledMaintenances.length === 0) {
+      return [];
+    }
+
+    if (latestPeriod) {
+      return scheduledMaintenances.filter((m) => m.fechaProgramada >= latestPeriod.fechaInicio && m.fechaProgramada <= latestPeriod.fechaFin);
+    }
+
+    return scheduledMaintenances;
+  }, [latestPeriod, maintenances]);
 
   const vencidos = useMemo(() => {
     return maintenances.filter((m) => canScheduleMaintenance(m) && isMaintenanceOverdue(m));
@@ -472,23 +492,31 @@ export default function MantenimientosPage() {
     try {
       const tecnicoId = scheduleTecnico || schedulingMaint.tecnicoId;
       const fecha = scheduleDate || schedulingMaint.fechaProgramada;
-      await updateMantenimiento(schedulingMaint.id, {
+      const scheduledMaintenance = await updateMantenimiento(schedulingMaint.id, {
         estado: "programado" as MaintenanceStatus,
         tecnicoId,
         fechaProgramada: fecha,
+        horaProgramada: scheduleTime,
+        participantes: [{
+          usuarioId: tecnicoId,
+          porcentaje: 100,
+          valorCalculado: getMaintenancePaymentCost(schedulingMaint),
+        }],
         observaciones: scheduleTime
           ? `Hora: ${scheduleTime}. ${schedulingMaint.observaciones || ""}`
           : schedulingMaint.observaciones,
       });
 
       const client = clients.find((c) => c.id === schedulingMaint.clienteId);
+      const contratoMantenimientoId = scheduledMaintenance.contratoMantenimientoId || schedulingMaint.contratoMantenimientoId;
       await createNotificacion({
         usuarioId: tecnicoId,
         titulo: "Mantenimiento Programado",
         mensaje: `Se te ha asignado un mantenimiento en ${client?.edificio || "un edificio"} para el ${fecha}${scheduleTime ? ` a las ${scheduleTime}` : ""}. Revisa los detalles en la app.`,
         tipo: "mantenimiento",
         datos: {
-          mantenimientoId: schedulingMaint.id,
+          mantenimientoId: scheduledMaintenance.id,
+          ...(contratoMantenimientoId ? { contratoMantenimientoId } : {}),
           clienteId: schedulingMaint.clienteId,
           fecha,
           hora: scheduleTime || null,
@@ -978,8 +1006,11 @@ export default function MantenimientosPage() {
                       <UserCheck className="h-5 w-5 text-blue-400" />
                       Mantenimientos Programados
                     </CardTitle>
+                    <p className="mt-2 text-sm font-medium text-foreground/80">
+                      Ultimo corte disponible: {formatPeriodLabel(latestPeriod)}
+                    </p>
                     <p className="mt-2 text-sm text-muted-foreground">
-                      Mantenimientos con técnico asignado, fecha y hora confirmados. Se notifica automáticamente al aplicativo.
+                      Muestra solo los mantenimientos programados del ultimo corte disponible, sin depender de si ese corte sigue activo o no.
                     </p>
                   </div>
                   <Button

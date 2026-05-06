@@ -48,6 +48,7 @@ function mapRow(row: any): Maintenance {
     clienteId: row.cliente_id,
     tecnicoId: row.tecnico_id,
     origen: "mantenimiento",
+    contratoMantenimientoId: row.contrato_mantenimiento_id || undefined,
     fechaProgramada: toDateOnly(row.fecha_programada),
     horaProgramada: row.hora_programada || undefined,
     proximaFecha: toDateOnly(row.proxima_fecha) || undefined,
@@ -59,6 +60,192 @@ function mapRow(row: any): Maintenance {
     fechaCreacion: row.fecha_creacion?.split("T")[0] || "",
     fechaCierre: row.fecha_cierre?.split("T")[0] || undefined,
   };
+}
+
+async function resolveMaintenanceLeaderId(tecnicoId?: string | null): Promise<string | null> {
+  if (!tecnicoId) return null;
+
+  const { data: tecnico, error: tecnicoError } = await supabase
+    .from("usuarios")
+    .select("grupo_id")
+    .eq("id", tecnicoId)
+    .maybeSingle();
+  if (tecnicoError) throw tecnicoError;
+
+  if (!tecnico?.grupo_id) return null;
+
+  const { data: grupo, error: grupoError } = await supabase
+    .from("grupos_trabajo")
+    .select("lider_id")
+    .eq("id", tecnico.grupo_id)
+    .maybeSingle();
+  if (grupoError) throw grupoError;
+
+  return grupo?.lider_id || null;
+}
+
+async function syncContractMaintenanceFromExecutable(row: any) {
+  if (!row) return;
+
+  const estado = String(row.estado || "").toLowerCase();
+  const updateData: any = {
+    tecnico_id: row.tecnico_id,
+    fecha_programada: row.fecha_programada,
+    costo_tecnico_total: Math.max(0, Math.round(Number(row.costo_tecnico_total ?? 0) || 0)),
+  };
+
+  if (estado === "realizado" || estado === "completado") {
+    updateData.estado = "realizado";
+    updateData.fecha_realizado = toDateOnly(row.fecha_cierre) || toDateOnly(row.fecha_completado) || new Date().toISOString().split("T")[0];
+  } else if (estado === "programado" || estado === "en_ejecucion" || estado === "en_progreso") {
+    updateData.estado = "programado";
+  }
+
+  let contractMaintenanceId = row.contrato_mantenimiento_id;
+  if (!contractMaintenanceId && row.cliente_id && row.tecnico_id && row.fecha_programada) {
+    const { data: contratos, error: contratosError } = await supabase
+      .from("contratos_mantenimiento")
+      .select("id")
+      .eq("cliente_id", row.cliente_id);
+    if (contratosError) throw contratosError;
+
+    const contratoIds = (contratos || []).map((contrato: { id: string }) => contrato.id).filter(Boolean);
+    if (contratoIds.length === 0) return;
+
+    const { data: contratoMant, error: contratoMantError } = await supabase
+      .from("contrato_mantenimientos")
+      .select("id")
+      .in("contrato_id", contratoIds)
+      .eq("tecnico_id", row.tecnico_id)
+      .eq("fecha_programada", toDateOnly(row.fecha_programada))
+      .order("fecha_creacion", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (contratoMantError) throw contratoMantError;
+    contractMaintenanceId = contratoMant?.id;
+  }
+
+  if (!contractMaintenanceId) return;
+
+  const { error } = await supabase
+    .from("contrato_mantenimientos")
+    .update(updateData)
+    .eq("id", contractMaintenanceId);
+  if (error && !isMissingContractLinkColumnError(error)) throw error;
+}
+
+function isMissingContractLinkColumnError(error: unknown) {
+  const candidate = error as { code?: string; message?: string } | null | undefined;
+  return candidate?.code === "42703" || Boolean(candidate?.message?.includes("contrato_mantenimiento_id"));
+}
+
+async function findExecutableMaintenanceForContract(contratoMant: any, contrato: any) {
+  const byContractLink = await supabase
+    .from("mantenimientos")
+    .select("*")
+    .eq("contrato_mantenimiento_id", contratoMant.id)
+    .limit(1)
+    .maybeSingle();
+
+  if (!byContractLink.error) return byContractLink.data || null;
+  if (!isMissingContractLinkColumnError(byContractLink.error)) throw byContractLink.error;
+
+  if (!contrato?.cliente_id || !contratoMant.tecnico_id || !contratoMant.fecha_programada) {
+    return null;
+  }
+
+  const byCurrentShape = await supabase
+    .from("mantenimientos")
+    .select("*")
+    .eq("cliente_id", contrato.cliente_id)
+    .eq("tecnico_id", contratoMant.tecnico_id)
+    .eq("fecha_programada", toDateOnly(contratoMant.fecha_programada))
+    .in("estado", ["programado", "en_ejecucion", "en_progreso"])
+    .order("fecha_creacion", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (byCurrentShape.error) throw byCurrentShape.error;
+  return byCurrentShape.data || null;
+}
+
+async function persistExecutableMaintenance(existingId: string | undefined, payload: Record<string, unknown>) {
+  const save = (nextPayload: Record<string, unknown>) => existingId
+    ? supabase
+      .from("mantenimientos")
+      .update(nextPayload)
+      .eq("id", existingId)
+      .select()
+      .single()
+    : supabase
+      .from("mantenimientos")
+      .insert(nextPayload)
+      .select()
+      .single();
+
+  const result = await save(payload);
+  if (!result.error) return result.data;
+  if (!isMissingContractLinkColumnError(result.error)) throw result.error;
+
+  const { contrato_mantenimiento_id: _contractMaintenanceId, ...fallbackPayload } = payload;
+  const fallbackResult = await save(fallbackPayload);
+  if (fallbackResult.error) throw fallbackResult.error;
+  return fallbackResult.data;
+}
+
+async function upsertExecutableMaintenanceFromContract(
+  contratoMant: any,
+  contrato: any,
+  m: Partial<Maintenance>
+) {
+  const tecnicoId = m.tecnicoId ?? contratoMant.tecnico_id;
+  const clienteId = contrato?.cliente_id;
+
+  if (!tecnicoId || !clienteId) {
+    return null;
+  }
+
+  const [existing, { data: client, error: clientError }] = await Promise.all([
+    findExecutableMaintenanceForContract(contratoMant, contrato),
+    supabase
+      .from("clientes")
+      .select("nombre, edificio, direccion")
+      .eq("id", clienteId)
+      .maybeSingle(),
+  ]);
+  if (clientError) throw clientError;
+
+  const liderId = await resolveMaintenanceLeaderId(tecnicoId);
+  const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? contratoMant.costo_tecnico_total ?? 0) || 0));
+  const estadoContrato = String(contratoMant.estado || "programado").toLowerCase();
+  const estadoEjecutable = estadoContrato === "realizado" ? "realizado" : "programado";
+  const clientLabel = client?.edificio || client?.nombre || "cliente";
+
+  const payload: Record<string, unknown> = {
+    cliente_id: clienteId,
+    tecnico_id: tecnicoId,
+    lider_id: liderId,
+    titulo: "Mantenimiento programado",
+    descripcion: `Mantenimiento preventivo contractual para ${clientLabel}`,
+    fecha_programada: toDateOnly(contratoMant.fecha_programada) || m.fechaProgramada,
+    estado: estadoEjecutable,
+    prioridad: "media",
+    ubicacion: client?.direccion || null,
+    edificio: client?.edificio || null,
+    tipo_reporte: "preventivo",
+    costo_tecnico_total: costoTecnicoTotal,
+    contrato_mantenimiento_id: contratoMant.id,
+  };
+
+  if (m.horaProgramada !== undefined || !existing) {
+    payload.hora_programada = m.horaProgramada || null;
+  }
+
+  if (m.observaciones !== undefined) {
+    payload.observaciones = m.observaciones || null;
+  }
+
+  return persistExecutableMaintenance(existing?.id, payload);
 }
 
 function mapContratoRow(row: any, contrato: any): Maintenance {
@@ -298,11 +485,23 @@ async function upsertMaintenanceParticipantActivityReports(params: {
 
 export async function getMantenimientos(): Promise<Maintenance[]> {
   return getCachedValue(MANTENIMIENTOS_CACHE_KEY, MANTENIMIENTOS_CACHE_TTL, async () => {
+    let rows = [] as any[];
     const { data, error } = await supabase
       .from("mantenimientos")
       .select("*")
       .order("fecha_programada", { ascending: false });
-    if (error) throw error;
+    if (error) {
+      if (!isMissingContractLinkColumnError(error)) throw error;
+
+      const fallbackResponse = await supabase
+        .from("mantenimientos")
+        .select("id, cliente_id, tecnico_id, lider_id, titulo, descripcion, fecha_programada, hora_programada, proxima_fecha, estado, observaciones, tipo_pendiente, descripcion_pendiente, costo_tecnico_total, fecha_creacion, fecha_cierre")
+        .order("fecha_programada", { ascending: false });
+      if (fallbackResponse.error) throw fallbackResponse.error;
+      rows = fallbackResponse.data || [];
+    } else {
+      rows = data || [];
+    }
 
     const { data: contratos, error: contratosError } = await supabase
       .from("contratos_mantenimiento")
@@ -321,8 +520,33 @@ export async function getMantenimientos(): Promise<Maintenance[]> {
     }
 
     const contratosById = new Map((contratos || []).map((contrato) => [contrato.id, contrato]));
-    const maintenanceRows = (data || []).map(mapRow);
-    const contractRows = mantenimientosContrato.map((mant) => mapContratoRow(mant, contratosById.get(mant.contrato_id)));
+    const maintenanceRows = rows.map(mapRow);
+    const executableContractMaintenanceIds = new Set(
+      maintenanceRows
+        .map((maintenance) => maintenance.contratoMantenimientoId)
+        .filter(Boolean)
+    );
+    const executableMaintenanceKeys = new Set(
+      maintenanceRows.map((maintenance) => [
+        maintenance.clienteId,
+        maintenance.tecnicoId,
+        maintenance.fechaProgramada,
+        String(maintenance.estado).toLowerCase(),
+      ].join("|"))
+    );
+    const contractRows = mantenimientosContrato
+      .filter((mant) => {
+        if (executableContractMaintenanceIds.has(mant.id)) return false;
+        const contrato = contratosById.get(mant.contrato_id);
+        const key = [
+          contrato?.cliente_id || "",
+          mant.tecnico_id || "",
+          toDateOnly(mant.fecha_programada),
+          String(mant.estado).toLowerCase(),
+        ].join("|");
+        return !executableMaintenanceKeys.has(key);
+      })
+      .map((mant) => mapContratoRow(mant, contratosById.get(mant.contrato_id)));
     const allMaintenanceIds = [...maintenanceRows, ...contractRows].map((row) => row.id).filter(Boolean);
     const participantsByMaintenance = await getMaintenanceParticipantsMap(allMaintenanceIds);
 
@@ -337,11 +561,13 @@ export async function getMantenimientos(): Promise<Maintenance[]> {
 
 export async function createMantenimiento(m: Partial<Maintenance>): Promise<Maintenance> {
   const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? m.valorRecaudado ?? 0) || 0));
+  const liderId = await resolveMaintenanceLeaderId(m.tecnicoId);
   const { data, error } = await supabase
     .from("mantenimientos")
     .insert({
       cliente_id: m.clienteId,
       tecnico_id: m.tecnicoId,
+      lider_id: liderId,
       titulo: "Mantenimiento programado",
       fecha_programada: m.fechaProgramada,
       hora_programada: m.horaProgramada || null,
@@ -369,7 +595,7 @@ export async function createMantenimiento(m: Partial<Maintenance>): Promise<Main
 export async function updateMantenimiento(id: string, m: Partial<Maintenance>): Promise<Maintenance> {
   const { data: mantenimientoExistente, error: mantenimientoExistenteError } = await supabase
     .from("mantenimientos")
-    .select("id")
+    .select("*")
     .eq("id", id)
     .maybeSingle();
   if (mantenimientoExistenteError) throw mantenimientoExistenteError;
@@ -409,18 +635,31 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
     invalidateMantenimientosCache();
     const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? contratoMant.costo_tecnico_total ?? 0) || 0));
 
-    if (m.participantes !== undefined) {
-      await replaceMaintenanceParticipants(id, m.tecnicoId ?? contratoMant.tecnico_id, m.participantes, costoTecnicoTotal);
+    const executableMaintenance = await upsertExecutableMaintenanceFromContract(contratoMant, contrato, {
+      ...m,
+      tecnicoId: m.tecnicoId ?? contratoMant.tecnico_id,
+      fechaProgramada: toDateOnly(contratoMant.fecha_programada),
+      estado: "programado",
+      costoTecnicoTotal,
+    });
+
+    if (executableMaintenance?.id) {
+      await replaceMaintenanceParticipants(
+        executableMaintenance.id,
+        executableMaintenance.tecnico_id,
+        m.participantes,
+        costoTecnicoTotal
+      );
 
       if (String(contratoMant.estado).toLowerCase() === "realizado" || String(contratoMant.estado).toLowerCase() === "completado") {
-        const participants = normalizeMaintenanceParticipants(id, m.tecnicoId ?? contratoMant.tecnico_id, m.participantes, costoTecnicoTotal).map((participant) => ({
+        const participants = normalizeMaintenanceParticipants(executableMaintenance.id, executableMaintenance.tecnico_id, m.participantes, costoTecnicoTotal).map((participant) => ({
           usuarioId: participant.usuario_id,
           porcentaje: participant.porcentaje,
           valorCalculado: participant.valor_calculado,
         }));
 
         await upsertMaintenanceParticipantActivityReports({
-          maintenanceId: id,
+          maintenanceId: executableMaintenance.id,
           clienteId: contrato?.cliente_id,
           fecha: toDateOnly(contratoMant.fecha_programada),
           descripcion: "Mantenimiento preventivo realizado",
@@ -431,21 +670,29 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
     }
 
     invalidateMantenimientosCache();
-    return {
-      ...mapContratoRow(contratoMant, contrato),
-      participantes: m.participantes !== undefined
-        ? normalizeMaintenanceParticipants(id, m.tecnicoId ?? contratoMant.tecnico_id, m.participantes, costoTecnicoTotal).map((participant) => ({
+
+    if (executableMaintenance) {
+      return {
+        ...mapRow(executableMaintenance),
+        contratoId: contratoMant.contrato_id,
+        contratoMantenimientoId: contratoMant.id,
+        participantes: normalizeMaintenanceParticipants(executableMaintenance.id, executableMaintenance.tecnico_id, m.participantes, costoTecnicoTotal).map((participant) => ({
           usuarioId: participant.usuario_id,
           porcentaje: participant.porcentaje,
           valorCalculado: participant.valor_calculado,
-        }))
-        : undefined,
-    };
+        })),
+      };
+    }
+
+    return mapContratoRow(contratoMant, contrato);
   }
 
   const updateData: any = {};
   if (m.clienteId !== undefined) updateData.cliente_id = m.clienteId;
-  if (m.tecnicoId !== undefined) updateData.tecnico_id = m.tecnicoId;
+  if (m.tecnicoId !== undefined) {
+    updateData.tecnico_id = m.tecnicoId;
+    updateData.lider_id = await resolveMaintenanceLeaderId(m.tecnicoId);
+  }
   if (m.fechaProgramada !== undefined) updateData.fecha_programada = m.fechaProgramada;
   if (m.horaProgramada !== undefined) updateData.hora_programada = m.horaProgramada;
   if (m.proximaFecha !== undefined) updateData.proxima_fecha = m.proximaFecha;
@@ -482,6 +729,8 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
       });
     }
   }
+
+  await syncContractMaintenanceFromExecutable(data);
 
   invalidateMantenimientosCache();
   return {

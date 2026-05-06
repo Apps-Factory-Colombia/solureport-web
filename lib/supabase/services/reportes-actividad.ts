@@ -10,6 +10,7 @@ const LOTES_APROBACION_CACHE_KEY = "lotes-aprobacion:list";
 const LOTES_APROBACION_CACHE_TTL = 20_000;
 const ACUMULACIONES_LIDER_CACHE_KEY = "acumulaciones-lider:list";
 const ACUMULACIONES_LIDER_CACHE_TTL = 20_000;
+const ADMIN_VALUE_OVERRIDE_REASON = "Ajuste manual desde administracion";
 
 interface ReporteActividadRow {
   id: string;
@@ -36,6 +37,8 @@ interface ReporteActividadRow {
   estado_aprobacion_lider: ActivityReport["estadoAprobacionLider"];
   fecha_aprobacion_lider?: string | null;
   costo_actividad_default?: number | string | null;
+  valor_sugerido?: number | string | null;
+  motivo_sugerencia_valor?: string | null;
   valor_modificado?: boolean | null;
   motivo_modificacion_valor?: string | null;
   costo_actividad?: number | string | null;
@@ -57,6 +60,8 @@ interface RegistroActividadRow {
   especificacion?: string | null;
   valor_actividad_base?: number | string | null;
   valor_actividad_aplicado?: number | string | null;
+  valor_sugerido?: number | string | null;
+  motivo_sugerencia_valor?: string | null;
   valor_modificado?: boolean | null;
   motivo_modificacion_valor?: string | null;
   enviado_correo?: boolean | null;
@@ -156,6 +161,8 @@ interface VisitMirrorRow {
   tipo_visita?: ActivityReport["tipoVisita"] | null;
   costo_visita_tecnica_default?: number | string | null;
   costo_cliente?: number | string | null;
+  valor_sugerido?: number | string | null;
+  motivo_sugerencia_valor?: string | null;
   valor_modificado?: boolean | null;
   motivo_modificacion_valor?: string | null;
   valor_cobrado_cliente?: number | string | null;
@@ -245,6 +252,9 @@ function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues:
     estadoAprobacionLider: row.estado_aprobacion_lider,
     fechaAprobacionLider: row.fecha_aprobacion_lider?.split("T")[0] || undefined,
     costoActividadDefault: Number(row.costo_actividad_default ?? 0) || 0,
+    valorSugerido: row.valor_sugerido == null ? undefined : Number(row.valor_sugerido ?? 0) || 0,
+    valorSugeridoGlobal: row.valor_sugerido == null ? undefined : Number(row.valor_sugerido ?? 0) || 0,
+    motivoSugerenciaValor: row.motivo_sugerencia_valor || undefined,
     valorModificado: row.valor_modificado ?? false,
     motivoModificacionValor: row.motivo_modificacion_valor || undefined,
     costoActividad: Number(row.costo_actividad ?? 0) || 0,
@@ -858,6 +868,20 @@ function buildLegacyActivityFallbackKey(params: {
   ].join("|");
 }
 
+function buildLegacyActivityParticipantKey(params: {
+  tecnicoId: string;
+  fecha: string;
+  grupoId?: string | null;
+  clienteId?: string | null;
+}) {
+  return [
+    params.tecnicoId,
+    params.fecha,
+    params.grupoId || "",
+    params.clienteId || "",
+  ].join("|");
+}
+
 function appendLegacyActivityCandidate(
   map: Map<string, ActivityReport[]>,
   key: string,
@@ -985,6 +1009,9 @@ function mergeGroupActivityMetadata(report: ActivityReport, relatedReport: Activ
     costoActividad: report.costoActividad,
     valorActividadBaseGlobal: relatedReport.valorActividadBaseGlobal ?? report.valorActividadBaseGlobal,
     valorActividadAplicadoGlobal: relatedReport.valorActividadAplicadoGlobal ?? report.valorActividadAplicadoGlobal,
+    valorSugerido: report.valorSugerido ?? relatedReport.valorSugerido,
+    valorSugeridoGlobal: relatedReport.valorSugeridoGlobal ?? report.valorSugeridoGlobal,
+    motivoSugerenciaValor: relatedReport.motivoSugerenciaValor || report.motivoSugerenciaValor,
     valorModificado: report.valorModificado || relatedReport.valorModificado,
     motivoModificacionValor: report.motivoModificacionValor || relatedReport.motivoModificacionValor,
   };
@@ -1161,18 +1188,13 @@ function enrichVisitReport(
   if (!mirror) return report;
 
   const mirrorDefaultCost = Number(mirror.costo_visita_tecnica_default ?? 0) || 0;
-  const mirrorReportedCost = Number(mirror.valor_cobrado_cliente ?? 0) || 0;
   const hasMirrorVisitId = !report.visitaTecnicaId && !!mirror.id;
   const shouldUseMirrorClientCost = mirror.costo_cliente != null && report.costoCliente !== (Number(mirror.costo_cliente) || 0);
   const shouldUseMirrorDefault = !report.costoActividadDefault && mirrorDefaultCost > 0;
-  const shouldUseMirrorReason = !report.motivoModificacionValor && !!mirror.motivo_modificacion_valor;
-  const shouldUseMirrorModifiedFlag = !report.valorModificado && !!mirror.valor_modificado;
-  const shouldUseMirrorReportedCost = report.costoActividad <= 0
-    && !report.valorModificado
-    && !report.motivoModificacionValor
-    && mirrorReportedCost > 0;
+  const shouldUseSuggestedValue = report.valorSugerido == null && mirror.valor_sugerido != null;
+  const shouldUseSuggestionReason = !report.motivoSugerenciaValor && !!mirror.motivo_sugerencia_valor;
 
-  if (!hasMirrorVisitId && !shouldUseMirrorClientCost && !shouldUseMirrorDefault && !shouldUseMirrorReason && !shouldUseMirrorModifiedFlag && !shouldUseMirrorReportedCost) {
+  if (!hasMirrorVisitId && !shouldUseMirrorClientCost && !shouldUseMirrorDefault && !shouldUseSuggestedValue && !shouldUseSuggestionReason) {
     return report;
   }
 
@@ -1182,9 +1204,9 @@ function enrichVisitReport(
     tipoVisita: report.tipoVisita || mirror.tipo_visita || undefined,
     costoCliente: mirror.costo_cliente == null ? (report.costoCliente ?? 0) : Number(mirror.costo_cliente) || 0,
     costoActividadDefault: shouldUseMirrorDefault ? mirrorDefaultCost : report.costoActividadDefault,
-    valorModificado: shouldUseMirrorModifiedFlag ? true : report.valorModificado,
-    motivoModificacionValor: shouldUseMirrorReason ? mirror.motivo_modificacion_valor || undefined : report.motivoModificacionValor,
-    costoActividad: shouldUseMirrorReportedCost ? mirrorReportedCost : report.costoActividad,
+    valorSugerido: shouldUseSuggestedValue ? (Number(mirror.valor_sugerido ?? 0) || 0) : report.valorSugerido,
+    valorSugeridoGlobal: shouldUseSuggestedValue ? (Number(mirror.valor_sugerido ?? 0) || 0) : report.valorSugeridoGlobal,
+    motivoSugerenciaValor: shouldUseSuggestionReason ? mirror.motivo_sugerencia_valor || undefined : report.motivoSugerenciaValor,
   };
 }
 
@@ -1606,23 +1628,25 @@ async function updateSharedVisitCostFromReport(params: {
       const nextTechnicalValue = participant.valorGanado
         ?? calculateGroupParticipantValue(normalizedBaseValue, participant.percentage);
 
-      const { error: reportUpdateError } = await supabase
-        .from("reportes_actividad")
-        .update({
-          costo_actividad: nextTechnicalValue,
-          valor_modificado: nextTechnicalValue !== participant.visitDefaultCost,
-        })
-        .eq("id", participant.reportId);
+        const { error: reportUpdateError } = await supabase
+          .from("reportes_actividad")
+          .update({
+            costo_actividad: nextTechnicalValue,
+            valor_modificado: nextTechnicalValue !== participant.visitDefaultCost,
+            motivo_modificacion_valor: nextTechnicalValue !== participant.visitDefaultCost ? ADMIN_VALUE_OVERRIDE_REASON : null,
+          })
+          .eq("id", participant.reportId);
       if (reportUpdateError) throw reportUpdateError;
 
-      if (participant.visitId) {
-        const { error: visitUpdateError } = await supabase
-          .from("visitas_tecnicas")
-          .update({
-            valor_cobrado_cliente: nextTechnicalValue,
-            valor_modificado: nextTechnicalValue !== participant.visitDefaultCost,
-          })
-          .eq("id", participant.visitId);
+        if (participant.visitId) {
+          const { error: visitUpdateError } = await supabase
+            .from("visitas_tecnicas")
+            .update({
+              valor_cobrado_cliente: nextTechnicalValue,
+              valor_modificado: nextTechnicalValue !== participant.visitDefaultCost,
+              motivo_modificacion_valor: nextTechnicalValue !== participant.visitDefaultCost ? ADMIN_VALUE_OVERRIDE_REASON : null,
+            })
+            .eq("id", participant.visitId);
         if (visitUpdateError) throw visitUpdateError;
       }
 
@@ -1702,6 +1726,7 @@ async function syncVisitCostFromApprovalReport(reportId: string, costoActividad:
           .update({
             valor_cobrado_cliente: costoActividad,
             valor_modificado: costoActividad !== defaultCost,
+            motivo_modificacion_valor: costoActividad !== defaultCost ? ADMIN_VALUE_OVERRIDE_REASON : null,
           })
           .eq("id", visit.id);
         if (visitsUpdateError) throw visitsUpdateError;
@@ -1841,7 +1866,7 @@ async function syncGroupedActivityLiquidationValue(params: {
 
 async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Promise<ActivityReport[]> {
     const [{ data: registros }, { data: allParticipantes }, { data: actividades }, { data: periodos }, { data: approvalItems }] = await Promise.all([
-    supabase.from("registros_actividades").select("id, actividad_id, lider_id, grupo_id, fecha, cliente_id, cliente_nombre, especificacion, valor_actividad_base, valor_actividad_aplicado, valor_modificado, motivo_modificacion_valor, enviado_correo, fecha_ultimo_envio_correo, periodo_id, fecha_creacion").order("fecha", { ascending: false }),
+    supabase.from("registros_actividades").select("id, actividad_id, lider_id, grupo_id, fecha, cliente_id, cliente_nombre, especificacion, valor_actividad_base, valor_actividad_aplicado, valor_sugerido, motivo_sugerencia_valor, valor_modificado, motivo_modificacion_valor, enviado_correo, fecha_ultimo_envio_correo, periodo_id, fecha_creacion").order("fecha", { ascending: false }),
     supabase.from("actividad_participantes").select("registro_actividad_id, tecnico_id, porcentaje, valor_calculado"),
     supabase.from("actividades").select("id, codigo, nombre"),
     supabase.from("periodos_liquidacion").select("id, fecha_inicio, fecha_fin").order("fecha_inicio", { ascending: false }),
@@ -1897,6 +1922,10 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
         ? (valorActividadAplicado * porcentajeParticipacion) / 100
         : valorActividadAplicado;
       const valorCalculadoParticipante = Number(part.valor_calculado ?? 0) || 0;
+      const valorSugeridoGlobal = Number(reg.valor_sugerido ?? 0) || 0;
+      const valorSugeridoParticipante = valorSugeridoGlobal > 0
+        ? (porcentajeParticipacion > 0 ? (valorSugeridoGlobal * porcentajeParticipacion) / 100 : valorSugeridoGlobal)
+        : 0;
 
       reports.push(enrichLegacyActivityReport({
         id: `reg-${reg.id}-${part.tecnico_id}`,
@@ -1913,6 +1942,9 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
         estadoAprobacionLider: estadoAprobacion,
         fechaAprobacionLider: approval?.fecha_aprobacion?.split("T")[0] || undefined,
         costoActividadDefault: valorBaseParticipante,
+        valorSugerido: valorSugeridoParticipante > 0 ? valorSugeridoParticipante : undefined,
+        valorSugeridoGlobal: valorSugeridoGlobal > 0 ? valorSugeridoGlobal : undefined,
+        motivoSugerenciaValor: reg.motivo_sugerencia_valor || undefined,
         valorModificado: reg.valor_modificado ?? valorActividadBase !== valorActividadAplicado,
         motivoModificacionValor: reg.motivo_modificacion_valor || undefined,
         costoActividad: valorCalculadoParticipante || valorAplicadoParticipante,
@@ -2181,6 +2213,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       const registroReports = await getRegistrosComoReports(legacyActivityMirrors);
       const registroReportsByStrictKey = new Map<string, ActivityReport[]>();
       const registroReportsByFallbackKey = new Map<string, ActivityReport[]>();
+      const registroReportsByParticipantKey = new Map<string, ActivityReport[]>();
       const matchedRegistroReportIds = new Set<string>();
 
       for (const registroReport of registroReports) {
@@ -2199,9 +2232,16 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           clienteId: registroReport.clienteId,
           descripcion: registroReport.descripcion,
         });
+        const participantKey = buildLegacyActivityParticipantKey({
+          tecnicoId: registroReport.tecnicoId,
+          fecha: registroReport.fecha,
+          grupoId: registroReport.grupoId,
+          clienteId: registroReport.clienteId,
+        });
 
         appendLegacyActivityCandidate(registroReportsByStrictKey, strictKey, registroReport);
         appendLegacyActivityCandidate(registroReportsByFallbackKey, fallbackKey, registroReport);
+        appendLegacyActivityCandidate(registroReportsByParticipantKey, participantKey, registroReport);
       }
 
       for (let index = 0; index < reports.length; index += 1) {
@@ -2223,10 +2263,18 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           clienteId: report.clienteId,
           descripcion: report.descripcion,
         });
+        const participantKey = buildLegacyActivityParticipantKey({
+          tecnicoId: report.tecnicoId,
+          fecha: report.fecha,
+          grupoId: report.grupoId,
+          clienteId: report.clienteId,
+        });
         const relatedReport = resolveLegacyActivityCandidate(registroReportsByStrictKey.get(strictKey), report)
           || resolveLegacyActivityCandidate(registroReportsByFallbackKey.get(fallbackKey), report)
+          || resolveLegacyActivityCandidate(registroReportsByParticipantKey.get(participantKey), report)
           || resolveLegacyActivityByBaseIdentity(registroReportsByStrictKey.get(strictKey), report)
-          || resolveLegacyActivityByBaseIdentity(registroReportsByFallbackKey.get(fallbackKey), report);
+          || resolveLegacyActivityByBaseIdentity(registroReportsByFallbackKey.get(fallbackKey), report)
+          || resolveLegacyActivityByBaseIdentity(registroReportsByParticipantKey.get(participantKey), report);
 
         if (relatedReport) {
           reports[index] = mergeGroupActivityMetadata(report, relatedReport);
@@ -2316,6 +2364,11 @@ export async function updateCostoActividadAdmin(
       valor_modificado: report?.tipo === "recorrido"
         ? true
         : isAdminValueModified,
+      motivo_modificacion_valor: report?.tipo === "recorrido"
+        ? ADMIN_VALUE_OVERRIDE_REASON
+        : isAdminValueModified
+          ? ADMIN_VALUE_OVERRIDE_REASON
+          : null,
     })
     .eq("id", id);
   if (error) throw error;
@@ -2397,6 +2450,7 @@ export async function updateCostoActividadAdmin(
             costo_actividad: participantValue,
             costo_actividad_default: costoActividad,
             valor_modificado: participantValue !== costoActividad,
+            motivo_modificacion_valor: participantValue !== costoActividad ? ADMIN_VALUE_OVERRIDE_REASON : null,
           })
           .eq("id", participant.reportId || report.id);
         if (participantReportUpdateError) throw participantReportUpdateError;
@@ -2723,6 +2777,7 @@ export async function updateActividadGrupalBaseAdmin(
           .update({
             costo_actividad: nextTechnicalValue,
             valor_modificado: true,
+            motivo_modificacion_valor: ADMIN_VALUE_OVERRIDE_REASON,
           })
           .eq("id", participant.id);
         if (reportUpdateError) throw reportUpdateError;
@@ -2754,6 +2809,7 @@ export async function updateActividadGrupalBaseAdmin(
         .update({
           valor_actividad_aplicado: normalizedBaseValue,
           valor_modificado: normalizedBaseValue !== normalizedOriginalBase,
+          motivo_modificacion_valor: normalizedBaseValue !== normalizedOriginalBase ? ADMIN_VALUE_OVERRIDE_REASON : null,
         })
         .eq("id", legacyRegistro.id);
       if (registroUpdateError) throw registroUpdateError;
@@ -2837,6 +2893,7 @@ export async function updateActividadGrupalBaseAdmin(
     .update({
       valor_actividad_aplicado: normalizedBaseValue,
       valor_modificado: normalizedBaseValue !== normalizedOriginalBase,
+      motivo_modificacion_valor: normalizedBaseValue !== normalizedOriginalBase ? ADMIN_VALUE_OVERRIDE_REASON : null,
     })
     .eq("id", registroId);
   if (registroUpdateError) throw registroUpdateError;
@@ -2870,6 +2927,7 @@ export async function updateActividadGrupalBaseAdmin(
           .update({
             costo_actividad: valorCalculado,
             valor_modificado: normalizedBaseValue !== normalizedOriginalBase,
+            motivo_modificacion_valor: normalizedBaseValue !== normalizedOriginalBase ? ADMIN_VALUE_OVERRIDE_REASON : null,
           })
           .in("id", mirroredReportIds);
         if (mirroredUpdateError) throw mirroredUpdateError;

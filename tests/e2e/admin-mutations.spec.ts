@@ -12,6 +12,7 @@ const OPEN_LEADER_TECH_ID = "2dc94aad-8eb9-446e-9087-21c19fec7ad5";
 const OPEN_MEMBER_TECH_ID = "ad411607-b5bf-4081-ab10-626d90d219cc";
 
 async function waitForOpenSnapshot(target: {
+  leaderId: string;
   registroId: string;
   groupId: string;
   periodId: string;
@@ -19,7 +20,7 @@ async function waitForOpenSnapshot(target: {
   date: string;
   description: string;
   sourceReportId: string;
-  memberReportId: string;
+  memberReportId?: string;
 }, predicate: (snapshot: Awaited<ReturnType<typeof getGroupActivitySnapshot>>) => boolean) {
   await expect.poll(async () => {
     const snapshot = await getGroupActivitySnapshot(target);

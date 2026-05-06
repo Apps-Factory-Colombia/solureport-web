@@ -461,9 +461,14 @@ function canSendReportEmail(report: ActivityReport) {
   return false;
 }
 
+function isDeliveryVisit(report: ActivityReport) {
+  return report.tipo === "visita_tecnica" && report.tipoVisita === "entregas";
+}
+
 function getVisitCategoryLabel(tipoVisita?: ActivityReport["tipoVisita"]) {
   if (tipoVisita === "garantia") return "Garantía";
   if (tipoVisita === "emergencia") return "Emergencia";
+  if (tipoVisita === "entregas") return "Entregas";
   if (tipoVisita === "imprevisto") return "Imprevisto";
   return "Sin categoría";
 }
@@ -550,6 +555,7 @@ export default function InformesPage() {
   const [viewQuincenaMonth, setViewQuincenaMonth] = useState(() => getMonthInputValue(getTodayDateString()));
   const [grupoFilter, setGrupoFilter] = useState<string>("todos");
   const [selectedReport, setSelectedReport] = useState<ActivityReport | null>(null);
+  const [selectedDetailReports, setSelectedDetailReports] = useState<ActivityReport[]>([]);
   const [selectedParticipantReportId, setSelectedParticipantReportId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [reportToDelete, setReportToDelete] = useState<ActivityReport | null>(null);
@@ -643,6 +649,40 @@ export default function InformesPage() {
     const toolCost = companySettings?.costoRecorridoHerramienta ?? 40000;
     return report.tipoRecorrido === "con_herramienta" ? toolCost : normalCost;
   }, [companySettings]);
+
+  const getSuggestedTechnicalValue = useCallback((report: ActivityReport) => {
+    if (usesSharedBasePricing(report)) {
+      if (report.valorSugeridoGlobal != null) {
+        return report.valorSugeridoGlobal;
+      }
+
+      const suggestedParticipantValue = Number(report.valorSugerido ?? 0) || 0;
+      const participationPercentage = Number(report.porcentajeParticipacion ?? 0) || 0;
+
+      if (suggestedParticipantValue > 0 && participationPercentage > 0) {
+        return Number(((suggestedParticipantValue * 100) / participationPercentage).toFixed(2));
+      }
+
+      return report.valorSugerido;
+    }
+
+    return report.valorSugerido;
+  }, []);
+
+  const getSuggestedTechnicalValueForReports = useCallback((reportList: ActivityReport[]) => {
+    const uniqueReports = Array.from(new Map(reportList.map((report) => [report.id, report])).values());
+    const participantSuggestedTotal = uniqueReports.reduce((sum, report) => sum + (Number(report.valorSugerido ?? 0) || 0), 0);
+
+    if (uniqueReports.length > 1 && participantSuggestedTotal > 0) {
+      return participantSuggestedTotal;
+    }
+
+    return uniqueReports[0] ? getSuggestedTechnicalValue(uniqueReports[0]) : undefined;
+  }, [getSuggestedTechnicalValue]);
+
+  const getSuggestionReasonForReports = useCallback((reportList: ActivityReport[]) => {
+    return reportList.find((report) => report.motivoSugerenciaValor)?.motivoSugerenciaValor;
+  }, []);
 
   const getEffectiveTechnicalCost = useCallback((report: ActivityReport) => {
     if (report.tipo !== "recorrido") return Number(report.costoActividad ?? 0) || 0;
@@ -1299,7 +1339,7 @@ export default function InformesPage() {
     }
   };
 
-  const renderActionButtons = (report: ActivityReport) => (
+  const renderActionButtons = (report: ActivityReport, detailReports?: ActivityReport[]) => (
     <div className="flex items-center gap-1">
       <Button
         variant="ghost"
@@ -1307,7 +1347,7 @@ export default function InformesPage() {
         className="h-8 w-8 text-muted-foreground hover:text-foreground"
         onClick={(event) => {
           event.stopPropagation();
-          openReportDetail(report);
+          openReportDetail(report, detailReports);
         }}
       >
         <Eye className="h-4 w-4" />
@@ -1379,8 +1419,9 @@ export default function InformesPage() {
     </Badge>
   );
 
-  const openReportDetail = (report: ActivityReport) => {
+  const openReportDetail = (report: ActivityReport, detailReports: ActivityReport[] = [report]) => {
     setSelectedReport(report);
+    setSelectedDetailReports(detailReports);
     setSelectedParticipantReportId(report.id);
     setDetailOpen(true);
   };
@@ -1502,6 +1543,7 @@ export default function InformesPage() {
     () => exportScopedReports
       .filter((report) => {
         if (report.tipo !== exportReportType) return false;
+        if (exportReportType === "visita_tecnica" && isDeliveryVisit(report)) return false;
         if (exportReportType !== "mantenimiento_preventivo") return true;
         return preventiveExportClientId === "todos" || report.clienteId === preventiveExportClientId;
       })
@@ -1536,7 +1578,7 @@ export default function InformesPage() {
 
   const selectedExportClientReports = useMemo(
     () => exportReportType === "visita_tecnica"
-      ? selectedExportReports.filter((report) => report.tipoVisita !== "garantia")
+      ? selectedExportReports.filter((report) => report.tipoVisita !== "garantia" && report.tipoVisita !== "entregas")
       : [],
     [exportReportType, selectedExportReports]
   );
@@ -2020,7 +2062,7 @@ export default function InformesPage() {
 
   const handleExportClientSummary = useCallback(() => {
     if (selectedExportClientReports.length === 0) {
-      alert("No hay visitas técnicas exportables al cliente en el rango seleccionado. Las garantías se excluyen de este PDF.");
+      alert("No hay visitas técnicas exportables al cliente en el rango seleccionado. Las garantías y entregas se excluyen de este PDF.");
       return;
     }
 
@@ -2508,7 +2550,7 @@ export default function InformesPage() {
                         const client = r.clienteId ? clientsById.get(r.clienteId) : null;
                         const leader = usersById.get(r.liderGrupoId);
                         return (
-                          <TableRow key={row.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                          <TableRow key={row.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r, row.reports)}>
                             <TableCell className="text-sm font-medium text-foreground">
                               {row.participantCount > 1
                                 ? `${row.participantCount} participantes`
@@ -2581,7 +2623,7 @@ export default function InformesPage() {
                             <TableCell className="text-right font-semibold text-gold text-sm">
                               {formatCurrency(row.costoActividad)}
                             </TableCell>
-                            <TableCell>{renderActionButtons(r)}</TableCell>
+                            <TableCell>{renderActionButtons(r, row.reports)}</TableCell>
                           </TableRow>
                         );
                       })}
@@ -2600,7 +2642,7 @@ export default function InformesPage() {
                     Informes de Visitas Técnicas
                   </CardTitle>
                   <p className="text-sm text-muted-foreground">
-                    Visitas del día a día: imprevistos, garantías y emergencias. Al ser aprobada por el líder se convierte automáticamente en actividad y se reporta aquí.
+                    Visitas del día a día: imprevistos, garantías, emergencias y entregas. Las entregas aparecen en la tabla, pero no se exportan en PDF.
                   </p>
                 </CardHeader>
                 <CardContent className="p-0">
@@ -2615,7 +2657,7 @@ export default function InformesPage() {
                         <TableHead className="text-muted-foreground">Fotos</TableHead>
                         <TableHead className="text-muted-foreground">Aprobación Líder</TableHead>
                         <TableHead className="text-muted-foreground">Correo</TableHead>
-                        <TableHead className="text-muted-foreground text-right">Costo actividad</TableHead>
+                        <TableHead className="text-muted-foreground text-right">Valor real</TableHead>
                         <TableHead className="text-muted-foreground text-right">Costo cliente</TableHead>
                         <TableHead className="text-muted-foreground w-32"></TableHead>
                       </TableRow>
@@ -2639,7 +2681,7 @@ export default function InformesPage() {
                         const isInlineClientCostDirty = normalizedDraftClientCost !== normalizedCurrentClientCost;
                         const isInlineClientCostSaving = savingInlineClientCostId === r.id;
                         return (
-                          <TableRow key={row.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                          <TableRow key={row.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r, row.reports)}>
                             <TableCell className="max-w-60">
                               <p className="text-sm font-medium text-foreground truncate">{r.descripcion}</p>
                               {r.especificacion && (
@@ -2785,7 +2827,7 @@ export default function InformesPage() {
                               </div>
                               {row.isShared && <p className="mt-1 text-xs text-muted-foreground">Se edita desde la actividad</p>}
                             </TableCell>
-                            <TableCell>{renderActionButtons(r)}</TableCell>
+                            <TableCell>{renderActionButtons(r, row.reports)}</TableCell>
                           </TableRow>
                         );
                       })}
@@ -2966,7 +3008,7 @@ export default function InformesPage() {
                         <TableHead className="text-muted-foreground">Líder</TableHead>
                         <TableHead className="text-muted-foreground">Aprobación</TableHead>
                         <TableHead className="text-muted-foreground">Correo</TableHead>
-                        <TableHead className="text-muted-foreground text-right">Costo actividad</TableHead>
+                        <TableHead className="text-muted-foreground text-right">Valor real</TableHead>
                         <TableHead className="text-muted-foreground w-32"></TableHead>
                       </TableRow>
                     </TableHeader>
@@ -2976,7 +3018,7 @@ export default function InformesPage() {
                         const group = groupsById.get(r.grupoId);
                         const leader = usersById.get(r.liderGrupoId);
                         return (
-                          <TableRow key={row.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r)}>
+                          <TableRow key={row.id} className="border-border/50 hover:bg-secondary/30 cursor-pointer" onClick={() => openReportDetail(r, row.reports)}>
                             <TableCell className="max-w-60">
                               <p className="text-sm font-medium text-foreground truncate">{r.descripcion}</p>
                               {r.especificacion && (
@@ -3019,7 +3061,7 @@ export default function InformesPage() {
                             <TableCell className="text-right font-semibold text-gold text-sm">
                               {formatCurrency(row.costoActividad)}
                             </TableCell>
-                            <TableCell>{renderActionButtons(r)}</TableCell>
+                            <TableCell>{renderActionButtons(r, row.reports)}</TableCell>
                           </TableRow>
                         );
                       })}
@@ -3047,6 +3089,7 @@ export default function InformesPage() {
           setDetailOpen(open);
           if (!open) {
             setSelectedReport(null);
+            setSelectedDetailReports([]);
             setSelectedParticipantReportId(null);
           }
         }}
@@ -3059,7 +3102,11 @@ export default function InformesPage() {
             </DialogDescription>
           </DialogHeader>
           {selectedReport && (() => {
-            const modalReports = usesSharedBasePricing(selectedReport) ? getSharedReportsForReport(selectedReport) : [selectedReport];
+            const modalReports = selectedDetailReports.length > 0
+              ? selectedDetailReports
+              : usesSharedBasePricing(selectedReport)
+                ? getSharedReportsForReport(selectedReport)
+                : [selectedReport];
             const modalParticipantReports = dedupeReportsByTechnician(modalReports);
             const activeDetailReport = modalParticipantReports.find((report) => report.id === selectedParticipantReportId)
               || modalParticipantReports[0]
@@ -3073,6 +3120,12 @@ export default function InformesPage() {
             const isSharedPricing = usesSharedBasePricing(selectedReport);
             const participationPercentage = getVisitParticipationPercentage(activeDetailReport);
             const editableTechnicalBase = getEditableTechnicalCost(activeDetailReport);
+            const displayedSuggestedValue = isSharedPricing
+              ? getSuggestedTechnicalValueForReports(modalParticipantReports)
+              : getSuggestedTechnicalValue(activeDetailReport);
+            const displayedSuggestionReason = isSharedPricing
+              ? (getSuggestionReasonForReports(modalParticipantReports) || selectedReport.motivoSugerenciaValor || activeDetailReport.motivoSugerenciaValor)
+              : activeDetailReport.motivoSugerenciaValor;
             const technicalPreviewValue = isSharedPricing
               ? Math.round(((editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) * participationPercentage) / 100)
               : (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0);
@@ -3120,7 +3173,7 @@ export default function InformesPage() {
                         <p className="text-sm font-medium text-foreground">{modalParticipantReports.length}</p>
                       </div>
                       <div className="rounded-lg border border-border/50 bg-background/40 p-3">
-                        <p className="text-xs text-muted-foreground">Costo actividad</p>
+                        <p className="text-xs text-muted-foreground">Valor real</p>
                         <p className="text-sm font-medium text-gold">{formatCurrency(getActivityTotalForReport(selectedReport))}</p>
                       </div>
                     </div>
@@ -3210,6 +3263,14 @@ export default function InformesPage() {
                   </div>
                 )}
 
+                {displayedSuggestedValue != null && (
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4 space-y-2">
+                    <p className="text-xs text-muted-foreground">Valor sugerido</p>
+                    <p className="text-sm font-medium text-amber-200">{formatCurrency(displayedSuggestedValue ?? 0)}</p>
+                    <p className="text-sm text-foreground/80">{displayedSuggestionReason || "Sin motivo registrado."}</p>
+                  </div>
+                )}
+
                 {activeDetailReport.tipo === "visita_tecnica" && (
                   <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-3">
@@ -3218,20 +3279,20 @@ export default function InformesPage() {
                         <p className="text-sm font-medium text-foreground">{getVisitCategoryLabel(activeDetailReport.tipoVisita)}</p>
                       </div>
                       <div>
-                        <p className="text-xs text-muted-foreground">Resumen economico</p>
+                        <p className="text-xs text-muted-foreground">Resumen económico</p>
                         <p className="text-sm text-foreground/80">
                           {isSharedPricing
                             ? "Esta visita comparte una base global entre varios participantes. El costo técnico del registro se calcula automáticamente según el porcentaje asignado al técnico."
-                            : "El costo tecnico corresponde al valor interno del servicio. El costo cliente se define manualmente desde administracion para esta visita."}
+                              : "El valor real corresponde al costo interno del servicio. El costo cliente se define manualmente desde administracion para esta visita."}
                         </p>
                       </div>
                       <div className="rounded-lg border border-border/50 bg-background/40 p-3 space-y-3">
                         <div className="space-y-1">
-                          <p className="text-xs text-muted-foreground">{isSharedPricing ? "Editar costo base" : "Editar costo tecnico"}</p>
+                          <p className="text-xs text-muted-foreground">{isSharedPricing ? "Editar valor real base" : "Editar valor real"}</p>
                           <p className="text-xs text-foreground/70">
                             {isSharedPricing
                               ? "Al guardar, se recalculan todos los técnicos de esta visita según su porcentaje."
-                              : "Este valor afecta el costo interno y los reportes asociados."}
+                              : "La sugerencia enviada desde la app no cambia este valor. Solo administración define y guarda el valor real aplicado."}
                           </p>
                         </div>
                         <div className="relative max-w-40">
@@ -3268,7 +3329,7 @@ export default function InformesPage() {
                           ) : (
                             <Save className="h-4 w-4" />
                           )}
-                          {savingTechnicalCost ? "Guardando..." : isSharedPricing ? "Guardar costo base" : "Guardar costo tecnico"}
+                          {savingTechnicalCost ? "Guardando..." : isSharedPricing ? "Guardar valor real base" : "Guardar valor real"}
                         </Button>
                       </div>
                     </div>
@@ -3277,7 +3338,7 @@ export default function InformesPage() {
                       <div className="space-y-1">
                         <p className="text-sm font-semibold text-foreground">Editar costo cliente</p>
                         <p className="text-xs text-muted-foreground">
-                          Este valor es independiente del costo tecnico y solo lo define administracion.
+                          Este valor es independiente del valor real interno y solo lo define administracion.
                         </p>
                       </div>
                       <div className="relative max-w-40">
@@ -3365,9 +3426,9 @@ export default function InformesPage() {
 
                     <div className="rounded-lg border border-gold/20 bg-gold/5 p-4 space-y-3">
                       <div className="space-y-1">
-                        <p className="text-sm font-semibold text-foreground">Editar costo del recorrido</p>
+                        <p className="text-sm font-semibold text-foreground">Editar valor real del recorrido</p>
                         <p className="text-xs text-muted-foreground">
-                          Valor configurado: {formatCurrency(getConfiguredRecorridoCost(activeDetailReport))}
+                          Valor real configurado: {formatCurrency(getConfiguredRecorridoCost(activeDetailReport))}
                         </p>
                       </div>
                       <div className="relative max-w-40">
@@ -3396,7 +3457,7 @@ export default function InformesPage() {
                         ) : (
                           <Save className="h-4 w-4" />
                         )}
-                        {savingTechnicalCost ? "Guardando..." : "Guardar costo"}
+                        {savingTechnicalCost ? "Guardando..." : "Guardar valor real"}
                       </Button>
                     </div>
                   </div>

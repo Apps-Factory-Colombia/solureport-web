@@ -294,30 +294,76 @@ function getComparisonReferenceValue(report: ActivityReport, defaultCost: number
   return usesSharedBasePricing(report) ? getSharedGroupReferenceBaseValue(report) : defaultCost;
 }
 
+function getSuggestedValueForReport(report: ActivityReport) {
+  if (usesSharedBasePricing(report)) {
+    if (report.valorSugeridoGlobal != null) {
+      return report.valorSugeridoGlobal;
+    }
+
+    const suggestedParticipantValue = Number(report.valorSugerido ?? 0) || 0;
+    const participationPercentage = Number(report.porcentajeParticipacion ?? 0) || 0;
+
+    if (suggestedParticipantValue > 0 && participationPercentage > 0) {
+      return Number(((suggestedParticipantValue * 100) / participationPercentage).toFixed(2));
+    }
+
+    return report.valorSugerido;
+  }
+
+  return report.valorSugerido;
+}
+
+function getSuggestedValueForReports(reports: ActivityReport[]) {
+  const uniqueReports = Array.from(new Map(reports.map((report) => [report.id, report])).values());
+  const participantSuggestedTotal = uniqueReports.reduce((sum, report) => sum + (Number(report.valorSugerido ?? 0) || 0), 0);
+
+  if (uniqueReports.length > 1 && participantSuggestedTotal > 0) {
+    return participantSuggestedTotal;
+  }
+
+  return uniqueReports[0] ? getSuggestedValueForReport(uniqueReports[0]) : undefined;
+}
+
+function getSuggestionReasonForReports(reports: ActivityReport[]) {
+  return reports.find((report) => report.motivoSugerenciaValor)?.motivoSugerenciaValor;
+}
+
 function getComparisonCurrentValue(report: ActivityReport) {
+  const suggestedValue = getSuggestedValueForReport(report);
+  if (suggestedValue != null) return suggestedValue;
   return usesSharedBasePricing(report) ? getSharedGroupBaseValue(report) : report.costoActividad;
 }
 
 function getComparisonCurrentLabel(report: ActivityReport) {
-  return usesSharedBasePricing(report) ? "Base aplicada" : "Valor reportado";
+  return getSuggestedValueForReport(report) != null
+    ? (usesSharedBasePricing(report) ? "Base sugerida" : "Valor sugerido")
+    : (usesSharedBasePricing(report) ? "Base real aplicada" : "Valor real aplicado");
 }
 
 function shouldShowValueChange(report: ActivityReport, referenceValue: number, currentValue: number) {
   if (report.tipo !== "visita_tecnica" && report.tipo !== "actividad_grupal") return false;
 
-  return !!report.valorModificado || !!report.motivoModificacionValor || referenceValue !== currentValue;
+  return !!report.valorSugerido || !!report.valorSugeridoGlobal || !!report.motivoSugerenciaValor || !!report.valorModificado || !!report.motivoModificacionValor || referenceValue !== currentValue;
 }
 
 function getValueChangeLabel(report: ActivityReport) {
-  return report.tipo === "actividad_grupal" ? "Cambio reportado en la base de la actividad" : "Cambio reportado por el técnico";
+  if (getSuggestedValueForReport(report) != null || report.motivoSugerenciaValor) {
+    return report.tipo === "actividad_grupal" ? "Sugerencia enviada para la base de la actividad" : "Sugerencia de valor enviada desde la app";
+  }
+
+  return report.tipo === "actividad_grupal" ? "Cambio aplicado en la base de la actividad" : "Cambio aplicado por administración";
 }
 
 function getDefaultValueLabel(report: ActivityReport) {
-  return report.tipo === "actividad_grupal" ? "Base registrada" : "Valor default";
+  return report.tipo === "actividad_grupal" ? "Base real registrada" : "Valor real base";
 }
 
 function getReasonLabel(report: ActivityReport) {
-  return report.tipo === "actividad_grupal" ? "Razón de la modificación" : "Razón del cambio";
+  if (getSuggestedValueForReport(report) != null || report.motivoSugerenciaValor) {
+    return report.tipo === "actividad_grupal" ? "Motivo de la sugerencia" : "Motivo sugerido desde la app";
+  }
+
+  return report.tipo === "actividad_grupal" ? "Razón del ajuste administrativo" : "Razón del ajuste administrativo";
 }
 
 const tipoConfig: Record<string, { label: string; color: string; icon: React.ElementType }> = {
@@ -357,6 +403,14 @@ const defaultTipoConfig = {
 
 function getTipoConfig(tipo: string) {
   return tipoConfig[tipo] || defaultTipoConfig;
+}
+
+function getVisitCategoryLabel(tipoVisita?: ActivityReport["tipoVisita"]) {
+  if (tipoVisita === "garantia") return "Garantía";
+  if (tipoVisita === "emergencia") return "Emergencia";
+  if (tipoVisita === "entregas") return "Entregas";
+  if (tipoVisita === "imprevisto") return "Imprevisto";
+  return "Sin categoría";
 }
 
 function canSendApprovalReportEmail(report: ActivityReport) {
@@ -1560,7 +1614,7 @@ export default function AprobacionesPage() {
               <TableHead>Actividad</TableHead>
               <TableHead>Cliente / Proyecto</TableHead>
               <TableHead>Estado</TableHead>
-              <TableHead className="text-right">Costo actividad</TableHead>
+              <TableHead className="text-right">Valor real</TableHead>
               <TableHead className="text-right">Acciones</TableHead>
             </TableRow>
           </TableHeader>
@@ -1592,10 +1646,17 @@ export default function AprobacionesPage() {
                 >
                   <TableCell className="text-sm text-foreground/80 whitespace-nowrap">{report.fecha}</TableCell>
                   <TableCell>
-                    <Badge variant="outline" className={cn("text-[10px] gap-1", tipo.color)}>
-                      <TipoIcon className="h-3 w-3" />
-                      {tipo.label}
-                    </Badge>
+                    <div className="flex flex-col items-start gap-1">
+                      <Badge variant="outline" className={cn("text-[10px] gap-1", tipo.color)}>
+                        <TipoIcon className="h-3 w-3" />
+                        {tipo.label}
+                      </Badge>
+                      {report.tipo === "visita_tecnica" && (
+                        <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
+                          {getVisitCategoryLabel(report.tipoVisita)}
+                        </Badge>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell className="max-w-72">
                     <p className="text-sm font-medium text-foreground truncate">{report.descripcion}</p>
@@ -2025,15 +2086,13 @@ export default function AprobacionesPage() {
               })()
               : getComparisonReferenceValue(selectedReport, defaultCost);
             const comparisonReferenceValue = groupActivityReferenceValue;
-            const comparisonCurrentValue = selectedReport.tipo === "actividad_grupal"
-              ? getActivityTotalForReport(selectedReport)
-              : getComparisonCurrentValue(selectedReport);
-            const comparisonCurrentLabel = selectedReport.tipo === "actividad_grupal"
-              ? "Base actual"
+            const modalSuggestedValue = getSuggestedValueForReports(modalReports);
+            const modalSuggestionReason = getSuggestionReasonForReports(modalReports);
+            const comparisonCurrentValue = modalSuggestedValue ?? getComparisonCurrentValue(selectedReport);
+            const comparisonCurrentLabel = modalSuggestedValue != null
+              ? (isSharedPricing ? "Base sugerida" : "Valor sugerido")
               : getComparisonCurrentLabel(selectedReport);
-            const hasTechnicianChange = selectedReport.tipo === "actividad_grupal"
-              ? !!selectedReport.valorModificado || !!selectedReport.motivoModificacionValor || comparisonReferenceValue !== comparisonCurrentValue
-              : shouldShowValueChange(selectedReport, comparisonReferenceValue, comparisonCurrentValue);
+            const hasTechnicianChange = modalSuggestedValue != null || shouldShowValueChange(selectedReport, comparisonReferenceValue, comparisonCurrentValue);
             const costDelta = comparisonCurrentValue - comparisonReferenceValue;
             const isDeleting = deletingReportId === selectedReport.id;
 
@@ -2044,6 +2103,11 @@ export default function AprobacionesPage() {
                     <tipo.icon className="h-3.5 w-3.5" />
                     {tipo.label}
                   </Badge>
+                  {selectedReport.tipo === "visita_tecnica" && (
+                    <Badge variant="outline" className="text-xs bg-secondary text-muted-foreground border-border/50">
+                      Categoría: {getVisitCategoryLabel(selectedReport.tipoVisita)}
+                    </Badge>
+                  )}
                   <Badge variant="outline" className={cn("text-xs gap-1", estado.color)}>
                     <estado.icon className="h-3.5 w-3.5" />
                     {estado.label}
@@ -2120,6 +2184,12 @@ export default function AprobacionesPage() {
                       Datos {selectedReport.tipo === "visita_tecnica" ? "Visita Técnica" : "Mantenimiento Preventivo"}
                     </p>
                     <div className="grid grid-cols-2 gap-3">
+                      {selectedReport.tipo === "visita_tecnica" && (
+                        <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
+                          <p className="text-xs text-muted-foreground">Categoría</p>
+                          <p className="text-sm font-medium text-foreground">{getVisitCategoryLabel(selectedReport.tipoVisita)}</p>
+                        </div>
+                      )}
                       {selectedReport.datosReceptor && (
                         <div className="col-span-2 rounded-lg border border-border/50 bg-secondary/20 p-3">
                           <p className="text-xs text-muted-foreground mb-1">Receptor del Mantenimiento</p>
@@ -2237,7 +2307,7 @@ export default function AprobacionesPage() {
 
                 <div className="flex items-center justify-between rounded-lg border border-gold/20 bg-gold/5 p-4">
                   <div className="flex-1">
-                    <p className="text-xs text-muted-foreground">{isSharedPricing ? "Costo actividad" : "Costo de la actividad"}</p>
+                    <p className="text-xs text-muted-foreground">{isSharedPricing ? "Valor real de la actividad" : "Valor real de la actividad"}</p>
                     <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
                       <div className="relative w-full max-w-xs">
                         <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
@@ -2266,13 +2336,13 @@ export default function AprobacionesPage() {
                         ) : (
                           <Save className="h-4 w-4" />
                         )}
-                        {savingCost ? "Guardando..." : "Guardar valor"}
+                        {savingCost ? "Guardando..." : "Guardar valor real"}
                       </Button>
                     </div>
                     <p className="mt-2 text-xs text-muted-foreground">
                       {isSharedPricing
                         ? "Aprueba la actividad completa. Aquí puedes ajustar cuánto recibe cada técnico y el porcentaje que le corresponde antes de guardar o aprobar."
-                        : "El admin puede ajustar este valor incluso si la actividad está pendiente o ya fue aprobada."}
+                        : "La sugerencia enviada desde la app es solo informativa. Solo administración cambia el valor real aplicado."}
                     </p>
                     {saveSuccessMessage && (
                       <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs font-medium text-emerald-400">
@@ -2284,13 +2354,15 @@ export default function AprobacionesPage() {
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                           <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
                             <p className="text-xs text-muted-foreground">
-                              {selectedReport.tipo === "actividad_grupal" ? "Base total registrada" : "Costo actividad registrado"}
+                              {selectedReport.tipo === "actividad_grupal" ? "Base real registrada" : "Valor real registrado"}
                             </p>
                             <p className="text-sm font-semibold text-foreground">{formatCurrency(comparisonReferenceValue)}</p>
                           </div>
                           <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
                             <p className="text-xs text-muted-foreground">
-                              {selectedReport.tipo === "actividad_grupal" ? "Base total actual" : "Costo actividad actual"}
+                              {modalSuggestedValue != null
+                                ? (selectedReport.tipo === "actividad_grupal" ? "Base sugerida actual" : "Valor sugerido actual")
+                                : (selectedReport.tipo === "actividad_grupal" ? "Base real aplicada" : "Valor real aplicado")}
                             </p>
                             <p className="text-sm font-semibold text-gold">{formatCurrency(comparisonCurrentValue)}</p>
                           </div>
@@ -2397,7 +2469,7 @@ export default function AprobacionesPage() {
                       <div>
                         <p className="text-sm font-semibold text-foreground">{getValueChangeLabel(selectedReport)}</p>
                         <p className="text-xs text-muted-foreground">
-                          Comparación entre el valor base registrado y el valor final reportado para aprobación.
+                          Comparación entre el valor real registrado y la sugerencia recibida o el valor aplicado por administración.
                         </p>
                       </div>
                       <Badge variant="outline" className="text-xs bg-amber-500/10 text-amber-400 border-amber-500/20">
@@ -2422,9 +2494,9 @@ export default function AprobacionesPage() {
                     </div>
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
                       <p className="text-xs text-muted-foreground">{getReasonLabel(selectedReport)}</p>
-                      <p className="text-sm text-foreground/80">
-                        {selectedReport.motivoModificacionValor || "Se modificó el valor, pero no quedó registrada una razón en este reporte."}
-                      </p>
+                        <p className="text-sm text-foreground/80">
+                          {modalSuggestionReason || selectedReport.motivoSugerenciaValor || selectedReport.motivoModificacionValor || "No se registró una justificación para este valor."}
+                        </p>
                     </div>
                   </div>
                 )}
