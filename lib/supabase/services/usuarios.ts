@@ -1,6 +1,7 @@
 import { supabase } from "../client";
 import { User, UserSchedule, UserScheduleDraft } from "@/lib/types";
 import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+import { invalidateMantenimientosCache, invalidateReportesMantenimientoCache } from "./mantenimientos";
 
 const USUARIOS_CACHE_KEY = "usuarios:list";
 const USUARIOS_CACHE_TTL = 60_000;
@@ -344,6 +345,12 @@ export async function deleteUsuario(id: string): Promise<void> {
     .eq("tecnico_id", id);
   if (deleteParticipacionesTecnicoError) throw deleteParticipacionesTecnicoError;
 
+  const { error: deleteMaintenanceParticipantsError } = await supabase
+    .from("mantenimiento_participantes")
+    .delete()
+    .eq("usuario_id", id);
+  if (deleteMaintenanceParticipantsError) throw deleteMaintenanceParticipantsError;
+
   if (registrosActividadIds.length > 0) {
     const { error: deleteParticipacionesRegistroError } = await supabase
       .from("actividad_participantes")
@@ -365,6 +372,8 @@ export async function deleteUsuario(id: string): Promise<void> {
   const { error } = await supabase.from("usuarios").delete().eq("id", id);
   if (error) throw error;
   invalidateCachedValue(USUARIOS_CACHE_KEY);
+  invalidateMantenimientosCache();
+  invalidateReportesMantenimientoCache();
 }
 
 export async function loginUsuario(email: string, password: string): Promise<User | null> {

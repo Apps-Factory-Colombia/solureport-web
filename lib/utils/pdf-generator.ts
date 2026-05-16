@@ -10,6 +10,7 @@ interface PDFReportData {
   tecnico?: string;
   cliente?: string;
   edificio?: string;
+  valorActividad?: number;
   puertasDetalle?: string;
   direccionCliente?: string;
   correoCliente?: string;
@@ -312,6 +313,7 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
   if (data.tecnico) infoItems.push(["Técnico:", data.tecnico]);
   if (data.cliente) infoItems.push(["Cliente:", data.cliente]);
   if (data.edificio) infoItems.push(["Edificio:", data.edificio]);
+  if (data.valorActividad != null) infoItems.push(["Valor real:", formatCurrencyPDF(data.valorActividad)]);
   if (data.puertasDetalle) infoItems.push(["Puertas:", data.puertasDetalle]);
   if (data.direccionCliente) infoItems.push(["Dirección:", data.direccionCliente]);
   if (data.correoCliente) infoItems.push(["Correo:", data.correoCliente]);
@@ -641,7 +643,7 @@ export function generateComprobantePDF(data: {
   periodo: string;
   tecnico: string;
   cedula?: string;
-  items: { actividad: string; fecha: string; valorBase: number; porcentaje: number }[];
+  items: { actividad: string; fecha: string; valorBase: number; porcentaje: number; valorLiquidado: number }[];
   desplazamientos?: { descripcion: string; fecha: string; valor: number }[];
   totalAuxilio: number;
   totalDescuentoTardanza?: number;
@@ -696,7 +698,7 @@ export function generateComprobantePDF(data: {
       item.fecha,
       formatCurrencyPDF(item.valorBase),
       `${item.porcentaje}%`,
-      formatCurrencyPDF(item.valorBase),
+      formatCurrencyPDF(item.valorLiquidado),
     ]),
     styles: { fontSize: 8, cellPadding: 2.5, overflow: "linebreak", valign: "middle" },
     headStyles: { fillColor: [13, 138, 188], textColor: [255, 255, 255] },

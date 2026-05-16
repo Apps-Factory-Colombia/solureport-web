@@ -280,10 +280,11 @@ function isGroupActivity(report: ActivityReport) {
 }
 
 function isSharedVisit(report: ActivityReport) {
+  const participationPercentage = Number(report.porcentajeParticipacion ?? 0) || 0;
   return (report.tipo === "visita_tecnica"
     || report.tipo === "mantenimiento_preventivo")
-    && ((report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal) != null
-      || Number(report.porcentajeParticipacion ?? 0) > 0);
+    && participationPercentage > 0
+    && participationPercentage < 100;
 }
 
 function usesSharedBasePricing(report: ActivityReport) {
@@ -836,6 +837,25 @@ export default function InformesPage() {
     },
     [getEffectiveTechnicalCost, getSharedVisitBaseValue, sharedVisitStats.totalByKey]
   );
+  const getExportTechnicalValue = useCallback(
+    (report: ActivityReport, relatedReports?: ActivityReport[]) => {
+      if (!usesSharedBasePricing(report)) {
+        return getEffectiveTechnicalCost(report);
+      }
+
+      if (isSharedVisit(report)) {
+        const scopedReports = relatedReports && relatedReports.length > 0 ? relatedReports : [report];
+        const participantReports = dedupeReportsByTechnician(scopedReports);
+
+        if (participantReports.length <= 1) {
+          return getEffectiveTechnicalCost(participantReports[0] || report);
+        }
+      }
+
+      return getActivityTotalForReport(report);
+    },
+    [getActivityTotalForReport, getEffectiveTechnicalCost]
+  );
   const getSharedReportsForReport = useCallback((report: ActivityReport) => {
     if (!usesSharedBasePricing(report)) return [report];
     const sharedKey = getVisualActivityIdentity(report);
@@ -862,7 +882,7 @@ export default function InformesPage() {
   );
 
   const persistTechnicalCost = useCallback(async (report: ActivityReport, nextCost: number) => {
-    await updateCostoActividadAdmin(report.id, nextCost);
+    await updateCostoActividadAdmin(report.id, nextCost, { visitId: report.visitaTecnicaId });
 
     if (isSharedVisit(report)) {
       const sharedKey = getSharedVisitIdentity(report);
@@ -1167,6 +1187,7 @@ export default function InformesPage() {
         puertasDetalle,
         direccionCliente: client?.direccion || "—",
         correoCliente: client?.correo || "—",
+        valorActividad: getExportTechnicalValue(report),
         observaciones: observaciones || report.descripcion || "Sin detalle registrado.",
         fotosAntes: report.fotosAntes,
         fotosDespues: report.fotosDespues,
@@ -1556,17 +1577,17 @@ export default function InformesPage() {
   }, [buildGroupedActivityRows, exportReportType, selectedExportReports]);
   const getParticipantSplitLabel = useCallback((reportsList: ActivityReport[]) => {
     return dedupeReportsByTechnician(reportsList)
-      .map((report) => `${getParticipantName(report.tecnicoId)}: ${formatCurrency(Number(report.costoActividad) || 0)}`)
+      .map((report) => `${getParticipantName(report.tecnicoId)}: ${formatCurrency(getEffectiveTechnicalCost(report))}`)
       .join(" / ");
-  }, [getParticipantName]);
+  }, [getEffectiveTechnicalCost, getParticipantName]);
 
   const selectedExportTechnicalTotal = useMemo(
     () => exportReportType === "visita_tecnica" || exportReportType === "actividad_grupal"
-      ? selectedExportGroupedRows.reduce((sum, row) => sum + row.costoActividad, 0)
+      ? selectedExportGroupedRows.reduce((sum, row) => sum + getExportTechnicalValue(row.report, row.reports), 0)
       : exportReportType === "mantenimiento_preventivo"
-        ? selectedExportGroupedRows.reduce((sum, row) => sum + row.costoActividad, 0)
+        ? selectedExportGroupedRows.reduce((sum, row) => sum + getExportTechnicalValue(row.report, row.reports), 0)
       : selectedExportReports.reduce((sum, report) => sum + getEffectiveTechnicalCost(report), 0),
-    [exportReportType, getEffectiveTechnicalCost, selectedExportGroupedRows, selectedExportReports]
+    [exportReportType, getEffectiveTechnicalCost, getExportTechnicalValue, selectedExportGroupedRows, selectedExportReports]
   );
 
   const selectedExportClientTotal = useMemo(
@@ -1887,6 +1908,7 @@ export default function InformesPage() {
           const detail = report.especificacion
             ? `${report.descripcion} · ${report.especificacion}`
             : report.descripcion;
+          const exportValue = getExportTechnicalValue(report, row.reports);
 
           return exportReportType === "visita_tecnica"
             ? [
@@ -1896,7 +1918,7 @@ export default function InformesPage() {
               detail || "—",
               getParticipantSplitLabel(row.reports),
               row.estadoAprobacionLider,
-              formatCurrency(row.costoActividad),
+              formatCurrency(exportValue),
             ]
             : [
               report.fecha,
@@ -1904,7 +1926,7 @@ export default function InformesPage() {
               detail || "—",
               getParticipantSplitLabel(row.reports),
               row.estadoAprobacionLider,
-              formatCurrency(row.costoActividad),
+              formatCurrency(exportValue),
             ];
         })
         : exportReportType === "recorrido"
@@ -2005,6 +2027,7 @@ export default function InformesPage() {
     exportRangeStart,
     exportReportType,
     getEffectiveTechnicalCost,
+    getExportTechnicalValue,
     groupsById,
     getParticipantSplitLabel,
     selectedExportGroupedRows,

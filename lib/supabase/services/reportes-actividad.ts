@@ -272,6 +272,21 @@ function addOneDay(date: string): string {
   return nextDate.toISOString().split("T")[0];
 }
 
+function normalizeUnmodifiedActivityValue(
+  currentValue?: number | string | null,
+  fallbackValue?: number | string | null,
+  isModified?: boolean | null
+) {
+  const normalizedCurrentValue = Number(currentValue ?? 0) || 0;
+  const normalizedFallbackValue = Number(fallbackValue ?? 0) || 0;
+
+  if (normalizedCurrentValue <= 0 && normalizedFallbackValue > 0 && !isModified) {
+    return normalizedFallbackValue;
+  }
+
+  return normalizedCurrentValue;
+}
+
 function getMaintenanceMirrorDescription(observaciones?: string | null) {
   return (observaciones || "").trim() || "Mantenimiento preventivo realizado";
 }
@@ -707,6 +722,26 @@ function dedupeGroupActivityReports(reports: ActivityReport[]) {
   const groupedReports = reports.filter((report) => report.tipo === "actividad_grupal");
   const groupedByBaseIdentity = new Map<string, ActivityReport[]>();
 
+  const canonicalDirectReports = new Map<string, ActivityReport>();
+
+  directReports.forEach((report) => {
+    const directKey = report.tipo === "visita_tecnica"
+      ? [
+        report.tipo,
+        report.visitaTecnicaId || "sin-visita",
+        report.tecnicoId,
+        report.fecha,
+        report.clienteId || "sin-cliente",
+        normalizeActivityMatchText(report.descripcion),
+      ].join("|")
+      : report.id;
+
+    const current = canonicalDirectReports.get(directKey);
+    if (!current || shouldReplaceLegacyCanonicalCandidate(current, report)) {
+      canonicalDirectReports.set(directKey, report);
+    }
+  });
+
   groupedReports.forEach((report) => {
     const baseKey = buildCanonicalLegacyGroupActivityBaseIdentity({
       leaderId: report.liderGrupoId,
@@ -720,7 +755,7 @@ function dedupeGroupActivityReports(reports: ActivityReport[]) {
     groupedByBaseIdentity.set(baseKey, current);
   });
 
-  const canonicalReports = directReports;
+  const canonicalReports = Array.from(canonicalDirectReports.values());
 
   groupedByBaseIdentity.forEach((baseReports) => {
     const availableSpecKeys = Array.from(new Set(
@@ -1105,17 +1140,15 @@ function resolveVisitLiquidationRow(params: {
     (row, index, rows) => rows.findIndex((candidate) => candidate.id === row.id) === index
   );
 
-  if (directCandidates.length > 0) {
+  if (directCandidates.length === 1) {
     return directCandidates[0];
   }
 
-  const fallbackKey = buildVisitLiquidationFallbackKey({
-    tecnicoId: params.tecnicoId,
-    fecha: params.fecha,
-    periodoId: params.periodoId,
-  });
+  if (directCandidates.length > 1) {
+    return undefined;
+  }
 
-  return (params.maps.byFallback.get(fallbackKey) || [])[0];
+  return undefined;
 }
 
 function enrichVisitLiquidationReport(
@@ -1126,12 +1159,37 @@ function enrichVisitLiquidationReport(
 
   const porcentajeParticipacion = Number(liquidationRow.porcentaje ?? 0) || 0;
   const defaultParticipantValue = Number(report.costoActividadDefault ?? 0) || 0;
-  const valorBase = Number(liquidationRow.valor_base ?? report.costoActividadDefault ?? report.costoActividad) || 0;
-  const valorGanado = liquidationRow.valor_ganado != null
-    ? Number(liquidationRow.valor_ganado ?? 0) || 0
-    : porcentajeParticipacion > 0
-      ? calculateGroupParticipantValue(valorBase, porcentajeParticipacion)
-      : report.costoActividad;
+  const normalizedReportValue = normalizeUnmodifiedActivityValue(
+    report.costoActividad,
+    report.costoActividadDefault,
+    report.valorModificado
+  );
+  const fallbackAppliedBase = (() => {
+    const explicitAppliedBase = Number(report.valorActividadAplicadoGlobal ?? 0) || 0;
+
+    if (explicitAppliedBase > 0) {
+      return explicitAppliedBase;
+    }
+
+    if (porcentajeParticipacion > 0 && normalizedReportValue > 0) {
+      return Number(((normalizedReportValue * 100) / porcentajeParticipacion).toFixed(2));
+    }
+
+    return normalizedReportValue;
+  })();
+  const valorBase = normalizeUnmodifiedActivityValue(
+    liquidationRow.valor_base,
+    fallbackAppliedBase,
+    report.valorModificado
+  );
+  const valorGanadoFallback = porcentajeParticipacion > 0
+    ? calculateGroupParticipantValue(valorBase, porcentajeParticipacion)
+    : normalizedReportValue;
+  const valorGanado = normalizeUnmodifiedActivityValue(
+    liquidationRow.valor_ganado,
+    valorGanadoFallback,
+    report.valorModificado
+  );
   const valorBaseDefaultGlobal = report.valorActividadBaseGlobal != null
     ? Number(report.valorActividadBaseGlobal ?? 0) || 0
     : porcentajeParticipacion > 0 && defaultParticipantValue > 0
@@ -1188,13 +1246,19 @@ function enrichVisitReport(
   if (!mirror) return report;
 
   const mirrorDefaultCost = Number(mirror.costo_visita_tecnica_default ?? 0) || 0;
+  const reportCurrentValue = Number(report.costoActividad ?? 0) || 0;
+  const normalizedVisitValue = normalizeUnmodifiedActivityValue(
+    reportCurrentValue,
+    mirrorDefaultCost,
+    report.valorModificado
+  );
   const hasMirrorVisitId = !report.visitaTecnicaId && !!mirror.id;
   const shouldUseMirrorClientCost = mirror.costo_cliente != null && report.costoCliente !== (Number(mirror.costo_cliente) || 0);
   const shouldUseMirrorDefault = !report.costoActividadDefault && mirrorDefaultCost > 0;
   const shouldUseSuggestedValue = report.valorSugerido == null && mirror.valor_sugerido != null;
   const shouldUseSuggestionReason = !report.motivoSugerenciaValor && !!mirror.motivo_sugerencia_valor;
 
-  if (!hasMirrorVisitId && !shouldUseMirrorClientCost && !shouldUseMirrorDefault && !shouldUseSuggestedValue && !shouldUseSuggestionReason) {
+  if (!hasMirrorVisitId && !shouldUseMirrorClientCost && !shouldUseMirrorDefault && !shouldUseSuggestedValue && !shouldUseSuggestionReason && normalizedVisitValue === reportCurrentValue) {
     return report;
   }
 
@@ -1202,6 +1266,7 @@ function enrichVisitReport(
     ...report,
     visitaTecnicaId: report.visitaTecnicaId || mirror.id,
     tipoVisita: report.tipoVisita || mirror.tipo_visita || undefined,
+    costoActividad: normalizedVisitValue,
     costoCliente: mirror.costo_cliente == null ? (report.costoCliente ?? 0) : Number(mirror.costo_cliente) || 0,
     costoActividadDefault: shouldUseMirrorDefault ? mirrorDefaultCost : report.costoActividadDefault,
     valorSugerido: shouldUseSuggestedValue ? (Number(mirror.valor_sugerido ?? 0) || 0) : report.valorSugerido,
@@ -1313,10 +1378,14 @@ export async function updateCostoClienteVisitaAdmin(
     throw new Error("No se encontró la visita técnica asociada al reporte.");
   }
 
+  if (visitIds.length > 1) {
+    throw new Error("Se encontraron varias visitas técnicas para este reporte. Usa la visita exacta antes de actualizar.");
+  }
+
   const { error: updateError } = await supabase
     .from("visitas_tecnicas")
     .update({ costo_cliente: normalizedCostoCliente })
-    .in("id", visitIds);
+    .eq("id", visitIds[0]);
   if (updateError) throw updateError;
 
   invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
@@ -1331,18 +1400,23 @@ async function syncVisitLiquidationFromReport(params: {
   costoActividad: number;
   visitIds?: string[];
 }) {
-  const orFilters = [
-    `referencia_id.eq.${params.reportId}`,
-    ...(params.visitIds || []).map((visitId) => `referencia_id.eq.${visitId}`),
-    params.periodoId
-      ? `and(tecnico_id.eq.${params.tecnicoId},periodo_id.eq.${params.periodoId},fecha.eq.${params.fecha},tipo.eq.visita_tecnica)`
-      : `and(tecnico_id.eq.${params.tecnicoId},fecha.eq.${params.fecha},tipo.eq.visita_tecnica)`,
-  ];
+  const referenceIds = Array.from(new Set([params.reportId, ...(params.visitIds || [])].filter(Boolean)));
 
-  const { data: liquidationItems, error: liquidationLookupError } = await supabase
+  if (referenceIds.length === 0) {
+    return;
+  }
+
+  let liquidationLookupQuery = supabase
     .from("items_liquidacion")
     .select("id, porcentaje")
-    .or(orFilters.join(","));
+    .eq("tipo", "visita_tecnica")
+    .in("referencia_id", referenceIds);
+
+  if (params.periodoId) {
+    liquidationLookupQuery = liquidationLookupQuery.eq("periodo_id", params.periodoId);
+  }
+
+  const { data: liquidationItems, error: liquidationLookupError } = await liquidationLookupQuery;
   if (liquidationLookupError) throw liquidationLookupError;
 
   await Promise.all(
@@ -1372,33 +1446,28 @@ async function syncVisitApprovalValue(params: {
 }) {
   const uniqueReferenceIds = Array.from(new Set((params.referenceIds || []).filter(Boolean)));
 
-  if (uniqueReferenceIds.length > 0) {
-    const { data: matchingItems, error: lookupError } = await supabase
-      .from("items_aprobacion")
-      .select("id")
-      .eq("tipo", "visita_tecnica")
-      .eq("tecnico_id", params.tecnicoId)
-      .in("referencia_id", uniqueReferenceIds);
-    if (lookupError) throw lookupError;
-
-    const matchingIds = (matchingItems || []).map((item: { id: string }) => item.id);
-    if (matchingIds.length > 0) {
-      const { error: updateError } = await supabase
-        .from("items_aprobacion")
-        .update({ valor: params.valor })
-        .in("id", matchingIds);
-      if (updateError) throw updateError;
-      return;
-    }
+  if (uniqueReferenceIds.length === 0) {
+    return;
   }
 
-  const { error: fallbackError } = await supabase
+  const { data: matchingItems, error: lookupError } = await supabase
     .from("items_aprobacion")
-    .update({ valor: params.valor })
+    .select("id")
     .eq("tipo", "visita_tecnica")
     .eq("tecnico_id", params.tecnicoId)
-    .eq("fecha", params.fecha);
-  if (fallbackError) throw fallbackError;
+    .in("referencia_id", uniqueReferenceIds);
+  if (lookupError) throw lookupError;
+
+  const matchingIds = (matchingItems || []).map((item: { id: string }) => item.id);
+  if (matchingIds.length === 0) {
+    return;
+  }
+
+  const { error: updateError } = await supabase
+    .from("items_aprobacion")
+    .update({ valor: params.valor })
+    .in("id", matchingIds);
+  if (updateError) throw updateError;
 }
 
 async function syncVisitLiquidationValue(params: {
@@ -1417,45 +1486,34 @@ async function syncVisitLiquidationValue(params: {
     ...(params.porcentaje != null ? { porcentaje: params.porcentaje } : {}),
   };
 
-  if (uniqueReferenceIds.length > 0) {
-    let lookupQuery = supabase
-      .from("items_liquidacion")
-      .select("id")
-      .eq("tipo", "visita_tecnica")
-      .eq("tecnico_id", params.tecnicoId)
-      .in("referencia_id", uniqueReferenceIds);
-
-    if (params.periodoId) {
-      lookupQuery = lookupQuery.eq("periodo_id", params.periodoId);
-    }
-
-    const { data: matchingItems, error: lookupError } = await lookupQuery;
-    if (lookupError) throw lookupError;
-
-    const matchingIds = (matchingItems || []).map((item: { id: string }) => item.id);
-    if (matchingIds.length > 0) {
-      const { error: updateError } = await supabase
-        .from("items_liquidacion")
-        .update(updateData)
-        .in("id", matchingIds);
-      if (updateError) throw updateError;
-      return;
-    }
+  if (uniqueReferenceIds.length === 0) {
+    return;
   }
 
-  let fallbackQuery = supabase
+  let lookupQuery = supabase
     .from("items_liquidacion")
-    .update(updateData)
+    .select("id")
     .eq("tipo", "visita_tecnica")
     .eq("tecnico_id", params.tecnicoId)
-    .eq("fecha", params.fecha);
+    .in("referencia_id", uniqueReferenceIds);
 
   if (params.periodoId) {
-    fallbackQuery = fallbackQuery.eq("periodo_id", params.periodoId);
+    lookupQuery = lookupQuery.eq("periodo_id", params.periodoId);
   }
 
-  const { error: fallbackError } = await fallbackQuery;
-  if (fallbackError) throw fallbackError;
+  const { data: matchingItems, error: lookupError } = await lookupQuery;
+  if (lookupError) throw lookupError;
+
+  const matchingIds = (matchingItems || []).map((item: { id: string }) => item.id);
+  if (matchingIds.length === 0) {
+    return;
+  }
+
+  const { error: updateError } = await supabase
+    .from("items_liquidacion")
+    .update(updateData)
+    .in("id", matchingIds);
+  if (updateError) throw updateError;
 }
 
 async function resolveSharedVisitParticipants(params: {
@@ -1468,7 +1526,7 @@ async function resolveSharedVisitParticipants(params: {
 }) {
   let relatedReportsQuery = supabase
     .from("reportes_actividad")
-    .select("id, tecnico_id, periodo_id, costo_actividad, costo_actividad_default")
+    .select("id, tecnico_id, periodo_id, costo_actividad, costo_actividad_default, valor_modificado")
     .eq("tipo", "visita_tecnica")
     .eq("fecha", params.fecha)
     .eq("grupo_id", params.grupoId);
@@ -1539,13 +1597,14 @@ async function resolveSharedVisitParticipants(params: {
     appendVisitLiquidationCandidate(liquidationMaps.byFallback, fallbackKey, row);
   }
 
-  const currentTotal = participants.reduce(
-    (sum, participant: { costo_actividad?: number | string | null }) => sum + (Number(participant.costo_actividad) || 0),
-    0
-  );
-  const participantsCount = participants.length || 1;
-
-  return participants.map((participant: { id: string; tecnico_id: string; periodo_id?: string | null; costo_actividad?: number | string | null; costo_actividad_default?: number | string | null }) => {
+  const participantSnapshots = participants.map((participant: {
+    id: string;
+    tecnico_id: string;
+    periodo_id?: string | null;
+    costo_actividad?: number | string | null;
+    costo_actividad_default?: number | string | null;
+    valor_modificado?: boolean | null;
+  }) => {
     const participantVisits = (visitRows || []).filter((visit: { tecnico_id: string; descripcion?: string | null }) => {
       if (visit.tecnico_id !== participant.tecnico_id) return false;
       if (!params.descripcion) return !visit.descripcion;
@@ -1565,10 +1624,35 @@ async function resolveSharedVisitParticipants(params: {
       maps: liquidationMaps,
     });
 
-    const currentValue = liquidationRow?.valor_ganado != null
-      ? Number(liquidationRow.valor_ganado ?? 0) || 0
-      : Number(participant.costo_actividad ?? 0) || 0;
+    const participantDefaultValue = Number(
+      selectedVisit?.costo_visita_tecnica_default ?? participant.costo_actividad_default ?? 0
+    ) || 0;
     const percentage = Number(liquidationRow?.porcentaje ?? 0) || 0;
+    const liquidatedValueFallback = percentage > 0 && participantDefaultValue > 0
+      ? calculateGroupParticipantValue(
+        Number(((participantDefaultValue * 100) / percentage).toFixed(2)),
+        percentage
+      )
+      : participantDefaultValue;
+    const currentValue = normalizeUnmodifiedActivityValue(
+      liquidationRow?.valor_ganado ?? participant.costo_actividad,
+      liquidatedValueFallback,
+      participant.valor_modificado
+    );
+
+    return {
+      participant,
+      selectedVisit,
+      participantDefaultValue,
+      percentage,
+      currentValue,
+    };
+  });
+
+  const currentTotal = participantSnapshots.reduce((sum, snapshot) => sum + snapshot.currentValue, 0);
+  const participantsCount = participantSnapshots.length || 1;
+
+  return participantSnapshots.map(({ participant, selectedVisit, participantDefaultValue, percentage, currentValue }) => {
     const derivedPercentage = percentage > 0
       ? percentage
       : currentTotal > 0
@@ -1580,7 +1664,7 @@ async function resolveSharedVisitParticipants(params: {
       tecnicoId: participant.tecnico_id,
       periodoId: participant.periodo_id || params.periodoId,
       visitId: selectedVisit?.id,
-      visitDefaultCost: Number(selectedVisit?.costo_visita_tecnica_default ?? participant.costo_actividad_default ?? 0) || 0,
+      visitDefaultCost: participantDefaultValue,
       percentage: derivedPercentage,
     };
   });
@@ -1674,7 +1758,11 @@ async function updateSharedVisitCostFromReport(params: {
   return true;
 }
 
-async function syncVisitCostFromApprovalReport(reportId: string, costoActividad: number): Promise<void> {
+async function syncVisitCostFromApprovalReport(
+  reportId: string,
+  costoActividad: number,
+  visitId?: string
+): Promise<void> {
   const { data: report, error: reportError } = await supabase
     .from("reportes_actividad")
     .select("id, tipo, tecnico_id, cliente_id, fecha, descripcion, periodo_id, costo_actividad_default")
@@ -1683,6 +1771,47 @@ async function syncVisitCostFromApprovalReport(reportId: string, costoActividad:
   if (reportError) throw reportError;
 
   if (report?.tipo !== "visita_tecnica") return;
+
+  if (visitId) {
+    const { data: visit, error: visitLookupError } = await supabase
+      .from("visitas_tecnicas")
+      .select("id, costo_visita_tecnica_default")
+      .eq("id", visitId)
+      .maybeSingle();
+    if (visitLookupError) throw visitLookupError;
+
+    if (visit?.id) {
+      const defaultCost = Number(visit.costo_visita_tecnica_default ?? 0) || 0;
+      const { error: visitUpdateError } = await supabase
+        .from("visitas_tecnicas")
+        .update({
+          valor_cobrado_cliente: costoActividad,
+          valor_modificado: costoActividad !== defaultCost,
+          motivo_modificacion_valor: costoActividad !== defaultCost ? ADMIN_VALUE_OVERRIDE_REASON : null,
+        })
+        .eq("id", visit.id);
+      if (visitUpdateError) throw visitUpdateError;
+
+      const { error: approvalUpdateError } = await supabase
+        .from("items_aprobacion")
+        .update({ valor: costoActividad })
+        .eq("tipo", "visita_tecnica")
+        .eq("referencia_id", visit.id);
+      if (approvalUpdateError) throw approvalUpdateError;
+
+      await syncVisitLiquidationFromReport({
+        reportId,
+        tecnicoId: report.tecnico_id,
+        fecha: report.fecha,
+        periodoId: report.periodo_id,
+        costoActividad,
+        visitIds: [visit.id],
+      });
+
+      invalidateCachedValue("visitas:list");
+      return;
+    }
+  }
 
   const startDate = report.fecha;
   const endDate = addOneDay(report.fecha);
@@ -1717,55 +1846,45 @@ async function syncVisitCostFromApprovalReport(reportId: string, costoActividad:
     }
   }
 
-  if (visitIds.length > 0) {
-    await Promise.all(
-      selectedVisits.map(async (visit: { id: string; costo_visita_tecnica_default?: number | string | null }) => {
-        const defaultCost = Number(visit.costo_visita_tecnica_default ?? 0) || 0;
-        const { error: visitsUpdateError } = await supabase
-          .from("visitas_tecnicas")
-          .update({
-            valor_cobrado_cliente: costoActividad,
-            valor_modificado: costoActividad !== defaultCost,
-            motivo_modificacion_valor: costoActividad !== defaultCost ? ADMIN_VALUE_OVERRIDE_REASON : null,
-          })
-          .eq("id", visit.id);
-        if (visitsUpdateError) throw visitsUpdateError;
-      })
-    );
-
-    const { error: approvalUpdateError } = await supabase
-      .from("items_aprobacion")
-      .update({ valor: costoActividad })
-      .eq("tipo", "visita_tecnica")
-      .in("referencia_id", visitIds);
-    if (approvalUpdateError) throw approvalUpdateError;
-
-    await syncVisitLiquidationFromReport({
-      reportId,
-      tecnicoId: report.tecnico_id,
-      fecha: report.fecha,
-      periodoId: report.periodo_id,
-      costoActividad,
-      visitIds,
-    });
-  } else {
-    const { error: approvalUpdateError } = await supabase
-      .from("items_aprobacion")
-      .update({ valor: costoActividad })
-      .eq("tipo", "visita_tecnica")
-      .eq("tecnico_id", report.tecnico_id)
-      .eq("fecha", report.fecha);
-    if (approvalUpdateError) throw approvalUpdateError;
-
-    await syncVisitLiquidationFromReport({
-      reportId,
-      tecnicoId: report.tecnico_id,
-      fecha: report.fecha,
-      periodoId: report.periodo_id,
-      costoActividad,
-      visitIds: [],
-    });
+  if (visitIds.length === 0) {
+    throw new Error("No se encontró la visita técnica asociada al reporte.");
   }
+
+  if (visitIds.length > 1) {
+    throw new Error("Se encontraron varias visitas técnicas para este reporte. La actualización se canceló para evitar afectar varios registros.");
+  }
+
+  const selectedVisit = selectedVisits[0];
+  if (!selectedVisit) {
+    throw new Error("No se pudo resolver la visita técnica exacta asociada al reporte.");
+  }
+
+  const defaultCost = Number(selectedVisit.costo_visita_tecnica_default ?? 0) || 0;
+  const { error: visitsUpdateError } = await supabase
+    .from("visitas_tecnicas")
+    .update({
+      valor_cobrado_cliente: costoActividad,
+      valor_modificado: costoActividad !== defaultCost,
+      motivo_modificacion_valor: costoActividad !== defaultCost ? ADMIN_VALUE_OVERRIDE_REASON : null,
+    })
+    .eq("id", selectedVisit.id);
+  if (visitsUpdateError) throw visitsUpdateError;
+
+  const { error: approvalUpdateError } = await supabase
+    .from("items_aprobacion")
+    .update({ valor: costoActividad })
+    .eq("tipo", "visita_tecnica")
+    .eq("referencia_id", selectedVisit.id);
+  if (approvalUpdateError) throw approvalUpdateError;
+
+  await syncVisitLiquidationFromReport({
+    reportId,
+    tecnicoId: report.tecnico_id,
+    fecha: report.fecha,
+    periodoId: report.periodo_id,
+    costoActividad,
+    visitIds: [selectedVisit.id],
+  });
 
   invalidateCachedValue("visitas:list");
 }

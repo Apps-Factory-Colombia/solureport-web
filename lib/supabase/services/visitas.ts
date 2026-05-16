@@ -23,11 +23,12 @@ async function syncVisitLiquidationValues(params: {
   let liquidationQuery = supabase
     .from("items_liquidacion")
     .select("id, porcentaje")
-    .or(
-      params.periodoId
-        ? `referencia_id.eq.${params.visitId},and(tecnico_id.eq.${params.tecnicoId},periodo_id.eq.${params.periodoId},fecha.eq.${params.fecha},tipo.eq.visita_tecnica)`
-        : `referencia_id.eq.${params.visitId},and(tecnico_id.eq.${params.tecnicoId},fecha.eq.${params.fecha},tipo.eq.visita_tecnica)`
-    );
+    .eq("tipo", "visita_tecnica")
+    .eq("referencia_id", params.visitId);
+
+  if (params.periodoId) {
+    liquidationQuery = liquidationQuery.eq("periodo_id", params.periodoId);
+  }
 
   const { data: liquidationItems, error: liquidationLookupError } = await liquidationQuery;
   if (liquidationLookupError) throw liquidationLookupError;

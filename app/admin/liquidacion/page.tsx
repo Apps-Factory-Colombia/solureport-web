@@ -164,6 +164,54 @@ function waitForNextPaint() {
   });
 }
 
+function getReportLiquidationBaseValue(report: ActivityReport) {
+  if (report.tipo === "visita_tecnica" || report.tipo === "mantenimiento_preventivo") {
+    const sharedBaseValue = Number(report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal ?? 0) || 0;
+    if (sharedBaseValue > 0) return sharedBaseValue;
+  }
+
+  if (report.tipo === "recorrido") {
+    return Number(report.costoActividad ?? 0) || 0;
+  }
+
+  return Number(report.costoActividad ?? 0) || 0;
+}
+
+function getReportLiquidationPercentage(report: ActivityReport) {
+  const explicitPercentage = Number(report.porcentajeParticipacion ?? 0) || 0;
+  if (explicitPercentage > 0 && explicitPercentage <= 100) {
+    return explicitPercentage;
+  }
+
+  return 100;
+}
+
+function getReportLiquidationEarnedValue(report: ActivityReport) {
+  if (report.tipo === "visita_tecnica") {
+    const currentValue = Number(report.costoActividad ?? 0) || 0;
+    const defaultValue = Number(report.costoActividadDefault ?? 0) || 0;
+
+    if (currentValue <= 0 && defaultValue > 0 && !report.valorModificado) {
+      return defaultValue;
+    }
+
+    return currentValue;
+  }
+
+  if (report.tipo === "mantenimiento_preventivo") {
+    const currentValue = Number(report.costoActividad ?? 0) || 0;
+    const defaultValue = Number(report.costoActividadDefault ?? 0) || 0;
+
+    if (currentValue <= 0 && defaultValue > 0 && !report.valorModificado) {
+      return defaultValue;
+    }
+
+    return currentValue;
+  }
+
+  return Number(report.costoActividad ?? 0) || 0;
+}
+
 export default function LiquidacionPage() {
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -392,7 +440,7 @@ export default function LiquidacionPage() {
           && report.liderGrupoId === liderId
       );
 
-      extraBase += memberReports.reduce((sum, report) => sum + report.costoActividad, 0);
+      extraBase += memberReports.reduce((sum, report) => sum + getReportLiquidationEarnedValue(report), 0);
     });
 
     acc.set(liderId, Math.round(extraBase * porcentajeExtraLiderAplicado / 100));
@@ -435,12 +483,13 @@ export default function LiquidacionPage() {
         total: 0,
       };
 
+      const payableValue = getReportLiquidationEarnedValue(report);
       existing.actividades += 1;
-      existing.totalBruto += report.costoActividad;
+      existing.totalBruto += payableValue;
       if (report.tipo === "recorrido") {
-        existing.totalRecorridos += report.costoActividad;
+        existing.totalRecorridos += payableValue;
       } else {
-        existing.totalNoRecorridos += report.costoActividad;
+        existing.totalNoRecorridos += payableValue;
       }
 
       summary.set(report.tecnicoId, existing);
@@ -539,14 +588,15 @@ export default function LiquidacionPage() {
         total: 0,
       };
 
+      const payableValue = getReportLiquidationEarnedValue(report);
       existing.actividades += 1;
-      existing.totalBruto += report.costoActividad;
+      existing.totalBruto += payableValue;
       if (report.tipo === "recorrido") {
-        existing.totalRecorridos += report.costoActividad;
+        existing.totalRecorridos += payableValue;
       } else {
-        existing.totalNoRecorridos += report.costoActividad;
+        existing.totalNoRecorridos += payableValue;
         const subtotalKey = `${report.grupoId}|${report.tecnicoId}`;
-        nonRecSubtotalByGroupAndUser.set(subtotalKey, (nonRecSubtotalByGroupAndUser.get(subtotalKey) || 0) + report.costoActividad);
+        nonRecSubtotalByGroupAndUser.set(subtotalKey, (nonRecSubtotalByGroupAndUser.get(subtotalKey) || 0) + payableValue);
       }
 
       summary.set(report.grupoId, existing);
@@ -824,8 +874,8 @@ export default function LiquidacionPage() {
       );
       const pdfNonRecorrido = pdfReports.filter((r) => r.tipo !== "recorrido");
       const pdfRecorrido = pdfReports.filter((r) => r.tipo === "recorrido");
-      const pdfAuxilio = pdfNonRecorrido.reduce((sum, report) => sum + report.costoActividad, 0);
-      const pdfRodamiento = pdfRecorrido.reduce((sum, report) => sum + report.costoActividad, 0);
+      const pdfAuxilio = pdfNonRecorrido.reduce((sum, report) => sum + getReportLiquidationEarnedValue(report), 0);
+      const pdfRodamiento = pdfRecorrido.reduce((sum, report) => sum + getReportLiquidationEarnedValue(report), 0);
       const pdfDescuentoTardanza = techData.descuentoValor;
       const pdfExtraLider = leaderExtraByTech.get(selectedTechId) || 0;
 
@@ -836,13 +886,14 @@ export default function LiquidacionPage() {
         items: pdfNonRecorrido.map((report) => ({
           actividad: report.descripcion || getTipoLabel(report.tipo),
           fecha: report.fecha,
-          valorBase: report.costoActividad,
-          porcentaje: pdfAuxilio > 0 ? Number(((report.costoActividad / pdfAuxilio) * 100).toFixed(2)) : 0,
+          valorBase: getReportLiquidationBaseValue(report),
+          porcentaje: getReportLiquidationPercentage(report),
+          valorLiquidado: getReportLiquidationEarnedValue(report),
         })),
         desplazamientos: pdfRecorrido.map((report) => ({
           descripcion: [report.puntoPartida, report.puntoLlegada].filter(Boolean).join(" -> ") || getTipoLabel(report.tipo),
           fecha: report.fecha,
-          valor: report.costoActividad,
+          valor: getReportLiquidationEarnedValue(report),
         })),
         totalAuxilio: pdfAuxilio,
         totalDescuentoTardanza: pdfDescuentoTardanza,
@@ -896,7 +947,7 @@ export default function LiquidacionPage() {
                     r.fecha,
                     tech ? `${tech.nombre} ${tech.apellido}` : "\u2014",
                     getEstadoLabel(r.estadoAprobacionLider),
-                    formatCurrency(r.costoActividad),
+                    formatCurrency(getReportLiquidationEarnedValue(r)),
                   ];
                 });
 
@@ -1186,7 +1237,7 @@ export default function LiquidacionPage() {
                             </Badge>
                           </TableCell>
                           <TableCell className="text-right font-semibold text-gold">
-                            {formatCurrency(r.costoActividad)}
+                            {formatCurrency(getReportLiquidationEarnedValue(r))}
                           </TableCell>
                           <TableCell>
                             <div className="flex items-center justify-end gap-1">
@@ -1358,7 +1409,7 @@ export default function LiquidacionPage() {
                                       {getEstadoLabel(report.estadoAprobacionLider)}
                                     </Badge>
                                   </TableCell>
-                                  <TableCell className="text-right font-semibold text-gold">{formatCurrency(report.costoActividad)}</TableCell>
+                                  <TableCell className="text-right font-semibold text-gold">{formatCurrency(getReportLiquidationEarnedValue(report))}</TableCell>
                                   <TableCell>
                                     <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-cyan-neon" onClick={() => openReportDetail(report)}>
                                       <Eye className="h-4 w-4" />
@@ -1479,7 +1530,7 @@ export default function LiquidacionPage() {
                                         {getEstadoLabel(report.estadoAprobacionLider)}
                                       </Badge>
                                     </TableCell>
-                                    <TableCell className="text-right font-semibold text-gold">{formatCurrency(report.costoActividad)}</TableCell>
+                                    <TableCell className="text-right font-semibold text-gold">{formatCurrency(getReportLiquidationEarnedValue(report))}</TableCell>
                                     <TableCell>
                                       <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-cyan-neon" onClick={() => openReportDetail(report)}>
                                         <Eye className="h-4 w-4" />
@@ -1799,8 +1850,8 @@ export default function LiquidacionPage() {
             const nonRecorridoReports = techReportsForComprobante.filter((r) => r.tipo !== "recorrido");
             const recorridoReports = techReportsForComprobante.filter((r) => r.tipo === "recorrido");
 
-            const auxilioTotal = nonRecorridoReports.reduce((s, r) => s + r.costoActividad, 0);
-            const rodamientoTotal = recorridoReports.reduce((s, r) => s + r.costoActividad, 0);
+            const auxilioTotal = nonRecorridoReports.reduce((s, r) => s + getReportLiquidationEarnedValue(r), 0);
+            const rodamientoTotal = recorridoReports.reduce((s, r) => s + getReportLiquidationEarnedValue(r), 0);
             const descuentoTardanza = techData.descuentoValor;
             const auxilioNeto = auxilioTotal - descuentoTardanza;
             const extraLider = leaderExtraByTech.get(selectedTechId) || 0;
@@ -1855,7 +1906,7 @@ export default function LiquidacionPage() {
                               {r.estadoAprobacionLider === "aprobado" ? "✓" : "Pend."}
                             </TableCell>
                             <TableCell className="text-xs text-right font-medium text-gold">
-                              {formatCurrency(r.costoActividad)}
+                              {formatCurrency(getReportLiquidationEarnedValue(r))}
                             </TableCell>
                           </TableRow>
                         ))}

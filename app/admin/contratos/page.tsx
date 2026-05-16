@@ -35,7 +35,7 @@ import {
 import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, Clock, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, } from "lucide-react";
 import { MaintenanceContract, Client } from "@/lib/types";
 import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/supabase/services/contratos";
-import { getClientes } from "@/lib/supabase/services/clientes";
+import { getClientes, updateCliente } from "@/lib/supabase/services/clientes";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 
@@ -84,6 +84,8 @@ export default function ContratosPage() {
   const [editCostoTotal, setEditCostoTotal] = useState("");
   const [editCantidad, setEditCantidad] = useState("3");
   const [editEstado, setEditEstado] = useState<"activo" | "cerrado">("activo");
+  const [editPuertasPeatonales, setEditPuertasPeatonales] = useState("0");
+  const [editPuertasVehiculares, setEditPuertasVehiculares] = useState("0");
   const [editRegenerarMants, setEditRegenerarMants] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -180,6 +182,7 @@ export default function ContratosPage() {
   };
 
   const openUnifiedModal = (ct: MaintenanceContract) => {
+    const client = clients.find((item) => item.id === ct.clienteId);
     setSelectedContract(ct);
     setEditClienteId(ct.clienteId);
     setEditAnio(String(ct.anio));
@@ -188,6 +191,8 @@ export default function ContratosPage() {
     setEditCostoTotal(String(ct.costoTotalAnual));
     setEditCantidad(String(ct.cantidadMantenimientos));
     setEditEstado(ct.estado);
+    setEditPuertasPeatonales(String(client?.puertasPeatonales ?? 0));
+    setEditPuertasVehiculares(String(client?.puertasVehiculares ?? 0));
     setEditRegenerarMants(false);
     setDetailOpen(true);
   };
@@ -198,6 +203,11 @@ export default function ContratosPage() {
     try {
       const cantidad = Number(editCantidad);
       const costoTotal = Number(editCostoTotal);
+      await updateCliente(editClienteId, {
+        puertasPeatonales: Number(editPuertasPeatonales) || 0,
+        puertasVehiculares: Number(editPuertasVehiculares) || 0,
+      });
+
       const updated = await updateContrato(selectedContract.id, {
         clienteId: editClienteId,
         anio: Number(editAnio),
@@ -1253,6 +1263,28 @@ export default function ContratosPage() {
                           min="0"
                           value={editCostoTotal}
                           onChange={(e) => setEditCostoTotal(e.target.value)}
+                          className="bg-secondary/50 border-border/50"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-foreground/80">Puertas Peatonales</Label>
+                        <Input
+                          type="number"
+                          min="0"
+                          value={editPuertasPeatonales}
+                          onChange={(e) => setEditPuertasPeatonales(e.target.value)}
+                          className="bg-secondary/50 border-border/50"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label className="text-foreground/80">Puertas Vehiculares</Label>
+                        <Input
+                          type="number"
+                          min="0"
+                          value={editPuertasVehiculares}
+                          onChange={(e) => setEditPuertasVehiculares(e.target.value)}
                           className="bg-secondary/50 border-border/50"
                         />
                       </div>

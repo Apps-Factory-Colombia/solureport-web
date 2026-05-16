@@ -198,10 +198,11 @@ function isGroupActivity(report: ActivityReport) {
 }
 
 function isSharedVisit(report: ActivityReport) {
+  const participationPercentage = Number(report.porcentajeParticipacion ?? 0) || 0;
   return (report.tipo === "visita_tecnica"
     || report.tipo === "mantenimiento_preventivo")
-    && ((report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal) != null
-      || Number(report.porcentajeParticipacion ?? 0) > 0);
+    && participationPercentage > 0
+    && participationPercentage < 100;
 }
 
 function usesSharedBasePricing(report: ActivityReport) {
@@ -1125,6 +1126,7 @@ export default function AprobacionesPage() {
             maintenanceId: report.mantenimientoId,
             defaultCost: participant.defaultCost,
           })),
+          visitId: report.visitaTecnicaId,
         });
       }
 
@@ -1155,7 +1157,7 @@ export default function AprobacionesPage() {
       return;
     }
 
-    await updateCostoActividadAdmin(report.id, nextCost);
+    await updateCostoActividadAdmin(report.id, nextCost, { visitId: report.visitaTecnicaId });
     const nextVisitModifiedFlag = report.tipo === "visita_tecnica" || report.tipo === "mantenimiento_preventivo"
       ? nextCost !== getDefaultCostForReport(report)
       : report.valorModificado;

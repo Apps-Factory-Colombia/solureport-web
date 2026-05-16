@@ -59,14 +59,13 @@ import {
   Loader2,
   Download,
 } from "lucide-react";
-import { Maintenance, MaintenanceStatus, Client, User, CompanySettings, LiquidationPeriod } from "@/lib/types";
+import { Maintenance, MaintenanceStatus, Client, User, CompanySettings } from "@/lib/types";
 import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/supabase/services/mantenimientos";
 import { getContratos, createContrato } from "@/lib/supabase/services/contratos";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
-import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 import { formatClientDoorBreakdown } from "@/lib/utils/report-content";
@@ -129,9 +128,8 @@ function formatDateInput(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-function formatPeriodLabel(period?: LiquidationPeriod) {
-  if (!period) return "Sin corte disponible";
-  return `${period.fechaInicio} al ${period.fechaFin}`;
+function getMonthInputValue(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
 interface MiniCalendarProps {
@@ -254,7 +252,6 @@ export default function MantenimientosPage() {
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
-  const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -276,6 +273,8 @@ export default function MantenimientosPage() {
   const [reactivateStartDay, setReactivateStartDay] = useState(String(new Date().getDate()));
   const [reactivateStartYear, setReactivateStartYear] = useState(String(new Date().getFullYear()));
   const [reactivateLoading, setReactivateLoading] = useState(false);
+  const [programadosMonthFilter, setProgramadosMonthFilter] = useState<string>(() => getMonthInputValue(new Date()));
+  const [vencidosMonthFilter, setVencidosMonthFilter] = useState<string>(() => getMonthInputValue(new Date()));
 
   const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
   const [calendarSelectedDate, setCalendarSelectedDate] = useState<Date | null>(null);
@@ -288,7 +287,7 @@ export default function MantenimientosPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, ct, c, u, s, p] = await Promise.all([
+      const [m, ct, c, u, s] = await Promise.all([
         getMantenimientos(),
         getContratos(),
         getClientes(),
@@ -297,14 +296,12 @@ export default function MantenimientosPage() {
           console.error("Error cargando configuración de empresa:", error);
           return null;
         }),
-        getPeriodos(),
       ]);
       setMaintenances(m);
       setContracts(ct);
       setClients(c);
       setUsers(u);
       setCompanySettings(s);
-      setPeriods(p);
     } catch (err) {
       console.error("Error cargando mantenimientos:", err);
     } finally {
@@ -318,8 +315,6 @@ export default function MantenimientosPage() {
     const today = new Date();
     return new Date(today.getFullYear(), today.getMonth(), today.getDate());
   }, []);
-
-  const latestPeriod = useMemo(() => periods[0], [periods]);
 
   const clientsById = useMemo(
     () => new Map(clients.map((client) => [client.id, client])),
@@ -433,17 +428,21 @@ export default function MantenimientosPage() {
   }, [canScheduleMaintenance, maintenances, todayStart]);
 
   const programados = useMemo(() => {
-    const scheduledMaintenances = maintenances.filter((m) => String(m.estado).toLowerCase() === "programado");
+    const scheduledMaintenances = maintenances.filter((m) => {
+      const status = String(m.estado).toLowerCase();
+      return status === "programado" || status === "en_ejecucion" || status === "en_progreso";
+    });
+
     if (scheduledMaintenances.length === 0) {
       return [];
     }
 
-    if (latestPeriod) {
-      return scheduledMaintenances.filter((m) => m.fechaProgramada >= latestPeriod.fechaInicio && m.fechaProgramada <= latestPeriod.fechaFin);
+    if (programadosMonthFilter) {
+      return scheduledMaintenances.filter((m) => m.fechaProgramada.startsWith(programadosMonthFilter));
     }
 
     return scheduledMaintenances;
-  }, [latestPeriod, maintenances]);
+  }, [maintenances, programadosMonthFilter]);
 
   const vencidos = useMemo(() => {
     return maintenances.filter((m) => canScheduleMaintenance(m) && isMaintenanceOverdue(m));
@@ -535,16 +534,29 @@ export default function MantenimientosPage() {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) return true;
 
-    const client = clients.find((c) => c.id === maintenance.clienteId);
-    const tech = users.find((u) => u.id === maintenance.tecnicoId);
+    const client = clientsById.get(maintenance.clienteId);
+    const mainTechnician = usersById.get(maintenance.tecnicoId);
+    const maintenanceStatusLabel = (statusConfig[maintenance.estado] || defaultStatusConfig).label;
+    const participantNames = (maintenance.participantes || [])
+      .map((participant) => usersById.get(participant.usuarioId))
+      .filter(Boolean)
+      .map((user) => `${user!.nombre} ${user!.apellido}`.trim());
+    const searchableText = [
+      client?.edificio || "",
+      client?.nombre || "",
+      client?.direccion || "",
+      mainTechnician ? `${mainTechnician.nombre} ${mainTechnician.apellido}`.trim() : "",
+      ...participantNames,
+      maintenance.fechaProgramada || "",
+      maintenance.horaProgramada || "",
+      maintenance.observaciones || "",
+      maintenanceStatusLabel,
+    ]
+      .join(" ")
+      .toLowerCase();
 
-    return Boolean(
-      client?.edificio.toLowerCase().includes(normalizedQuery) ||
-      client?.nombre.toLowerCase().includes(normalizedQuery) ||
-      tech?.nombre.toLowerCase().includes(normalizedQuery) ||
-      tech?.apellido.toLowerCase().includes(normalizedQuery)
-    );
-  }, [clients, users]);
+    return searchableText.includes(normalizedQuery);
+  }, [clientsById, usersById]);
 
   const filtered = maintenances.filter((m) => {
     const matchesSearch = maintenanceMatchesSearch(m, search);
@@ -554,8 +566,12 @@ export default function MantenimientosPage() {
   });
 
   const filteredOverdueMaintenances = useMemo(() => {
-    return vencidos.filter((maintenance) => maintenanceMatchesSearch(maintenance, overdueSearch));
-  }, [maintenanceMatchesSearch, overdueSearch, vencidos]);
+    return vencidos.filter((maintenance) => {
+      const matchesSearch = maintenanceMatchesSearch(maintenance, overdueSearch);
+      const matchesMonth = !vencidosMonthFilter || maintenance.fechaProgramada.startsWith(vencidosMonthFilter);
+      return matchesSearch && matchesMonth;
+    });
+  }, [maintenanceMatchesSearch, overdueSearch, vencidos, vencidosMonthFilter]);
 
   const filteredUncoveredContracts = useMemo(() => {
     return uncoveredContracts.filter((contract) => {
@@ -602,8 +618,8 @@ export default function MantenimientosPage() {
 
     return participantIds.map((participantId) => {
       const participant = usersById.get(participantId);
-      return participant ? `${participant.nombre} ${participant.apellido}`.trim() : "Participante sin nombre";
-    });
+      return participant ? `${participant.nombre} ${participant.apellido}`.trim() : null;
+    }).filter(Boolean) as string[];
   }, [usersById]);
 
   const getMaintenanceTechnicianLabel = (maintenance: Maintenance) => {
@@ -652,8 +668,9 @@ export default function MantenimientosPage() {
       ]),
       summary: [
         { label: "Programados", value: String(programados.length) },
+        { label: "Mes", value: programadosMonthFilter || "Todos" },
       ],
-      fileName: "mantenimientos_programados",
+      fileName: `mantenimientos_programados${programadosMonthFilter ? `_${programadosMonthFilter}` : ""}`,
     });
   };
 
@@ -1006,23 +1023,38 @@ export default function MantenimientosPage() {
                       <UserCheck className="h-5 w-5 text-blue-400" />
                       Mantenimientos Programados
                     </CardTitle>
-                    <p className="mt-2 text-sm font-medium text-foreground/80">
-                      Ultimo corte disponible: {formatPeriodLabel(latestPeriod)}
-                    </p>
                     <p className="mt-2 text-sm text-muted-foreground">
-                      Muestra solo los mantenimientos programados del ultimo corte disponible, sin depender de si ese corte sigue activo o no.
+                      Muestra todos los mantenimientos con estado programado, en ejecucion o en progreso. Puedes filtrarlos por mes.
                     </p>
                   </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
-                    onClick={handleExportProgramadosPDF}
-                    disabled={programados.length === 0}
-                  >
-                    <Download className="h-4 w-4" />
-                    Exportar PDF
-                  </Button>
+                  <div className="flex flex-col gap-3 sm:items-end">
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="month"
+                        value={programadosMonthFilter}
+                        onChange={(e) => setProgramadosMonthFilter(e.target.value)}
+                        className="w-[180px] bg-secondary/50 border-border/50"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setProgramadosMonthFilter("")}
+                        className="border-border/50"
+                      >
+                        Todos
+                      </Button>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
+                      onClick={handleExportProgramadosPDF}
+                      disabled={programados.length === 0}
+                    >
+                      <Download className="h-4 w-4" />
+                      Exportar PDF
+                    </Button>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="p-0">
@@ -1249,14 +1281,32 @@ export default function MantenimientosPage() {
                 <p className="text-sm text-muted-foreground">
                   Mantenimientos cuya fecha ya pasó y aún no fueron realizados.
                 </p>
-                <div className="relative max-w-sm pt-2">
-                  <Search className="absolute left-3 top-1/2 mt-1 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    placeholder="Buscar en vencidos por cliente o técnico..."
-                    value={overdueSearch}
-                    onChange={(e) => setOverdueSearch(e.target.value)}
-                    className="pl-10 bg-secondary/50 border-border/50"
-                  />
+                <div className="flex flex-col gap-3 pt-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="relative max-w-sm flex-1">
+                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      placeholder="Buscar en vencidos por cliente o técnico..."
+                      value={overdueSearch}
+                      onChange={(e) => setOverdueSearch(e.target.value)}
+                      className="pl-10 bg-secondary/50 border-border/50"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="month"
+                      value={vencidosMonthFilter}
+                      onChange={(e) => setVencidosMonthFilter(e.target.value)}
+                      className="w-[180px] bg-secondary/50 border-border/50"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setVencidosMonthFilter("")}
+                      className="border-border/50"
+                    >
+                      Todos
+                    </Button>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="p-0">
@@ -1275,10 +1325,10 @@ export default function MantenimientosPage() {
                   <TableBody>
                     {filteredOverdueMaintenances.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                          <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
                           {vencidos.length === 0
                             ? "No hay mantenimientos vencidos"
-                            : "No se encontraron mantenimientos vencidos con esa búsqueda"}
+                            : "No se encontraron mantenimientos vencidos con esos filtros"}
                         </TableCell>
                       </TableRow>
                     ) : (

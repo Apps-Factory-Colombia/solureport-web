@@ -217,8 +217,12 @@ async function upsertExecutableMaintenanceFromContract(
 
   const liderId = await resolveMaintenanceLeaderId(tecnicoId);
   const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? contratoMant.costo_tecnico_total ?? 0) || 0));
-  const estadoContrato = String(contratoMant.estado || "programado").toLowerCase();
-  const estadoEjecutable = estadoContrato === "realizado" ? "realizado" : "programado";
+  const estadoContrato = String((m.estado ?? contratoMant.estado) || "programado").toLowerCase();
+  const estadoEjecutable = estadoContrato === "realizado" || estadoContrato === "completado"
+    ? "realizado"
+    : estadoContrato === "pendiente"
+      ? "pendiente"
+      : "programado";
   const clientLabel = client?.edificio || client?.nombre || "cliente";
 
   const payload: Record<string, unknown> = {
@@ -346,10 +350,29 @@ async function getMaintenanceParticipantsMap(maintenanceIds: string[]) {
   if (error) throw error;
 
   const participantsByMaintenance = new Map<string, MaintenanceParticipant[]>();
+  const participantUserIds = Array.from(new Set(
+    (data || []).map((row: { usuario_id?: string | null }) => row.usuario_id).filter(Boolean)
+  )) as string[];
+  const activeUserIds = new Set<string>();
+
+  if (participantUserIds.length > 0) {
+    const { data: users, error: usersError } = await supabase
+      .from("usuarios")
+      .select("id")
+      .in("id", participantUserIds);
+    if (usersError) throw usersError;
+
+    (users || []).forEach((user: { id: string }) => {
+      if (user.id) {
+        activeUserIds.add(user.id);
+      }
+    });
+  }
 
   for (const row of data || []) {
     const maintenanceId = row.maintenance_id;
     if (!maintenanceId || !row.usuario_id) continue;
+    if (!activeUserIds.has(row.usuario_id)) continue;
 
     const current = participantsByMaintenance.get(maintenanceId) || [];
     current.push({
@@ -481,6 +504,38 @@ async function upsertMaintenanceParticipantActivityReports(params: {
       .insert(payload);
     if (insertError) throw insertError;
   }));
+}
+
+async function deleteMaintenanceParticipantActivityReports(maintenanceId: string) {
+  if (!maintenanceId) return;
+
+  const { data: existingReports, error: existingReportsError } = await supabase
+    .from("reportes_actividad")
+    .select("id")
+    .eq("tipo", "mantenimiento_preventivo")
+    .eq("mantenimiento_id", maintenanceId);
+  if (existingReportsError) throw existingReportsError;
+
+  const reportIds = (existingReports || []).map((report: { id: string }) => report.id).filter(Boolean);
+  if (reportIds.length === 0) return;
+
+  const { error: deleteApprovalItemsError } = await supabase
+    .from("items_aprobacion")
+    .delete()
+    .in("referencia_id", reportIds);
+  if (deleteApprovalItemsError) throw deleteApprovalItemsError;
+
+  const { error: deleteLiquidationItemsError } = await supabase
+    .from("items_liquidacion")
+    .delete()
+    .in("referencia_id", reportIds);
+  if (deleteLiquidationItemsError) throw deleteLiquidationItemsError;
+
+  const { error: deleteReportsError } = await supabase
+    .from("reportes_actividad")
+    .delete()
+    .in("id", reportIds);
+  if (deleteReportsError) throw deleteReportsError;
 }
 
 export async function getMantenimientos(): Promise<Maintenance[]> {
@@ -639,7 +694,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
       ...m,
       tecnicoId: m.tecnicoId ?? contratoMant.tecnico_id,
       fechaProgramada: toDateOnly(contratoMant.fecha_programada),
-      estado: "programado",
+      estado: m.estado ?? contratoMant.estado,
       costoTecnicoTotal,
     });
 
@@ -666,6 +721,8 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
           costoTecnicoTotal,
           participants,
         });
+      } else {
+        await deleteMaintenanceParticipantActivityReports(executableMaintenance.id);
       }
     }
 
@@ -709,25 +766,32 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
   if (error) throw error;
 
   const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? data.costo_tecnico_total ?? 0) || 0));
+  const normalizedParticipants = normalizeMaintenanceParticipants(
+    id,
+    m.tecnicoId ?? data.tecnico_id,
+    m.participantes,
+    costoTecnicoTotal
+  ).map((participant) => ({
+    usuarioId: participant.usuario_id,
+    porcentaje: participant.porcentaje,
+    valorCalculado: participant.valor_calculado,
+  }));
+
   if (m.participantes !== undefined) {
     await replaceMaintenanceParticipants(id, m.tecnicoId ?? data.tecnico_id, m.participantes, costoTecnicoTotal);
+  }
 
-    if (String(data.estado).toLowerCase() === "realizado" || String(data.estado).toLowerCase() === "completado") {
-      const participants = normalizeMaintenanceParticipants(id, m.tecnicoId ?? data.tecnico_id, m.participantes, costoTecnicoTotal).map((participant) => ({
-        usuarioId: participant.usuario_id,
-        porcentaje: participant.porcentaje,
-        valorCalculado: participant.valor_calculado,
-      }));
-
-      await upsertMaintenanceParticipantActivityReports({
-        maintenanceId: id,
-        clienteId: data.cliente_id,
-        fecha: toDateOnly(data.fecha_programada),
-        descripcion: (data.observaciones || "").trim() || "Mantenimiento preventivo realizado",
-        costoTecnicoTotal,
-        participants,
-      });
-    }
+  if (String(data.estado).toLowerCase() === "realizado" || String(data.estado).toLowerCase() === "completado") {
+    await upsertMaintenanceParticipantActivityReports({
+      maintenanceId: id,
+      clienteId: data.cliente_id,
+      fecha: toDateOnly(data.fecha_programada),
+      descripcion: (data.observaciones || "").trim() || "Mantenimiento preventivo realizado",
+      costoTecnicoTotal,
+      participants: normalizedParticipants,
+    });
+  } else {
+    await deleteMaintenanceParticipantActivityReports(id);
   }
 
   await syncContractMaintenanceFromExecutable(data);
@@ -735,7 +799,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
   invalidateMantenimientosCache();
   return {
     ...mapRow(data),
-    participantes: m.participantes,
+    participantes: normalizedParticipants,
   };
 }
 

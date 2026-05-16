@@ -99,6 +99,17 @@ function calculateParticipantBreakdown(drafts: ParticipantDraft[], totalCost: nu
   };
 }
 
+function calculatePercentageFromPayment(paymentValue: string, totalCost: number) {
+  const normalizedPayment = Math.max(0, Math.round(Number(paymentValue || 0) || 0));
+  const normalizedTotal = Math.max(0, Math.round(Number(totalCost) || 0));
+
+  if (normalizedTotal <= 0) {
+    return "0";
+  }
+
+  return String(Number(((normalizedPayment / normalizedTotal) * 100).toFixed(2)));
+}
+
 function buildInitialFormData(maintenance?: Maintenance | null) {
   return {
     clienteId: maintenance?.clienteId || "",
@@ -148,14 +159,18 @@ export function MaintenanceDialog({
     if (open) {
       Promise.all([getUsuarios(), getClientes()])
         .then(([users, cls]) => {
-          setTechnicians(
-            users.filter(
-              (u) =>
-                u.estado === "activo" &&
-                (u.rol === "tecnico" || u.rol === "lider" || u.esLider)
-            )
+          const availableTechnicians = users.filter(
+            (u) =>
+              u.estado === "activo" &&
+              (u.rol === "tecnico" || u.rol === "lider" || u.esLider)
           );
+
+          setTechnicians(availableTechnicians);
           setClients(cls.filter((c) => c.estado === "activo"));
+          setParticipantDrafts((current) => {
+            const activeTechnicianIds = new Set(availableTechnicians.map((user) => user.id));
+            return current.filter((draft) => draft.usuarioId && activeTechnicianIds.has(draft.usuarioId));
+          });
         })
         .catch((err) => console.error("Error cargando datos:", err));
     }
@@ -264,11 +279,12 @@ export function MaintenanceDialog({
 
   const selectedParticipantLabels = visibleParticipantDrafts.map((draft) => {
     const user = technicians.find((candidate) => candidate.id === draft.usuarioId);
+    if (!user) return null;
     return {
       id: draft.usuarioId,
-      label: user ? `${user.nombre} ${user.apellido}` : "Participante sin nombre",
+      label: `${user.nombre} ${user.apellido}`,
     };
-  });
+  }).filter(Boolean) as Array<{ id: string; label: string }>;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -475,6 +491,7 @@ export function MaintenanceDialog({
                 <div className="space-y-2">
                   {visibleParticipantDrafts.map((draft) => {
                     const user = technicians.find((item) => item.id === draft.usuarioId);
+                    if (!user) return null;
                     const calculatedDraft = calculatedParticipantsByUserId.get(draft.usuarioId);
                     return (
                       <div key={draft.usuarioId} className="grid grid-cols-1 gap-3 rounded-md border border-border/40 bg-background/40 p-3 sm:grid-cols-[minmax(0,1fr)_120px_140px]">
@@ -486,27 +503,29 @@ export function MaintenanceDialog({
                           <Label className="text-xs text-muted-foreground">Porcentaje</Label>
                           <Input
                             type="number"
-                            min="0"
-                            max="100"
-                            step="0.01"
                             value={draft.porcentaje}
-                            onChange={(event) => {
-                              const nextValue = event.target.value;
-                              setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
-                                ? { ...item, porcentaje: nextValue }
-                                : item));
-                            }}
-                            className="bg-secondary/50 border-border/50"
+                            readOnly
+                            tabIndex={-1}
+                            className="bg-secondary/30 border-border/40 text-muted-foreground"
                           />
                         </div>
                         <div className="space-y-1">
                           <Label className="text-xs text-muted-foreground">Pago</Label>
                           <Input
                             type="number"
+                            min="0"
                             value={calculatedDraft?.valorCalculado || "0"}
-                            readOnly
-                            tabIndex={-1}
-                            className="bg-secondary/30 border-border/40 text-muted-foreground"
+                            onChange={(event) => {
+                              const nextPercentage = calculatePercentageFromPayment(
+                                event.target.value,
+                                Number(formData.costoTecnicoTotal || 0)
+                              );
+
+                              setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
+                                ? { ...item, porcentaje: nextPercentage }
+                                : item));
+                            }}
+                            className="bg-secondary/50 border-border/50"
                           />
                         </div>
                       </div>
