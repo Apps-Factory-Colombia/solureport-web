@@ -2427,7 +2427,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 export async function updateCostoActividadAdmin(
   id: string,
   costoActividad: number,
-  options?: { sharedVisitParticipants?: SharedParticipantOverride[] }
+  options?: { sharedVisitParticipants?: SharedParticipantOverride[]; visitId?: string }
 ): Promise<void> {
   const normalizedSharedParticipants = dedupeSharedParticipantOverrides(options?.sharedVisitParticipants);
 
@@ -2697,7 +2697,7 @@ export async function updateCostoActividadAdmin(
     return;
   }
 
-  await syncVisitCostFromApprovalReport(id, costoActividad);
+  await syncVisitCostFromApprovalReport(id, costoActividad, options?.visitId);
 
   invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
 }
