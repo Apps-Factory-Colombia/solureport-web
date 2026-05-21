@@ -3,7 +3,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { AdminHeader } from "@/components/layout/admin-header";
-import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -25,6 +24,9 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
   SelectContent,
@@ -32,10 +34,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, Clock, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, } from "lucide-react";
-import { MaintenanceContract, Client } from "@/lib/types";
+import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, ChevronDown, ArrowLeft, X, } from "lucide-react";
+import { MaintenanceContract, Client, MaintenanceParticipant, MaintenanceStatus, User } from "@/lib/types";
 import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/supabase/services/contratos";
-import { getClientes, updateCliente } from "@/lib/supabase/services/clientes";
+import { getClientes } from "@/lib/supabase/services/clientes";
+import { getUsuarios } from "@/lib/supabase/services/usuarios";
+import { updateMantenimiento } from "@/lib/supabase/services/mantenimientos";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 
@@ -52,11 +56,91 @@ const monthNames = [
   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
 ];
 
+type ContractParticipantDraft = {
+  usuarioId: string;
+  porcentaje: string;
+};
+
+type CalculatedContractParticipantDraft = {
+  usuarioId: string;
+  porcentaje: string;
+  valorCalculado: string;
+};
+
+type ContractMaintenanceDraft = {
+  mes: number;
+  fechaProgramada: string;
+  horaProgramada: string;
+  tecnicoId: string;
+  participantDrafts: ContractParticipantDraft[];
+  participantSearch: string;
+  participantSelectorOpen: boolean;
+};
+
+function buildDefaultParticipantDrafts(tecnicoId?: string) {
+  if (!tecnicoId) return [] as ContractParticipantDraft[];
+
+  return [{
+    usuarioId: tecnicoId,
+    porcentaje: "100",
+  }];
+}
+
+function calculateParticipantBreakdown(drafts: ContractParticipantDraft[], totalCost: number) {
+  const visibleDrafts = drafts.filter((draft) => !!draft.usuarioId);
+  if (visibleDrafts.length === 0) {
+    return {
+      drafts: [] as CalculatedContractParticipantDraft[],
+      totalCost: Math.max(0, Math.round(Number(totalCost) || 0)),
+      totalPercentage: 0,
+      totalAssigned: 0,
+      isBalanced: false,
+    };
+  }
+
+  const normalizedTotal = Math.max(0, Math.round(Number(totalCost) || 0));
+  const normalizedDrafts = visibleDrafts.map((draft) => ({
+    usuarioId: draft.usuarioId,
+    porcentaje: Number((Math.max(0, Number(draft.porcentaje || 0) || 0)).toFixed(2)),
+  }));
+  const totalPercentage = Number(normalizedDrafts.reduce((sum, draft) => sum + draft.porcentaje, 0).toFixed(2));
+
+  let assigned = 0;
+
+  const calculatedDrafts = normalizedDrafts.map((draft, index) => {
+    const valorCalculado = totalPercentage === 100 && index === normalizedDrafts.length - 1
+      ? Math.max(0, normalizedTotal - assigned)
+      : Math.max(0, Math.round((draft.porcentaje / 100) * normalizedTotal));
+
+    assigned += valorCalculado;
+
+    return {
+      usuarioId: draft.usuarioId,
+      porcentaje: String(draft.porcentaje),
+      valorCalculado: String(valorCalculado),
+    };
+  });
+
+  const totalAssigned = calculatedDrafts.reduce((sum, draft) => sum + (Number(draft.valorCalculado || 0) || 0), 0);
+
+  return {
+    drafts: calculatedDrafts,
+    totalCost: normalizedTotal,
+    totalPercentage,
+    totalAssigned,
+    isBalanced: calculatedDrafts.length > 0 && totalPercentage === 100 && totalAssigned === normalizedTotal,
+  };
+}
+
+function buildContractMaintenanceDraftKey(mes: number, fechaProgramada: string) {
+  return `${mes}|${fechaProgramada}`;
+}
+
 export default function ContratosPage() {
   const router = useRouter();
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [users, setUsers] = useState<User[]>([]);
   const [search, setSearch] = useState("");
   const [selectedContract, setSelectedContract] = useState<MaintenanceContract | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -67,12 +151,20 @@ export default function ContratosPage() {
   const [exportClienteId, setExportClienteId] = useState<string>("todos");
   const [exportMes, setExportMes] = useState<string>(String(new Date().getMonth() + 1));
   const [createOpen, setCreateOpen] = useState(false);
+  const [createStep, setCreateStep] = useState<1 | 2>(1);
+  const [createClientSelectorOpen, setCreateClientSelectorOpen] = useState(false);
+  const [createClientSearch, setCreateClientSearch] = useState("");
   const [newClienteId, setNewClienteId] = useState("");
   const [newAnio, setNewAnio] = useState(String(new Date().getFullYear()));
   const [newMesInicio, setNewMesInicio] = useState("1");
   const [newDiaInicio, setNewDiaInicio] = useState("1");
+  const [newPuertasPeatonales, setNewPuertasPeatonales] = useState("0");
+  const [newPuertasVehiculares, setNewPuertasVehiculares] = useState("0");
+  const [newValorPuertaPeatonal, setNewValorPuertaPeatonal] = useState("0");
+  const [newValorPuertaVehicular, setNewValorPuertaVehicular] = useState("0");
   const [newCostoTotal, setNewCostoTotal] = useState("");
   const [newCantidad, setNewCantidad] = useState("3");
+  const [createMaintenanceDrafts, setCreateMaintenanceDrafts] = useState<ContractMaintenanceDraft[]>([]);
   const [creating, setCreating] = useState(false);
   const [createdContractInfo, setCreatedContractInfo] = useState<{ cliente: string; cantidad: number } | null>(null);
 
@@ -86,6 +178,8 @@ export default function ContratosPage() {
   const [editEstado, setEditEstado] = useState<"activo" | "cerrado">("activo");
   const [editPuertasPeatonales, setEditPuertasPeatonales] = useState("0");
   const [editPuertasVehiculares, setEditPuertasVehiculares] = useState("0");
+  const [editValorPuertaPeatonal, setEditValorPuertaPeatonal] = useState("0");
+  const [editValorPuertaVehicular, setEditValorPuertaVehicular] = useState("0");
   const [editRegenerarMants, setEditRegenerarMants] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -102,15 +196,13 @@ export default function ContratosPage() {
   const [savingMant, setSavingMant] = useState(false);
 
   const loadData = async () => {
-    setLoading(true);
     try {
-      const [ct, cl] = await Promise.all([getContratos(), getClientes()]);
+      const [ct, cl, us] = await Promise.all([getContratos(), getClientes(), getUsuarios()]);
       setContracts(ct);
       setClients(cl);
+      setUsers(us);
     } catch (err) {
       console.error("Error cargando contratos:", err);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -119,6 +211,83 @@ export default function ContratosPage() {
   const costoPorMant = newCostoTotal && newCantidad
     ? Math.round(Number(newCostoTotal) / Number(newCantidad))
     : 0;
+
+  const assignableUsers = useMemo(
+    () => users.filter((user) => user.estado === "activo" && (user.rol === "tecnico" || user.rol === "lider" || user.esLider)),
+    [users]
+  );
+
+  const activeClients = useMemo(
+    () => clients.filter((client) => client.estado === "activo"),
+    [clients]
+  );
+
+  const filteredCreateClients = useMemo(() => {
+    const query = createClientSearch.trim().toLowerCase();
+    if (!query) return activeClients;
+
+    return activeClients.filter((client) => {
+      const searchableText = [
+        client.edificio,
+        client.nombre,
+        client.contacto,
+        client.nitCedula,
+        client.correo,
+      ].join(" ").toLowerCase();
+
+      return searchableText.includes(query);
+    });
+  }, [activeClients, createClientSearch]);
+
+  const selectedCreateClient = useMemo(
+    () => clients.find((client) => client.id === newClienteId),
+    [clients, newClienteId]
+  );
+
+  const selectedCreateClientLabel = selectedCreateClient
+    ? `${selectedCreateClient.edificio || selectedCreateClient.nombre} — ${selectedCreateClient.nombre}`
+    : "Seleccionar cliente";
+
+  const valorConfiguradoPuertasNuevo =
+    (Number(newPuertasPeatonales) || 0) * (Number(newValorPuertaPeatonal) || 0)
+    + (Number(newPuertasVehiculares) || 0) * (Number(newValorPuertaVehicular) || 0);
+
+  const valorConfiguradoPuertasEdicion =
+    (Number(editPuertasPeatonales) || 0) * (Number(editValorPuertaPeatonal) || 0)
+    + (Number(editPuertasVehiculares) || 0) * (Number(editValorPuertaVehicular) || 0);
+
+  const resetCreateFlow = () => {
+    setCreateStep(1);
+    setCreateClientSelectorOpen(false);
+    setCreateClientSearch("");
+    setNewClienteId("");
+    setNewAnio(String(new Date().getFullYear()));
+    setNewMesInicio("1");
+    setNewDiaInicio("1");
+    setNewPuertasPeatonales("0");
+    setNewPuertasVehiculares("0");
+    setNewValorPuertaPeatonal("0");
+    setNewValorPuertaVehicular("0");
+    setNewCostoTotal("");
+    setNewCantidad("3");
+    setCreateMaintenanceDrafts([]);
+  };
+
+  const handleCreateOpenChange = (open: boolean) => {
+    setCreateOpen(open);
+    if (!open) {
+      resetCreateFlow();
+    }
+  };
+
+  useEffect(() => {
+    if (!createOpen) return;
+    const client = clients.find((item) => item.id === newClienteId);
+    if (!client) return;
+
+    setNewPuertasPeatonales(String(client.puertasPeatonales || 0));
+    setNewPuertasVehiculares(String(client.puertasVehiculares || 0));
+  }, [clients, createOpen, newClienteId]);
 
   const buildMantenimientos = (cantidad: number, anio: number, mesInicio: number, dia: number) => {
     const intervalo = Math.floor(12 / cantidad);
@@ -137,8 +306,175 @@ export default function ContratosPage() {
     });
   };
 
+  const buildMaintenanceDrafts = (
+    cantidad: number,
+    anio: number,
+    mesInicio: number,
+    dia: number,
+    previousDrafts: ContractMaintenanceDraft[] = []
+  ) => {
+    const previousByKey = new Map(
+      previousDrafts.map((draft) => [buildContractMaintenanceDraftKey(draft.mes, draft.fechaProgramada), draft])
+    );
+
+    return buildMantenimientos(cantidad, anio, mesInicio, dia).map((maintenance) => {
+      const key = buildContractMaintenanceDraftKey(maintenance.mes, maintenance.fechaProgramada);
+      const previous = previousByKey.get(key);
+
+      return {
+        mes: maintenance.mes,
+        fechaProgramada: maintenance.fechaProgramada,
+        horaProgramada: previous?.horaProgramada || "",
+        tecnicoId: previous?.tecnicoId || "",
+        participantDrafts: previous?.participantDrafts || [],
+        participantSearch: previous?.participantSearch || "",
+        participantSelectorOpen: false,
+      } satisfies ContractMaintenanceDraft;
+    });
+  };
+
+  const updateCreateMaintenanceDraft = (
+    targetIndex: number,
+    updater: (draft: ContractMaintenanceDraft) => ContractMaintenanceDraft
+  ) => {
+    setCreateMaintenanceDrafts((current) => current.map((draft, index) => index === targetIndex ? updater(draft) : draft));
+  };
+
+  const ensureTechnicianParticipant = (draft: ContractMaintenanceDraft, tecnicoId: string) => {
+    if (!tecnicoId) return draft;
+
+    const visibleParticipants = draft.participantDrafts.filter((participant) => !!participant.usuarioId);
+    if (visibleParticipants.length === 0) {
+      return {
+        ...draft,
+        tecnicoId,
+        participantDrafts: buildDefaultParticipantDrafts(tecnicoId),
+      };
+    }
+
+    if (visibleParticipants.some((participant) => participant.usuarioId === tecnicoId)) {
+      return {
+        ...draft,
+        tecnicoId,
+        participantDrafts: visibleParticipants.length === 1
+          ? [{ ...visibleParticipants[0], porcentaje: "100" }]
+          : visibleParticipants,
+      };
+    }
+
+    return {
+      ...draft,
+      tecnicoId,
+      participantDrafts: [...visibleParticipants, { usuarioId: tecnicoId, porcentaje: "0" }],
+    };
+  };
+
+  const handleCreateStepContinue = () => {
+    if (!newClienteId) {
+      window.alert("Selecciona un cliente para continuar.");
+      return;
+    }
+
+    const cantidad = Number(newCantidad);
+    const anio = Number(newAnio);
+    const costoTotal = Number(newCostoTotal);
+    const mesInicio = Number(newMesInicio);
+    const diaInicio = Number(newDiaInicio);
+
+    if (!Number.isFinite(anio) || anio < 2000) {
+      window.alert("Ingresa un año válido.");
+      return;
+    }
+
+    if (!Number.isFinite(cantidad) || cantidad < 1 || cantidad > 12) {
+      window.alert("La cantidad de mantenimientos debe estar entre 1 y 12.");
+      return;
+    }
+
+    if (!Number.isFinite(diaInicio) || diaInicio < 1 || diaInicio > 28) {
+      window.alert("El día de inicio debe estar entre 1 y 28.");
+      return;
+    }
+
+    if (!Number.isFinite(costoTotal) || costoTotal <= 0) {
+      window.alert("Ingresa un costo total anual mayor a cero.");
+      return;
+    }
+
+    setCreateMaintenanceDrafts((current) => buildMaintenanceDrafts(cantidad, anio, mesInicio, diaInicio, current));
+    setCreateStep(2);
+  };
+
+  const handleCreateParticipantToggle = (targetIndex: number, userId: string, checked: boolean) => {
+    updateCreateMaintenanceDraft(targetIndex, (draft) => {
+      const visibleParticipants = draft.participantDrafts.filter((participant) => !!participant.usuarioId);
+      const nextParticipants = checked
+        ? [...visibleParticipants, { usuarioId: userId, porcentaje: visibleParticipants.length === 0 ? "100" : "0" }]
+        : visibleParticipants.filter((participant) => participant.usuarioId !== userId);
+
+      if (nextParticipants.length === 1) {
+        nextParticipants[0] = { ...nextParticipants[0], porcentaje: "100" };
+      }
+
+      const nextTechnicianId = checked
+        ? (draft.tecnicoId || userId)
+        : draft.tecnicoId === userId
+          ? (nextParticipants[0]?.usuarioId || "")
+          : draft.tecnicoId;
+
+      return ensureTechnicianParticipant({
+        ...draft,
+        tecnicoId: nextTechnicianId,
+        participantDrafts: nextParticipants,
+      }, nextTechnicianId);
+    });
+  };
+
+  const handleCopyDraftConfigurationToAll = (targetIndex: number) => {
+    setCreateMaintenanceDrafts((current) => {
+      const source = current[targetIndex];
+      if (!source) return current;
+
+      return current.map((draft, index) => index === targetIndex
+        ? draft
+        : {
+          ...draft,
+          tecnicoId: source.tecnicoId,
+          horaProgramada: source.horaProgramada,
+          participantDrafts: source.participantDrafts.map((participant) => ({ ...participant })),
+          participantSearch: "",
+          participantSelectorOpen: false,
+        });
+    });
+  };
+
+  const validateCreateMaintenanceDrafts = () => {
+    if (createMaintenanceDrafts.length === 0) {
+      window.alert("Configura al menos un mantenimiento antes de crear el contrato.");
+      return false;
+    }
+
+    for (let index = 0; index < createMaintenanceDrafts.length; index += 1) {
+      const draft = createMaintenanceDrafts[index];
+      const summary = calculateParticipantBreakdown(draft.participantDrafts, costoPorMant);
+
+      if (!draft.tecnicoId) {
+        window.alert(`Selecciona un técnico responsable para el mantenimiento ${index + 1}.`);
+        return false;
+      }
+
+      if (!summary.isBalanced) {
+        window.alert(`El reparto de participantes del mantenimiento ${index + 1} debe sumar 100% y coincidir con ${formatCurrency(costoPorMant)}.`);
+        return false;
+      }
+    }
+
+    return true;
+  };
+
   const handleCreateContract = async () => {
     if (!newClienteId || !newCostoTotal || !newCantidad) return;
+    if (!validateCreateMaintenanceDrafts()) return;
     setCreating(true);
     try {
       const anio = Number(newAnio);
@@ -147,13 +483,24 @@ export default function ContratosPage() {
       const mesInicio = Number(newMesInicio);
       const diaInicio = Number(newDiaInicio);
       const costoPorMantenimiento = Math.round(costoTotal / cantidad);
-      const mantenimientos = buildMantenimientos(cantidad, anio, mesInicio, diaInicio);
+      const mantenimientos = createMaintenanceDrafts.map((draft) => ({
+        id: `temp-${draft.mes}-${draft.fechaProgramada}`,
+        mes: draft.mes,
+        fechaProgramada: draft.fechaProgramada,
+        tecnicoId: draft.tecnicoId,
+        estado: "programado" as const,
+        valorRecaudado: 0,
+      }));
 
       const createdContract = await createContrato({
         clienteId: newClienteId,
         anio,
         mesInicio,
         diaInicio,
+        puertasPeatonales: Number(newPuertasPeatonales) || 0,
+        puertasVehiculares: Number(newPuertasVehiculares) || 0,
+        valorPuertaPeatonal: Number(newValorPuertaPeatonal) || 0,
+        valorPuertaVehicular: Number(newValorPuertaVehicular) || 0,
         costoTotalAnual: costoTotal,
         cantidadMantenimientos: cantidad,
         costoPorMantenimiento,
@@ -163,15 +510,37 @@ export default function ContratosPage() {
 
       const selectedClient = clients.find((client) => client.id === newClienteId);
 
+      const createdMaintenancesByKey = new Map(
+        createdContract.mantenimientosRealizados.map((maintenance) => [
+          buildContractMaintenanceDraftKey(maintenance.mes, maintenance.fechaProgramada),
+          maintenance,
+        ])
+      );
+
+      await Promise.all(createMaintenanceDrafts.map(async (draft) => {
+        const createdMaintenance = createdMaintenancesByKey.get(buildContractMaintenanceDraftKey(draft.mes, draft.fechaProgramada));
+        if (!createdMaintenance) return;
+
+        const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, costoPorMantenimiento);
+        await updateMantenimiento(createdMaintenance.id, {
+          tecnicoId: draft.tecnicoId,
+          fechaProgramada: draft.fechaProgramada,
+          horaProgramada: draft.horaProgramada || undefined,
+          estado: "programado" as MaintenanceStatus,
+          costoTecnicoTotal: costoPorMantenimiento,
+          participantes: participantSummary.drafts.map((participant): MaintenanceParticipant => ({
+            usuarioId: participant.usuarioId,
+            porcentaje: Number(participant.porcentaje || 0) || 0,
+            valorCalculado: Number(participant.valorCalculado || 0) || 0,
+          })),
+        });
+      }));
+
       setCreateOpen(false);
-      setNewClienteId("");
-      setNewCostoTotal("");
-      setNewCantidad("3");
-      setNewMesInicio("1");
-      setNewDiaInicio("1");
+      resetCreateFlow();
       setCreatedContractInfo({
         cliente: selectedClient?.edificio || selectedClient?.nombre || "el cliente seleccionado",
-        cantidad: createdContract.mantenimientosRealizados.length,
+        cantidad: createMaintenanceDrafts.length,
       });
       await loadData();
     } catch (err) {
@@ -182,7 +551,6 @@ export default function ContratosPage() {
   };
 
   const openUnifiedModal = (ct: MaintenanceContract) => {
-    const client = clients.find((item) => item.id === ct.clienteId);
     setSelectedContract(ct);
     setEditClienteId(ct.clienteId);
     setEditAnio(String(ct.anio));
@@ -191,8 +559,10 @@ export default function ContratosPage() {
     setEditCostoTotal(String(ct.costoTotalAnual));
     setEditCantidad(String(ct.cantidadMantenimientos));
     setEditEstado(ct.estado);
-    setEditPuertasPeatonales(String(client?.puertasPeatonales ?? 0));
-    setEditPuertasVehiculares(String(client?.puertasVehiculares ?? 0));
+    setEditPuertasPeatonales(String(ct.puertasPeatonales || 0));
+    setEditPuertasVehiculares(String(ct.puertasVehiculares || 0));
+    setEditValorPuertaPeatonal(String(ct.valorPuertaPeatonal || 0));
+    setEditValorPuertaVehicular(String(ct.valorPuertaVehicular || 0));
     setEditRegenerarMants(false);
     setDetailOpen(true);
   };
@@ -203,16 +573,15 @@ export default function ContratosPage() {
     try {
       const cantidad = Number(editCantidad);
       const costoTotal = Number(editCostoTotal);
-      await updateCliente(editClienteId, {
-        puertasPeatonales: Number(editPuertasPeatonales) || 0,
-        puertasVehiculares: Number(editPuertasVehiculares) || 0,
-      });
-
       const updated = await updateContrato(selectedContract.id, {
         clienteId: editClienteId,
         anio: Number(editAnio),
         mesInicio: Number(editMesInicio),
         diaInicio: Number(editDiaInicio),
+        puertasPeatonales: Number(editPuertasPeatonales) || 0,
+        puertasVehiculares: Number(editPuertasVehiculares) || 0,
+        valorPuertaPeatonal: Number(editValorPuertaPeatonal) || 0,
+        valorPuertaVehicular: Number(editValorPuertaVehicular) || 0,
         costoTotalAnual: costoTotal,
         cantidadMantenimientos: cantidad,
         costoPorMantenimiento: Math.round(costoTotal / cantidad),
@@ -563,7 +932,10 @@ export default function ContratosPage() {
               Exportar PDF
             </Button>
             <Button
-              onClick={() => setCreateOpen(true)}
+              onClick={() => {
+                resetCreateFlow();
+                setCreateOpen(true);
+              }}
               className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
             >
               <Plus className="h-4 w-4" />
@@ -671,11 +1043,11 @@ export default function ContratosPage() {
                             <div className="flex items-center gap-3 text-sm">
                               <span className="flex items-center gap-1 text-foreground/80">
                                 <DoorOpen className="h-3.5 w-3.5 text-cyan-neon" />
-                                {client?.puertasPeatonales}
+                                {ct.puertasPeatonales}
                               </span>
                               <span className="flex items-center gap-1 text-foreground/80">
                                 <Car className="h-3.5 w-3.5 text-gold" />
-                                {client?.puertasVehiculares}
+                                {ct.puertasVehiculares}
                               </span>
                             </div>
                           </TableCell>
@@ -858,10 +1230,10 @@ export default function ContratosPage() {
                               <p className="text-xs text-muted-foreground">{client?.nombre}</p>
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80 text-center">
-                              {client?.puertasPeatonales}
+                              {ct.puertasPeatonales}
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80 text-center">
-                              {client?.puertasVehiculares}
+                              {ct.puertasVehiculares}
                             </TableCell>
                             <TableCell className="text-sm font-semibold text-gold">
                               {formatCurrency(ct.costoTotalAnual)}
@@ -1011,6 +1383,36 @@ export default function ContratosPage() {
                         </span>
                       </div>
                     </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                      <p className="text-xs text-muted-foreground">Puertas peatonales</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {selectedContract.puertasPeatonales} x {formatCurrency(selectedContract.valorPuertaPeatonal)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                      <p className="text-xs text-muted-foreground">Puertas vehiculares</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {selectedContract.puertasVehiculares} x {formatCurrency(selectedContract.valorPuertaVehicular)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-4">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Valor configurado por puertas</span>
+                      <span className="font-semibold text-cyan-neon">
+                        {formatCurrency(
+                          selectedContract.puertasPeatonales * selectedContract.valorPuertaPeatonal
+                          + selectedContract.puertasVehiculares * selectedContract.valorPuertaVehicular
+                        )}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Este valor es informativo y no reemplaza el valor total anual del contrato.
+                    </p>
                   </div>
 
                   <div className="space-y-3">
@@ -1289,6 +1691,28 @@ export default function ContratosPage() {
                         />
                       </div>
                       <div className="space-y-2">
+                        <Label className="text-foreground/80">Valor puerta peatonal ($)</Label>
+                        <Input
+                          type="number"
+                          min="0"
+                          value={editValorPuertaPeatonal}
+                          onChange={(e) => setEditValorPuertaPeatonal(e.target.value)}
+                          className="bg-secondary/50 border-border/50"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label className="text-foreground/80">Valor puerta vehicular ($)</Label>
+                        <Input
+                          type="number"
+                          min="0"
+                          value={editValorPuertaVehicular}
+                          onChange={(e) => setEditValorPuertaVehicular(e.target.value)}
+                          className="bg-secondary/50 border-border/50"
+                        />
+                      </div>
+                      <div className="space-y-2">
                         <Label className="text-foreground/80">Estado</Label>
                         <Select value={editEstado} onValueChange={(v: "activo" | "cerrado") => setEditEstado(v)}>
                           <SelectTrigger className="bg-secondary/50 border-border/50">
@@ -1300,6 +1724,16 @@ export default function ContratosPage() {
                           </SelectContent>
                         </Select>
                       </div>
+                    </div>
+
+                    <div className="rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-3">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Valor configurado por puertas</span>
+                        <span className="font-semibold text-cyan-neon">{formatCurrency(valorConfiguradoPuertasEdicion)}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        El valor total anual del contrato se mantiene independiente de esta configuración.
+                      </p>
                     </div>
 
                     <div className="flex items-start gap-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 mt-4">
@@ -1315,7 +1749,7 @@ export default function ContratosPage() {
                           Regenerar fechas programadas pendientes
                         </label>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          Recalculará las fechas de los mantenimientos en estado "pendiente" según la nueva configuración.
+                          Recalculará las fechas de los mantenimientos en estado &quot;pendiente&quot; según la nueva configuración.
                         </p>
                       </div>
                     </div>
@@ -1342,131 +1776,384 @@ export default function ContratosPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="bg-card border-border sm:max-w-md">
+      <Dialog open={createOpen} onOpenChange={handleCreateOpenChange}>
+        <DialogContent className="max-h-[90vh] overflow-hidden bg-card border-border sm:max-w-5xl">
           <DialogHeader>
             <DialogTitle className="text-foreground">Nuevo Contrato de Mantenimiento</DialogTitle>
+            <div className="flex flex-wrap items-center gap-2 pt-3 text-xs">
+              <Badge variant="outline" className={cn("border-border/50", createStep === 1 && "border-gold/40 bg-gold/10 text-gold")}>Paso 1: Contrato</Badge>
+              <Badge variant="outline" className={cn("border-border/50", createStep === 2 && "border-gold/40 bg-gold/10 text-gold")}>Paso 2: Mantenimientos</Badge>
+            </div>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label className="text-foreground/80">Cliente</Label>
-              <Select value={newClienteId} onValueChange={setNewClienteId}>
-                <SelectTrigger className="bg-secondary/50 border-border/50">
-                  <SelectValue placeholder="Seleccionar cliente" />
-                </SelectTrigger>
-                <SelectContent className="bg-card border-border">
-                  {clients.filter((c) => c.estado === "activo").map((c) => (
-                    <SelectItem key={c.id} value={c.id}>
-                      {c.edificio} — {c.nombre}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label className="text-foreground/80">Año</Label>
-                <Input
-                  type="number"
-                  value={newAnio}
-                  onChange={(e) => setNewAnio(e.target.value)}
-                  className="bg-secondary/50 border-border/50"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label className="text-foreground/80">Cantidad de Mantenimientos</Label>
-                <Input
-                  type="number"
-                  min="1"
-                  max="12"
-                  value={newCantidad}
-                  onChange={(e) => setNewCantidad(e.target.value)}
-                  className="bg-secondary/50 border-border/50"
-                />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label className="text-foreground/80">Mes de inicio</Label>
-                <Select value={newMesInicio} onValueChange={setNewMesInicio}>
-                  <SelectTrigger className="bg-secondary/50 border-border/50">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent className="bg-card border-border">
-                    {monthNames.map((m, i) => (
-                      <SelectItem key={i + 1} value={String(i + 1)}>{m}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label className="text-foreground/80">Día del mes</Label>
-                <Input
-                  type="number"
-                  min="1"
-                  max="28"
-                  value={newDiaInicio}
-                  onChange={(e) => setNewDiaInicio(e.target.value)}
-                  className="bg-secondary/50 border-border/50"
-                  placeholder="1-28"
-                />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label className="text-foreground/80">Costo Total Anual ($)</Label>
-              <Input
-                type="number"
-                min="0"
-                value={newCostoTotal}
-                onChange={(e) => setNewCostoTotal(e.target.value)}
-                className="bg-secondary/50 border-border/50"
-                placeholder="Ej: 12000000"
-              />
-            </div>
-            {costoPorMant > 0 && (
-              <div className="rounded-lg border border-gold/20 bg-gold/5 p-3">
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Costo por mantenimiento:</span>
-                  <span className="font-bold text-gold">{formatCurrency(costoPorMant)}</span>
+
+          {createStep === 1 ? (
+            <div className="space-y-5 overflow-y-auto pr-1">
+              <div className="grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Cliente</Label>
+                    <Popover open={createClientSelectorOpen} onOpenChange={setCreateClientSelectorOpen}>
+                      <PopoverTrigger asChild>
+                        <Button type="button" variant="outline" className="w-full justify-between border-border/50 bg-secondary/50 text-foreground hover:bg-secondary/70">
+                          <span className="truncate text-left">{selectedCreateClientLabel}</span>
+                          <ChevronDown className="h-4 w-4 opacity-60" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-[min(30rem,calc(100vw-2rem))] border-border bg-card p-3" align="start">
+                        <div className="space-y-3">
+                          <Input
+                            value={createClientSearch}
+                            onChange={(event) => setCreateClientSearch(event.target.value)}
+                            placeholder="Buscar cliente, edificio, NIT o correo"
+                            className="bg-secondary/50 border-border/50"
+                          />
+                          <ScrollArea className="h-56 rounded-md border border-border/50">
+                            <div className="space-y-1 p-2">
+                              {filteredCreateClients.map((client) => {
+                                const isSelected = newClienteId === client.id;
+                                return (
+                                  <button
+                                    key={client.id}
+                                    type="button"
+                                    className={cn(
+                                      "flex w-full flex-col rounded-md px-3 py-2 text-left hover:bg-secondary/50",
+                                      isSelected && "bg-gold/10 text-gold"
+                                    )}
+                                    onClick={() => {
+                                      setNewClienteId(client.id);
+                                      setCreateClientSelectorOpen(false);
+                                      setCreateClientSearch("");
+                                    }}
+                                  >
+                                    <span className="text-sm font-medium">{client.edificio || client.nombre}</span>
+                                    <span className="text-xs text-muted-foreground">{client.nombre} · {client.nitCedula || "Sin NIT"}</span>
+                                  </button>
+                                );
+                              })}
+                              {filteredCreateClients.length === 0 && (
+                                <p className="px-3 py-4 text-center text-xs text-muted-foreground">No hay clientes que coincidan con la búsqueda.</p>
+                              )}
+                            </div>
+                          </ScrollArea>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Año</Label>
+                      <Input type="number" value={newAnio} onChange={(e) => setNewAnio(e.target.value)} className="bg-secondary/50 border-border/50" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Cantidad de Mantenimientos</Label>
+                      <Input type="number" min="1" max="12" value={newCantidad} onChange={(e) => setNewCantidad(e.target.value)} className="bg-secondary/50 border-border/50" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Mes de inicio</Label>
+                      <Select value={newMesInicio} onValueChange={setNewMesInicio}>
+                        <SelectTrigger className="bg-secondary/50 border-border/50">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className="bg-card border-border">
+                          {monthNames.map((m, i) => (
+                            <SelectItem key={i + 1} value={String(i + 1)}>{m}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Día del mes</Label>
+                      <Input type="number" min="1" max="28" value={newDiaInicio} onChange={(e) => setNewDiaInicio(e.target.value)} className="bg-secondary/50 border-border/50" placeholder="1-28" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Puertas peatonales</Label>
+                      <Input type="number" min="0" value={newPuertasPeatonales} onChange={(e) => setNewPuertasPeatonales(e.target.value)} className="bg-secondary/50 border-border/50" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Valor puertas peatonales ($)</Label>
+                      <Input type="number" min="0" value={newValorPuertaPeatonal} onChange={(e) => setNewValorPuertaPeatonal(e.target.value)} className="bg-secondary/50 border-border/50" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Puertas vehiculares</Label>
+                      <Input type="number" min="0" value={newPuertasVehiculares} onChange={(e) => setNewPuertasVehiculares(e.target.value)} className="bg-secondary/50 border-border/50" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Valor puertas vehiculares ($)</Label>
+                      <Input type="number" min="0" value={newValorPuertaVehicular} onChange={(e) => setNewValorPuertaVehicular(e.target.value)} className="bg-secondary/50 border-border/50" />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Costo Total Anual ($)</Label>
+                    <Input type="number" min="0" value={newCostoTotal} onChange={(e) => setNewCostoTotal(e.target.value)} className="bg-secondary/50 border-border/50" placeholder="Ej: 12000000" />
+                  </div>
                 </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {newCantidad} mantenimientos distribuidos cada {Math.floor(12 / Number(newCantidad))} mes(es) desde {monthNames[Number(newMesInicio) - 1]}, día {newDiaInicio}.
-                </p>
-              </div>
-            )}
-            <div className="rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-3">
-              <div className="flex items-start gap-2">
-                <CheckCircle2 className="mt-0.5 h-4 w-4 text-cyan-neon" />
-                <div className="space-y-1">
-                  <p className="text-sm font-medium text-foreground">
-                    Este contrato generará automáticamente los mantenimientos
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Cuando pulses <span className="font-medium text-foreground">Crear Contrato</span>, se crearán también los {newCantidad || "0"} mantenimientos asociados y luego podrás revisarlos desde <span className="font-medium text-foreground">Mantenimientos</span>.
-                  </p>
+
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-gold/20 bg-gold/5 p-4 space-y-3">
+                    <p className="text-sm font-semibold text-foreground">Resumen del contrato</p>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Cliente</span>
+                      <span className="max-w-[14rem] truncate text-right text-foreground">{selectedCreateClient?.edificio || selectedCreateClient?.nombre || "Sin seleccionar"}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Mantenimientos</span>
+                      <span className="text-foreground">{newCantidad || "0"}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Costo total anual</span>
+                      <span className="font-semibold text-gold">{newCostoTotal ? formatCurrency(Number(newCostoTotal)) : "—"}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Costo por mantenimiento</span>
+                      <span className="font-semibold text-gold">{costoPorMant > 0 ? formatCurrency(costoPorMant) : "—"}</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      En el siguiente paso podrás asignar técnico, hora y participantes a cada mantenimiento antes de crear el contrato.
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border border-cyan-neon/20 bg-cyan-neon/5 p-4">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Valor configurado por puertas</span>
+                      <span className="font-semibold text-cyan-neon">{formatCurrency(valorConfiguradoPuertasNuevo)}</span>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Se guarda como referencia del contrato y no reemplaza el costo total anual.
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="space-y-5 overflow-hidden">
+              <div className="rounded-xl border border-gold/20 bg-gold/5 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">Configura los mantenimientos antes de crear el contrato</p>
+                    <p className="text-xs text-muted-foreground">
+                      Cada mantenimiento quedará listo con técnico responsable y participantes correlacionados desde el inicio.
+                    </p>
+                  </div>
+                  <div className="text-right text-sm">
+                    <p className="text-muted-foreground">Costo fijo por mantenimiento</p>
+                    <p className="font-semibold text-gold">{formatCurrency(costoPorMant)}</p>
+                  </div>
+                </div>
+              </div>
+
+              <ScrollArea className="h-[52vh] rounded-xl border border-border/50 p-0">
+                <div className="space-y-4 p-4">
+                  {createMaintenanceDrafts.map((draft, index) => {
+                    const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, costoPorMant);
+                    const selectedParticipantIds = new Set(draft.participantDrafts.filter((participant) => !!participant.usuarioId).map((participant) => participant.usuarioId));
+                    const filteredAssignableUsers = assignableUsers.filter((user) => {
+                      const query = draft.participantSearch.trim().toLowerCase();
+                      if (!query) return true;
+                      return `${user.nombre} ${user.apellido} ${user.email}`.toLowerCase().includes(query);
+                    });
+
+                    return (
+                      <div key={buildContractMaintenanceDraftKey(draft.mes, draft.fechaProgramada)} className="rounded-xl border border-border/50 bg-secondary/20 p-4 space-y-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-foreground">Mantenimiento {index + 1} · {monthNames[draft.mes - 1]}</p>
+                            <p className="text-xs text-muted-foreground">Se creará en estado programado y con reparto técnico inicial.</p>
+                          </div>
+                          <Button type="button" variant="outline" className="border-border/50 bg-card text-xs" onClick={() => handleCopyDraftConfigurationToAll(index)}>
+                            Copiar configuración al resto
+                          </Button>
+                        </div>
+
+                        <div className="grid gap-4 md:grid-cols-3">
+                          <div className="space-y-2">
+                            <Label className="text-foreground/80">Fecha programada</Label>
+                            <Input
+                              type="date"
+                              value={draft.fechaProgramada}
+                              onChange={(event) => updateCreateMaintenanceDraft(index, (current) => ({ ...current, fechaProgramada: event.target.value }))}
+                              className="bg-card border-border/50"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-foreground/80">Hora programada</Label>
+                            <Input
+                              type="time"
+                              value={draft.horaProgramada}
+                              onChange={(event) => updateCreateMaintenanceDraft(index, (current) => ({ ...current, horaProgramada: event.target.value }))}
+                              className="bg-card border-border/50"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-foreground/80">Técnico responsable</Label>
+                            <Select
+                              value={draft.tecnicoId}
+                              onValueChange={(value) => updateCreateMaintenanceDraft(index, (current) => ensureTechnicianParticipant({ ...current, tecnicoId: value }, value))}
+                            >
+                              <SelectTrigger className="bg-card border-border/50">
+                                <SelectValue placeholder="Seleccionar técnico" />
+                              </SelectTrigger>
+                              <SelectContent className="bg-card border-border">
+                                {assignableUsers.map((user) => (
+                                  <SelectItem key={user.id} value={user.id}>{`${user.nombre} ${user.apellido}`}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-border/50 bg-card/70 p-4 space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-medium text-foreground">Participantes</p>
+                              <p className="text-xs text-muted-foreground">La suma debe ser 100% para repartir {formatCurrency(costoPorMant)}.</p>
+                            </div>
+                            <Popover open={draft.participantSelectorOpen} onOpenChange={(open) => updateCreateMaintenanceDraft(index, (current) => ({ ...current, participantSelectorOpen: open }))}>
+                              <PopoverTrigger asChild>
+                                <Button type="button" variant="outline" className="border-border/50 bg-card text-xs">
+                                  <Plus className="mr-2 h-4 w-4" />
+                                  Agregar participantes
+                                </Button>
+                              </PopoverTrigger>
+                              <PopoverContent className="w-[min(24rem,calc(100vw-2rem))] border-border bg-card p-3" align="end">
+                                <div className="space-y-3">
+                                  <Input
+                                    value={draft.participantSearch}
+                                    onChange={(event) => updateCreateMaintenanceDraft(index, (current) => ({ ...current, participantSearch: event.target.value }))}
+                                    placeholder="Buscar técnico o líder"
+                                    className="bg-secondary/50 border-border/50"
+                                  />
+                                  <ScrollArea className="h-56 rounded-md border border-border/50">
+                                    <div className="space-y-1 p-2">
+                                      {filteredAssignableUsers.map((user) => {
+                                        const checked = selectedParticipantIds.has(user.id);
+                                        return (
+                                          <label key={user.id} className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 hover:bg-secondary/50">
+                                            <Checkbox checked={checked} onCheckedChange={(value) => handleCreateParticipantToggle(index, user.id, value === true)} />
+                                            <div className="min-w-0">
+                                              <p className="truncate text-sm text-foreground">{user.nombre} {user.apellido}</p>
+                                              <p className="truncate text-xs text-muted-foreground">{user.email}</p>
+                                            </div>
+                                          </label>
+                                        );
+                                      })}
+                                      {filteredAssignableUsers.length === 0 && (
+                                        <p className="px-3 py-4 text-center text-xs text-muted-foreground">No hay usuarios que coincidan con la búsqueda.</p>
+                                      )}
+                                    </div>
+                                  </ScrollArea>
+                                </div>
+                              </PopoverContent>
+                            </Popover>
+                          </div>
+
+                          <div className="space-y-2">
+                            {draft.participantDrafts.filter((participant) => !!participant.usuarioId).length === 0 ? (
+                              <p className="rounded-md border border-dashed border-border/50 px-3 py-4 text-sm text-muted-foreground">
+                                Agrega al menos un participante para este mantenimiento.
+                              </p>
+                            ) : (
+                              draft.participantDrafts.filter((participant) => !!participant.usuarioId).map((participant) => {
+                                const participantUser = assignableUsers.find((user) => user.id === participant.usuarioId);
+                                const calculatedParticipant = participantSummary.drafts.find((item) => item.usuarioId === participant.usuarioId);
+
+                                return (
+                                  <div key={participant.usuarioId} className="grid gap-3 rounded-md border border-border/50 bg-secondary/30 p-3 md:grid-cols-[minmax(0,1fr)_8rem_8rem_2.5rem] md:items-center">
+                                    <div>
+                                      <p className="text-sm font-medium text-foreground">{participantUser ? `${participantUser.nombre} ${participantUser.apellido}` : participant.usuarioId}</p>
+                                      <p className="text-xs text-muted-foreground">{draft.tecnicoId === participant.usuarioId ? "Responsable principal" : "Participante"}</p>
+                                    </div>
+                                    <div className="space-y-1">
+                                      <Label className="text-[11px] text-muted-foreground">Porcentaje</Label>
+                                      <Input
+                                        type="number"
+                                        min="0"
+                                        max="100"
+                                        value={participant.porcentaje}
+                                        onChange={(event) => updateCreateMaintenanceDraft(index, (current) => ({
+                                          ...current,
+                                          participantDrafts: current.participantDrafts.map((item) => item.usuarioId === participant.usuarioId ? { ...item, porcentaje: event.target.value } : item),
+                                        }))}
+                                        className="h-9 bg-card border-border/50"
+                                      />
+                                    </div>
+                                    <div className="space-y-1">
+                                      <Label className="text-[11px] text-muted-foreground">Valor</Label>
+                                      <div className="flex h-9 items-center rounded-md border border-border/50 bg-card px-3 text-sm text-foreground">
+                                        {formatCurrency(Number(calculatedParticipant?.valorCalculado || 0) || 0)}
+                                      </div>
+                                    </div>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-9 w-9 text-muted-foreground hover:text-destructive"
+                                      onClick={() => handleCreateParticipantToggle(index, participant.usuarioId, false)}
+                                    >
+                                      <X className="h-4 w-4" />
+                                    </Button>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+
+                          <div className={cn(
+                            "rounded-md border px-3 py-3 text-xs",
+                            participantSummary.isBalanced
+                              ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-300"
+                              : "border-amber-500/20 bg-amber-500/5 text-amber-300"
+                          )}>
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span>Porcentaje total: {participantSummary.totalPercentage}%</span>
+                              <span>Valor asignado: {formatCurrency(participantSummary.totalAssigned)}</span>
+                            </div>
+                            {!participantSummary.isBalanced && (
+                              <p className="mt-1">Ajusta el reparto hasta completar 100% y {formatCurrency(costoPorMant)}.</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </ScrollArea>
+            </div>
+          )}
+
           <DialogFooter>
-            <Button
-              variant="ghost"
-              onClick={() => setCreateOpen(false)}
-              className="text-muted-foreground"
-            >
+            <Button variant="ghost" onClick={() => handleCreateOpenChange(false)} className="text-muted-foreground">
               Cancelar
             </Button>
+            {createStep === 2 && (
+              <Button variant="outline" onClick={() => setCreateStep(1)} className="gap-2 border-border/50 bg-card text-foreground">
+                <ArrowLeft className="h-4 w-4" />
+                Volver al contrato
+              </Button>
+            )}
             <Button
-              onClick={handleCreateContract}
+              onClick={createStep === 1 ? handleCreateStepContinue : handleCreateContract}
               disabled={creating || !newClienteId || !newCostoTotal}
               className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
             >
               {creating ? (
                 <div className="h-4 w-4 animate-spin rounded-full border-2 border-background border-t-transparent" />
+              ) : createStep === 1 ? (
+                <ArrowRight className="h-4 w-4" />
               ) : (
                 <Plus className="h-4 w-4" />
               )}
-              {creating ? "Creando..." : "Crear Contrato"}
+              {creating ? "Creando..." : createStep === 1 ? "Configurar mantenimientos" : "Crear contrato y mantenimientos"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1624,10 +2311,10 @@ export default function ContratosPage() {
                   <div className="space-y-1">
                     <p className="text-sm font-semibold text-foreground">{createdContractInfo.cliente}</p>
                     <p className="text-sm text-muted-foreground">
-                      Se generaron automáticamente <span className="font-medium text-foreground">{createdContractInfo.cantidad}</span> mantenimientos asociados a este contrato.
+                      Se crearon y configuraron <span className="font-medium text-foreground">{createdContractInfo.cantidad}</span> mantenimientos asociados a este contrato.
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      Puedes revisarlos o programarlos ahora mismo desde la vista de mantenimientos.
+                      Ya quedaron correlacionados con técnico responsable y reparto inicial de participantes.
                     </p>
                   </div>
                 </div>

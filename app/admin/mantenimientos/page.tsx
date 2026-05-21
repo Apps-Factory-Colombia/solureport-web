@@ -356,9 +356,14 @@ export default function MantenimientosPage() {
   }, [contractByMaintenanceId, contractsById]);
 
   const getMaintenanceDoorCount = useCallback((maintenance: Maintenance) => {
+    const contract = getMaintenanceContract(maintenance);
+    if (contract) {
+      return (contract.puertasPeatonales || 0) + (contract.puertasVehiculares || 0);
+    }
+
     const client = clientsById.get(maintenance.clienteId);
     return (client?.puertasPeatonales || 0) + (client?.puertasVehiculares || 0);
-  }, [clientsById]);
+  }, [clientsById, getMaintenanceContract]);
 
   const getMaintenanceProgressLabel = useCallback((maintenance: Maintenance) => {
     const contract = getMaintenanceContract(maintenance);
@@ -695,7 +700,7 @@ export default function MantenimientosPage() {
       headers: ["Cliente", "Puertas", "Avance", "Valor total", "Costo mant.", "Técnico", "Fecha", "Estado"],
       rows: calendarFilteredMaintenances.map((maintenance) => [
         getMaintenanceClientLabel(maintenance),
-        formatClientDoorBreakdown(clientsById.get(maintenance.clienteId)) || `${getMaintenanceDoorCount(maintenance)} puertas`,
+        formatClientDoorBreakdown(getMaintenanceContract(maintenance) || clientsById.get(maintenance.clienteId)) || `${getMaintenanceDoorCount(maintenance)} puertas`,
         getMaintenanceProgressLabel(maintenance),
         formatCurrency(getMaintenanceAnnualValue(maintenance)),
         formatCurrency(getMaintenancePaymentCost(maintenance)),
@@ -792,6 +797,10 @@ export default function MantenimientosPage() {
         anio: year,
         mesInicio: month,
         diaInicio: day,
+        puertasPeatonales: reactivatingContract.puertasPeatonales,
+        puertasVehiculares: reactivatingContract.puertasVehiculares,
+        valorPuertaPeatonal: reactivatingContract.valorPuertaPeatonal,
+        valorPuertaVehicular: reactivatingContract.valorPuertaVehicular,
         costoTotalAnual: reactivatingContract.costoTotalAnual,
         cantidadMantenimientos: reactivatingContract.cantidadMantenimientos,
         costoPorMantenimiento: reactivatingContract.costoPorMantenimiento,

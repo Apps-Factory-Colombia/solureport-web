@@ -61,6 +61,7 @@ import {
 } from "@/lib/supabase/services/reportes-actividad";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { getClientes } from "@/lib/supabase/services/clientes";
+import { getContratos } from "@/lib/supabase/services/contratos";
 import { getGrupos } from "@/lib/supabase/services/grupos";
 import { getConfiguracion, updateConfiguracion } from "@/lib/supabase/services/configuracion";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
@@ -68,7 +69,7 @@ import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
 import { formatClientDoorBreakdown, sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
-import { CompanySettings, LiquidationPeriod } from "@/lib/types";
+import { CompanySettings, LiquidationPeriod, MaintenanceContract } from "@/lib/types";
 import {
   Pagination,
   PaginationContent,
@@ -206,7 +207,9 @@ function isSharedVisit(report: ActivityReport) {
 }
 
 function usesSharedBasePricing(report: ActivityReport) {
-  return isGroupActivity(report) || isSharedVisit(report);
+  return isGroupActivity(report)
+    || isSharedVisit(report)
+    || report.tipo === "mantenimiento_preventivo";
 }
 
 function getGroupActivityIdentity(report: ActivityReport) {
@@ -231,11 +234,21 @@ function getVisualActivityIdentity(report: ActivityReport) {
     return getGroupActivityUiIdentity(report);
   }
 
-  if (isSharedVisit(report)) {
-    const identityPrefix = report.tipo === "mantenimiento_preventivo" ? "shared-maintenance-visual" : "shared-visit-visual";
+  if (report.tipo === "mantenimiento_preventivo") {
     return [
-      identityPrefix,
-      report.mantenimientoId || "sin-mantenimiento",
+      "shared-maintenance-visual",
+      report.periodoId || "sin-periodo",
+      report.grupoId,
+      report.clienteId || "sin-cliente",
+      normalizeSearchValue(report.descripcion),
+      normalizeSearchValue(report.especificacion),
+    ].join("|");
+  }
+
+  if (isSharedVisit(report)) {
+    return [
+      "shared-visit-visual",
+      report.visitaTecnicaId || "sin-visita",
       report.fecha,
       report.periodoId || "sin-periodo",
       report.grupoId,
@@ -252,11 +265,21 @@ function getSharedPricingIdentity(report: ActivityReport) {
     return getGroupActivityIdentity(report);
   }
 
-  if (isSharedVisit(report)) {
-    const identityPrefix = report.tipo === "mantenimiento_preventivo" ? "shared-maintenance" : "shared-visit";
+  if (report.tipo === "mantenimiento_preventivo") {
     return [
-      identityPrefix,
-      report.mantenimientoId || "sin-mantenimiento",
+      "shared-maintenance",
+      report.periodoId || "sin-periodo",
+      report.grupoId,
+      report.clienteId || "sin-cliente",
+      normalizeSearchValue(report.descripcion),
+      normalizeSearchValue(report.especificacion),
+    ].join("|");
+  }
+
+  if (isSharedVisit(report)) {
+    return [
+      "shared-visit",
+      report.visitaTecnicaId || "sin-visita",
       report.fecha,
       report.periodoId || "sin-periodo",
       report.grupoId,
@@ -467,6 +490,27 @@ function dedupeSharedParticipantDrafts(drafts: SharedParticipantDraft[]) {
   return Array.from(draftsByTechnician.values());
 }
 
+function getPreventiveMaintenanceCanonicalKey(report: ActivityReport) {
+  if (report.tipo !== "mantenimiento_preventivo") return report.id;
+
+  return [
+    report.periodoId || "sin-periodo",
+    report.grupoId || "sin-grupo",
+    report.clienteId || "sin-cliente",
+    normalizeSearchValue(report.descripcion),
+    normalizeSearchValue(report.especificacion),
+  ].join("|");
+}
+
+function rankPreventiveMaintenanceReport(report: ActivityReport) {
+  let score = 0;
+  if (report.mantenimientoParticipanteId) score += 8;
+  if (report.mantenimientoId) score += 4;
+  if ((Number(report.costoActividad ?? 0) || 0) > 0) score += 2;
+  if ((Number(report.porcentajeParticipacion ?? 0) || 0) > 0) score += 1;
+  return score;
+}
+
 function isLegacyGroupDraftReportId(reportId: string) {
   return reportId.startsWith("reg-");
 }
@@ -475,6 +519,7 @@ export default function AprobacionesPage() {
   const [reports, setReports] = useState<ActivityReport[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
+  const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
@@ -506,11 +551,12 @@ export default function AprobacionesPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [periodResult, reportsResult, usersResult, clientsResult, groupsResult, settingsResult] = await Promise.allSettled([
+      const [periodResult, reportsResult, usersResult, clientsResult, contractsResult, groupsResult, settingsResult] = await Promise.allSettled([
         getPeriodos(),
         getReportesActividad(),
         getUsuarios(),
         getClientes(),
+        getContratos(),
         getGrupos(),
         getConfiguracion(),
       ]);
@@ -519,6 +565,7 @@ export default function AprobacionesPage() {
       const r = reportsResult.status === "fulfilled" ? reportsResult.value : [];
       const u = usersResult.status === "fulfilled" ? usersResult.value : [];
       const c = clientsResult.status === "fulfilled" ? clientsResult.value : [];
+      const ct = contractsResult.status === "fulfilled" ? contractsResult.value : [];
       const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
       const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
 
@@ -526,10 +573,11 @@ export default function AprobacionesPage() {
       if (reportsResult.status === "rejected") console.error("Error cargando reportes en aprobaciones:", reportsResult.reason);
       if (usersResult.status === "rejected") console.error("Error cargando usuarios en aprobaciones:", usersResult.reason);
       if (clientsResult.status === "rejected") console.error("Error cargando clientes en aprobaciones:", clientsResult.reason);
+      if (contractsResult.status === "rejected") console.error("Error cargando contratos en aprobaciones:", contractsResult.reason);
       if (groupsResult.status === "rejected") console.error("Error cargando grupos en aprobaciones:", groupsResult.reason);
       if (settingsResult.status === "rejected") console.error("Error cargando configuración en aprobaciones:", settingsResult.reason);
 
-      setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setPeriods(p);
+      setReports(r); setUsers(u); setClients(c); setContracts(ct); setGroups(g); setCompanySettings(s); setPeriods(p);
       setSelectedPeriodId((current) => {
         if (current && p.some((period) => period.id === current)) return current;
         return p[0]?.id || "";
@@ -900,6 +948,10 @@ export default function AprobacionesPage() {
 
   const getReportEmailContext = useCallback((report: ActivityReport) => {
     const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+    const reportYear = report.fecha ? new Date(`${report.fecha}T00:00:00`).getFullYear() : new Date().getFullYear();
+    const contract = report.clienteId
+      ? contracts.find((item) => item.clienteId === report.clienteId && item.anio === reportYear)
+      : undefined;
     const tech = usersById.get(report.tecnicoId);
     const group = groupsById.get(report.grupoId);
     const tipo = getTipoConfig(String(report.tipo));
@@ -909,7 +961,7 @@ export default function AprobacionesPage() {
     const clienteNombre = client?.contacto || client?.nombre || "Cliente";
     const edificio = client?.edificio || group?.nombre || tipo.label;
     const puertasDetalle = report.tipo === "mantenimiento_preventivo" || report.tipo === "visita_tecnica"
-      ? formatClientDoorBreakdown(client)
+      ? formatClientDoorBreakdown(contract || client)
       : undefined;
     const fileBaseName = getSafeFileSegment(client?.edificio || group?.nombre || tipo.label);
     const normalizedObservaciones = report.tipo === "actividad_grupal"
@@ -1038,7 +1090,7 @@ export default function AprobacionesPage() {
       filename: `${getSafeFileSegment(tipo.label)}_${fileBaseName}_${report.fecha}.pdf`,
       ccRecipients: [client?.correoAliado, operationalEmail].filter(Boolean),
     };
-  }, [buildMultilineText, clientsById, companySettings, getSafeFileSegment, groupsById, usersById]);
+  }, [buildMultilineText, clientsById, companySettings, contracts, getSafeFileSegment, groupsById, usersById]);
 
   const sendApprovalEmail = useCallback(async (report: ActivityReport) => {
     if (!canSendApprovalReportEmail(report)) {
@@ -1441,8 +1493,27 @@ export default function AprobacionesPage() {
   const groupedReports = useMemo(() => {
     const grouped = new Map<string, ActivityReport[]>();
     const uiScopedReports = dedupeGroupActivityRowsForUi(periodScopedReports);
+    const canonicalPreventiveByKey = new Map<string, ActivityReport>();
 
     uiScopedReports.forEach((report) => {
+      if (report.tipo !== "mantenimiento_preventivo") return;
+
+      const key = getPreventiveMaintenanceCanonicalKey(report);
+      const current = canonicalPreventiveByKey.get(key);
+      const currentScore = current ? rankPreventiveMaintenanceReport(current) : -1;
+      const nextScore = rankPreventiveMaintenanceReport(report);
+
+      if (!current || nextScore > currentScore || (nextScore === currentScore && (report.fechaCreacion || "") > (current.fechaCreacion || ""))) {
+        canonicalPreventiveByKey.set(key, report);
+      }
+    });
+
+    uiScopedReports.forEach((report) => {
+      if (report.tipo === "mantenimiento_preventivo") {
+        const canonical = canonicalPreventiveByKey.get(getPreventiveMaintenanceCanonicalKey(report));
+        if (canonical && canonical.id !== report.id) return;
+      }
+
       const key = usesSharedBasePricing(report)
         ? `${report.tipo}:${getVisualActivityIdentity(report)}`
         : report.id;

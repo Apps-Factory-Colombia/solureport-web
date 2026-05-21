@@ -47,7 +47,6 @@ import {
   Building2,
   Mail,
   Phone,
-  CalendarClock,
   Loader2,
 } from "lucide-react";
 import { Client } from "@/lib/types";
@@ -87,7 +86,8 @@ export default function ClientesPage() {
     (c) =>
       c.nombre.toLowerCase().includes(search.toLowerCase()) ||
       c.edificio.toLowerCase().includes(search.toLowerCase()) ||
-      c.contacto.toLowerCase().includes(search.toLowerCase())
+      c.contacto.toLowerCase().includes(search.toLowerCase()) ||
+      c.nitCedula.toLowerCase().includes(search.toLowerCase())
   );
 
   const totalPages = Math.ceil(filteredClients.length / itemsPerPage);
@@ -155,7 +155,7 @@ export default function ClientesPage() {
           <div className="relative flex-1 max-w-sm">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Buscar cliente..."
+              placeholder="Buscar cliente, NIT o administrador..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="pl-10 bg-secondary/50 border-border/50"
@@ -179,9 +179,9 @@ export default function ClientesPage() {
               <TableHeader>
                 <TableRow className="border-border/50 hover:bg-transparent">
                   <TableHead className="text-muted-foreground">Cliente</TableHead>
+                  <TableHead className="text-muted-foreground">NIT / Cédula</TableHead>
                   <TableHead className="text-muted-foreground">Contacto</TableHead>
                   <TableHead className="text-muted-foreground">Dirección</TableHead>
-                  <TableHead className="text-muted-foreground">Frecuencia</TableHead>
                   <TableHead className="text-muted-foreground">Mantenimientos</TableHead>
                   <TableHead className="text-muted-foreground">Estado</TableHead>
                   <TableHead className="text-muted-foreground w-12"></TableHead>
@@ -208,6 +208,9 @@ export default function ClientesPage() {
                         </div>
                       </div>
                     </TableCell>
+                    <TableCell className="text-sm text-foreground/80">
+                      {client.nitCedula || "—"}
+                    </TableCell>
                     <TableCell>
                       <div className="space-y-1">
                         <p className="text-sm text-foreground/80">
@@ -233,12 +236,6 @@ export default function ClientesPage() {
                     </TableCell>
                     <TableCell className="text-sm text-foreground/80 max-w-48 truncate">
                       {client.direccion}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1.5 text-sm text-foreground/80">
-                        <CalendarClock className="h-3.5 w-3.5 text-cyan-neon" />
-                        Cada {client.frecuenciaMantenimiento} meses
-                      </div>
                     </TableCell>
                     <TableCell>
                       <Badge
@@ -353,7 +350,7 @@ export default function ClientesPage() {
           <DialogHeader>
             <DialogTitle className="text-foreground">Confirmar eliminación</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              ¿Seguro que quieres eliminar el cliente <strong>{clientToDelete?.edificio}</strong>? Esta acción no se puede deshacer.
+              ¿Seguro que quieres eliminar el cliente <strong>{clientToDelete?.edificio || clientToDelete?.nombre}</strong>? Esta acción no se puede deshacer.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

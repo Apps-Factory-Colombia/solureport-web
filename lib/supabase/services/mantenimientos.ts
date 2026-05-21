@@ -269,6 +269,24 @@ function mapContratoRow(row: any, contrato: any): Maintenance {
   };
 }
 
+function buildPreventiveMaintenanceCanonicalKey(maintenance: Maintenance) {
+  return [
+    maintenance.clienteId,
+    maintenance.fechaProgramada,
+    maintenance.tecnicoId,
+    maintenance.contratoMantenimientoId || "sin-contrato-mantenimiento",
+    maintenance.estado,
+  ].join("|");
+}
+
+function rankPreventiveMaintenance(maintenance: Maintenance) {
+  let score = 0;
+  if (maintenance.contratoMantenimientoId) score += 8;
+  if (maintenance.horaProgramada) score += 2;
+  if ((Number(maintenance.costoTecnicoTotal ?? 0) || 0) > 0) score += 1;
+  return score;
+}
+
 function normalizeMaintenanceParticipants(
   maintenanceId: string,
   tecnicoId: string | undefined,
@@ -605,11 +623,29 @@ export async function getMantenimientos(): Promise<Maintenance[]> {
     const allMaintenanceIds = [...maintenanceRows, ...contractRows].map((row) => row.id).filter(Boolean);
     const participantsByMaintenance = await getMaintenanceParticipantsMap(allMaintenanceIds);
 
-    return [...maintenanceRows, ...contractRows]
+    const normalizedRows = [...maintenanceRows, ...contractRows]
       .map((maintenance) => ({
         ...maintenance,
         participantes: participantsByMaintenance.get(maintenance.id) || undefined,
-      }))
+      }));
+
+    const canonicalByKey = new Map<string, Maintenance>();
+    normalizedRows.forEach((maintenance) => {
+      const key = buildPreventiveMaintenanceCanonicalKey(maintenance);
+      const current = canonicalByKey.get(key);
+      if (!current) {
+        canonicalByKey.set(key, maintenance);
+        return;
+      }
+
+      const currentScore = rankPreventiveMaintenance(current);
+      const nextScore = rankPreventiveMaintenance(maintenance);
+      if (nextScore > currentScore || (nextScore === currentScore && (maintenance.fechaCreacion || "") > (current.fechaCreacion || ""))) {
+        canonicalByKey.set(key, maintenance);
+      }
+    });
+
+    return Array.from(canonicalByKey.values())
       .sort((a, b) => b.fechaProgramada.localeCompare(a.fechaProgramada));
   });
 }

@@ -330,7 +330,7 @@ async function ensurePreventiveMaintenanceMirrors(): Promise<boolean> {
       : Promise.resolve({ data: [], error: null }),
     supabase
       .from("reportes_actividad")
-      .select("tecnico_id, cliente_id, fecha, descripcion")
+      .select("mantenimiento_id, tecnico_id, cliente_id, fecha, descripcion")
       .eq("tipo", "mantenimiento_preventivo"),
   ]);
 
@@ -345,6 +345,12 @@ async function ensurePreventiveMaintenanceMirrors(): Promise<boolean> {
       fechaByMantenimientoId.set(row.id, fecha);
     }
   }
+
+  const existingMaintenanceIds = new Set(
+    (mirroredReports || [])
+      .map((row: { mantenimiento_id?: string | null }) => row.mantenimiento_id)
+      .filter(Boolean) as string[]
+  );
 
   const existingKeys = new Set(
     (mirroredReports || []).map((row: {
@@ -372,6 +378,10 @@ async function ensurePreventiveMaintenanceMirrors(): Promise<boolean> {
       const mantenimientoId = row.mantenimiento_id || row.id;
       const fecha = fechaByMantenimientoId.get(mantenimientoId) || row.fecha_generacion?.split("T")[0] || "";
       if (!row.tecnico_id || !fecha) return false;
+
+      if (existingMaintenanceIds.has(mantenimientoId)) {
+        return false;
+      }
 
       return !existingKeys.has(buildMaintenanceMirrorKey({
         tecnicoId: row.tecnico_id,
@@ -687,6 +697,98 @@ function scoreLegacyActivityCompleteness(params: {
   return score;
 }
 
+function buildPreventiveMaintenanceCanonicalIdentity(report: ActivityReport) {
+  if (report.tipo !== "mantenimiento_preventivo") {
+    return report.id;
+  }
+
+  if (report.mantenimientoParticipanteId) {
+    return `preventive-participant:${report.mantenimientoParticipanteId}`;
+  }
+
+  if (report.mantenimientoId) {
+    return `preventive-maintenance:${report.mantenimientoId}|${report.tecnicoId}`;
+  }
+
+  return [
+    "preventive-fallback",
+    report.tecnicoId,
+    report.clienteId || "sin-cliente",
+    report.grupoId || "sin-grupo",
+    report.periodoId || "sin-periodo",
+    normalizeActivityMatchText(report.descripcion),
+    normalizeActivityMatchText(report.especificacion),
+  ].join("|");
+}
+
+function buildPreventiveMaintenanceFallbackIdentity(report: Pick<ActivityReport, "fecha" | "periodoId" | "grupoId" | "clienteId" | "descripcion" | "especificacion">) {
+  return [
+    report.periodoId || "sin-periodo",
+    report.grupoId || "sin-grupo",
+    report.clienteId || "sin-cliente",
+    normalizeActivityMatchText(report.descripcion),
+    normalizeActivityMatchText(report.especificacion),
+  ].join("|");
+}
+
+function normalizePreventiveMaintenanceIds(reports: ActivityReport[]) {
+  const maintenanceIdByFallback = new Map<string, string>();
+
+  reports.forEach((report) => {
+    if (report.tipo !== "mantenimiento_preventivo" || !report.mantenimientoId) return;
+    maintenanceIdByFallback.set(buildPreventiveMaintenanceFallbackIdentity(report), report.mantenimientoId);
+  });
+
+  return reports.map((report) => {
+    if (report.tipo !== "mantenimiento_preventivo" || report.mantenimientoId) {
+      return report;
+    }
+
+    const inferredMaintenanceId = maintenanceIdByFallback.get(buildPreventiveMaintenanceFallbackIdentity(report));
+    if (!inferredMaintenanceId) return report;
+
+    return {
+      ...report,
+      mantenimientoId: inferredMaintenanceId,
+    };
+  });
+}
+
+function scorePreventiveMaintenanceCandidate(report: ActivityReport) {
+  if (report.tipo !== "mantenimiento_preventivo") {
+    return 0;
+  }
+
+  let score = 0;
+
+  if (report.mantenimientoParticipanteId) score += 16;
+  if (report.mantenimientoId) score += 8;
+  if ((Number(report.costoActividad ?? 0) || 0) > 0) score += 4;
+  if ((Number(report.costoActividadDefault ?? 0) || 0) > 0) score += 2;
+  if ((Number(report.porcentajeParticipacion ?? 0) || 0) > 0) score += 1;
+
+  return score;
+}
+
+function shouldPreferPreventiveMaintenanceCandidate(current: ActivityReport | undefined, next: ActivityReport) {
+  if (!current) return true;
+
+  const currentScore = scorePreventiveMaintenanceCandidate(current);
+  const nextScore = scorePreventiveMaintenanceCandidate(next);
+
+  if (nextScore !== currentScore) {
+    return nextScore > currentScore;
+  }
+
+  const currentCreatedAt = current.fechaCreacion || "";
+  const nextCreatedAt = next.fechaCreacion || "";
+  if (nextCreatedAt !== currentCreatedAt) {
+    return nextCreatedAt > currentCreatedAt;
+  }
+
+  return next.id > current.id;
+}
+
 function isNewerActivityCandidate(currentDate?: string | null, nextDate?: string | null, currentId?: string | null, nextId?: string | null) {
   const normalizedCurrentDate = currentDate || "";
   const normalizedNextDate = nextDate || "";
@@ -734,10 +836,16 @@ function dedupeGroupActivityReports(reports: ActivityReport[]) {
         report.clienteId || "sin-cliente",
         normalizeActivityMatchText(report.descripcion),
       ].join("|")
-      : report.id;
+      : report.tipo === "mantenimiento_preventivo"
+        ? buildPreventiveMaintenanceCanonicalIdentity(report)
+        : report.id;
 
     const current = canonicalDirectReports.get(directKey);
-    if (!current || shouldReplaceLegacyCanonicalCandidate(current, report)) {
+    const shouldReplace = report.tipo === "mantenimiento_preventivo"
+      ? shouldPreferPreventiveMaintenanceCandidate(current, report)
+      : !current || shouldReplaceLegacyCanonicalCandidate(current, report);
+
+    if (shouldReplace) {
       canonicalDirectReports.set(directKey, report);
     }
   });
@@ -2410,7 +2518,8 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       console.error("Error cargando registros_actividades como reportes:", err);
     }
 
-    const dedupedReports = dedupeGroupActivityReports(reports);
+    const normalizedPreventiveReports = normalizePreventiveMaintenanceIds(reports);
+    const dedupedReports = dedupeGroupActivityReports(normalizedPreventiveReports);
     dedupedReports.sort((a, b) => {
       const dateCompare = b.fecha.localeCompare(a.fecha);
       if (dateCompare !== 0) return dateCompare;

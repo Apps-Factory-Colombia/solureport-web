@@ -288,7 +288,9 @@ function isSharedVisit(report: ActivityReport) {
 }
 
 function usesSharedBasePricing(report: ActivityReport) {
-  return isSharedVisit(report) || isGroupActivity(report);
+  return isGroupActivity(report)
+    || isSharedVisit(report)
+    || report.tipo === "mantenimiento_preventivo";
 }
 
 function getGroupActivityIdentity(report: ActivityReport) {
@@ -335,6 +337,28 @@ function dedupeReportsByTechnician(reports: ActivityReport[]) {
   );
 }
 
+function getPreventiveMaintenanceCanonicalKey(report: ActivityReport) {
+  if (report.tipo !== "mantenimiento_preventivo") return report.id;
+
+  return [
+    report.periodoId || "sin-periodo",
+    report.grupoId || "sin-grupo",
+    report.clienteId || "sin-cliente",
+    normalizeSearchValue(report.descripcion),
+    normalizeSearchValue(report.especificacion),
+    report.mantenimientoId || "sin-mantenimiento",
+  ].join("|");
+}
+
+function rankPreventiveMaintenanceReport(report: ActivityReport) {
+  let score = 0;
+  if (report.mantenimientoParticipanteId) score += 8;
+  if (report.mantenimientoId) score += 4;
+  if ((Number(report.costoActividad ?? 0) || 0) > 0) score += 2;
+  if ((Number(report.porcentajeParticipacion ?? 0) || 0) > 0) score += 1;
+  return score;
+}
+
 function sortReportsForSharedActivity(reports: ActivityReport[]) {
   return [...reports].sort((a, b) => {
     if (!!a.registroActividadId !== !!b.registroActividadId) {
@@ -357,11 +381,21 @@ function getVisualActivityIdentity(report: ActivityReport) {
     return getGroupActivityUiIdentity(report);
   }
 
-  if (isSharedVisit(report)) {
-    const identityPrefix = report.tipo === "mantenimiento_preventivo" ? "shared-maintenance-visual" : "shared-visit-visual";
+  if (report.tipo === "mantenimiento_preventivo") {
     return [
-      identityPrefix,
-      report.mantenimientoId || "sin-mantenimiento",
+      "shared-maintenance-visual",
+      report.periodoId || "sin-periodo",
+      report.grupoId,
+      report.clienteId || "sin-cliente",
+      normalizeSearchValue(report.descripcion),
+      normalizeSearchValue(report.especificacion),
+    ].join("|");
+  }
+
+  if (isSharedVisit(report)) {
+    return [
+      "shared-visit-visual",
+      report.visitaTecnicaId || "sin-visita",
       report.fecha,
       report.periodoId || "sin-periodo",
       report.grupoId,
@@ -388,9 +422,20 @@ function getSharedPricingIdentity(report: ActivityReport) {
 function getSharedVisitIdentity(report: ActivityReport) {
   if (!isSharedVisit(report)) return report.id;
 
+  if (report.tipo === "mantenimiento_preventivo") {
+    return [
+      "shared-maintenance",
+      report.periodoId || "sin-periodo",
+      report.grupoId,
+      report.clienteId || "sin-cliente",
+      normalizeSearchValue(report.descripcion),
+      normalizeSearchValue(report.especificacion),
+    ].join("|");
+  }
+
   return [
-    report.tipo === "mantenimiento_preventivo" ? "shared-maintenance" : "shared-visit",
-    report.mantenimientoId || "sin-mantenimiento",
+    "shared-visit",
+    report.visitaTecnicaId || "sin-visita",
     report.fecha,
     report.periodoId || "sin-periodo",
     report.grupoId,
@@ -1107,6 +1152,10 @@ export default function InformesPage() {
   const getReportContext = (report: ActivityReport) => {
     const tech = usersById.get(report.tecnicoId);
     const client = report.clienteId ? clientsById.get(report.clienteId) : null;
+    const reportYear = report.fecha ? new Date(`${report.fecha}T00:00:00`).getFullYear() : new Date().getFullYear();
+    const contract = report.clienteId
+      ? contracts.find((item) => item.clienteId === report.clienteId && item.anio === reportYear)
+      : undefined;
     const group = groupsById.get(report.grupoId);
     const tecnicoNombre = tech ? `${tech.nombre} ${tech.apellido}`.trim() : "—";
     const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
@@ -1114,7 +1163,7 @@ export default function InformesPage() {
     const edificio = client?.edificio || group?.nombre || tipoLabel;
     const visitCategoryLabel = report.tipo === "visita_tecnica" ? getVisitCategoryLabel(report.tipoVisita) : undefined;
     const puertasDetalle = report.tipo === "mantenimiento_preventivo" || report.tipo === "visita_tecnica"
-      ? formatClientDoorBreakdown(client)
+      ? formatClientDoorBreakdown(contract || client)
       : undefined;
     const normalizedObservaciones = report.tipo === "actividad_grupal"
       ? sanitizeGroupActivityObservations(report.observaciones)
@@ -1187,7 +1236,7 @@ export default function InformesPage() {
         puertasDetalle,
         direccionCliente: client?.direccion || "—",
         correoCliente: client?.correo || "—",
-        valorActividad: getExportTechnicalValue(report),
+        valorActividad: report.tipo === "visita_tecnica" ? undefined : getExportTechnicalValue(report),
         observaciones: observaciones || report.descripcion || "Sin detalle registrado.",
         fotosAntes: report.fotosAntes,
         fotosDespues: report.fotosDespues,
@@ -1482,8 +1531,27 @@ export default function InformesPage() {
   const buildGroupedActivityRows = useCallback((list: ActivityReport[]) => {
     const grouped = new Map<string, ActivityReport[]>();
     const uiScopedReports = dedupeGroupActivityRowsForUi(list);
+    const canonicalPreventiveByKey = new Map<string, ActivityReport>();
 
     uiScopedReports.forEach((report) => {
+      if (report.tipo !== "mantenimiento_preventivo") return;
+
+      const key = getPreventiveMaintenanceCanonicalKey(report);
+      const current = canonicalPreventiveByKey.get(key);
+      const currentScore = current ? rankPreventiveMaintenanceReport(current) : -1;
+      const nextScore = rankPreventiveMaintenanceReport(report);
+
+      if (!current || nextScore > currentScore || (nextScore === currentScore && (report.fechaCreacion || "") > (current.fechaCreacion || ""))) {
+        canonicalPreventiveByKey.set(key, report);
+      }
+    });
+
+    uiScopedReports.forEach((report) => {
+      if (report.tipo === "mantenimiento_preventivo") {
+        const canonical = canonicalPreventiveByKey.get(getPreventiveMaintenanceCanonicalKey(report));
+        if (canonical && canonical.id !== report.id) return;
+      }
+
       const key = usesSharedBasePricing(report)
         ? `${report.tipo}:${getVisualActivityIdentity(report)}`
         : report.id;

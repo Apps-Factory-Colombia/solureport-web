@@ -30,15 +30,13 @@ interface ClientDialogProps {
 function getInitialFormData(client?: Client | null) {
   return {
     nombre: client?.nombre || "",
+    nitCedula: client?.nitCedula || "",
     edificio: client?.edificio || "",
     direccion: client?.direccion || "",
     contacto: client?.contacto || "",
     correo: client?.correo || "",
     correoAliado: client?.correoAliado || "",
     telefono: client?.telefono || "",
-    frecuenciaMantenimiento: client?.frecuenciaMantenimiento || 4,
-    puertasPeatonales: client?.puertasPeatonales || 0,
-    puertasVehiculares: client?.puertasVehiculares || 0,
     estado: client?.estado || ("activo" as "activo" | "inactivo"),
   };
 }
@@ -93,6 +91,18 @@ export function ClientDialog({
               />
             </div>
             <div className="space-y-2">
+              <Label className="text-foreground/80">NIT o Cédula</Label>
+              <Input
+                value={formData.nitCedula}
+                onChange={(e) =>
+                  setFormData({ ...formData, nitCedula: e.target.value })
+                }
+                placeholder="Ej: 900123456-7"
+                className="bg-secondary/50 border-border/50"
+                required
+              />
+            </div>
+            <div className="space-y-2">
               <Label className="text-foreground/80">Edificio</Label>
               <Input
                 value={formData.edificio}
@@ -104,7 +114,7 @@ export function ClientDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label className="text-foreground/80">Nombre del contacto responsable</Label>
+              <Label className="text-foreground/80">Nombre del administrador</Label>
               <Input
                 value={formData.contacto}
                 onChange={(e) =>
@@ -173,68 +183,7 @@ export function ClientDialog({
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label className="text-foreground/80">Puertas Peatonales</Label>
-              <Input
-                type="number"
-                min="0"
-                value={formData.puertasPeatonales}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    puertasPeatonales: Number(e.target.value),
-                  })
-                }
-                className="bg-secondary/50 border-border/50"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label className="text-foreground/80">Puertas Vehiculares</Label>
-              <Input
-                type="number"
-                min="0"
-                value={formData.puertasVehiculares}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    puertasVehiculares: Number(e.target.value),
-                  })
-                }
-                className="bg-secondary/50 border-border/50"
-                required
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label className="text-foreground/80">
-                Frecuencia de Mantenimiento
-              </Label>
-              <Select
-                value={String(formData.frecuenciaMantenimiento)}
-                onValueChange={(v) =>
-                  setFormData({
-                    ...formData,
-                    frecuenciaMantenimiento: Number(v),
-                  })
-                }
-              >
-                <SelectTrigger className="bg-secondary/50 border-border/50">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="bg-card border-border">
-                  <SelectItem value="1">Cada 1 mes</SelectItem>
-                  <SelectItem value="2">Cada 2 meses</SelectItem>
-                  <SelectItem value="3">Cada 3 meses</SelectItem>
-                  <SelectItem value="4">Cada 4 meses</SelectItem>
-                  <SelectItem value="6">Cada 6 meses</SelectItem>
-                  <SelectItem value="12">Cada 12 meses</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
+            <div className="space-y-2 col-span-2">
               <Label className="text-foreground/80">Estado</Label>
               <Select
                 value={formData.estado}

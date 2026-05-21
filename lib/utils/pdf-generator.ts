@@ -87,6 +87,54 @@ function wrapPdfTextConservatively(value: string, maxCharsPerLine: number): stri
   return lines.join("\n");
 }
 
+function collapseArtificialLetterSpacing(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+
+  const tokens = normalized.split(" ").filter(Boolean);
+  if (tokens.length < 6) return normalized;
+
+  const charLikeTokenCount = tokens.filter((token) => /^[\p{L}\p{N}]$|^[.:,;()/#-]$/u.test(token)).length;
+  if (charLikeTokenCount / tokens.length < 0.7) {
+    return normalized;
+  }
+
+  const joined = tokens.join("")
+    .replace(/([:;,.])(?!\s|$)/g, "$1 ")
+    .replace(/(\d+\.)(\p{L})/gu, "$1 $2")
+    .replace(/([a-záéíóúüñ])([A-ZÁÉÍÓÚÜÑ]{1,4})(?=$|[^a-záéíóúüñ])/gu, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return joined || normalized;
+}
+
+function normalizePdfMultilineText(value: string): string {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[\u00A0\u202F\u2007\u2009\u200A\u3000]/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .split("\n")
+    .map((line) => collapseArtificialLetterSpacing(line))
+    .join("\n")
+    .trim();
+}
+
+function buildWrappedMultilineText(doc: jsPDF, value: string, maxWidth: number): string[] {
+  const normalized = normalizePdfMultilineText(value);
+  if (!normalized) return [];
+
+  return normalized
+    .split("\n")
+    .flatMap((line) => {
+      if (!line.trim()) return [""];
+      const wrapped = doc.splitTextToSize(line, maxWidth);
+      return Array.isArray(wrapped) ? wrapped : [String(wrapped)];
+    });
+}
+
 function normalizePdfHeaderLabel(value: string): string {
   return value
     .normalize("NFD")
@@ -362,12 +410,26 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
     doc.text("Observaciones", 14, y);
     y += 6;
 
-    doc.setFontSize(10);
+    const observationLines = buildWrappedMultilineText(doc, data.observaciones, pageWidth - 28);
+    const observationFontSize = observationLines.length > 28 ? 9 : 10;
+    const observationLineHeight = observationFontSize === 9 ? 4.3 : 4.8;
+
+    doc.setFontSize(observationFontSize);
     doc.setFont("helvetica", "normal");
     doc.setTextColor(60);
-    const lines = doc.splitTextToSize(data.observaciones, pageWidth - 28);
-    doc.text(lines, 14, y);
-    y += lines.length * 5 + 6;
+
+    observationLines.forEach((line) => {
+      checkPageBreak(observationLineHeight + 1);
+      if (line) {
+        doc.text(line, 14, y);
+        y += observationLineHeight;
+        return;
+      }
+
+      y += observationLineHeight * 0.6;
+    });
+
+    y += 4;
   }
 
   // Helper to render images in a grid

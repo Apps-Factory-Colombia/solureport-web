@@ -8,6 +8,7 @@ const CLIENTES_CACHE_TTL = 60_000;
 interface ClientRow {
   id: string;
   nombre: string;
+  nit_cedula?: string | null;
   edificio: string;
   direccion: string;
   contacto?: string | null;
@@ -25,6 +26,7 @@ function mapRow(row: ClientRow): Client {
   return {
     id: row.id,
     nombre: row.nombre,
+    nitCedula: row.nit_cedula || "",
     edificio: row.edificio,
     direccion: row.direccion,
     contacto: row.contacto || "",
@@ -65,6 +67,7 @@ export async function createCliente(client: Partial<Client>): Promise<Client> {
     .from("clientes")
     .insert({
       nombre: client.nombre,
+      nit_cedula: client.nitCedula || null,
       edificio: client.edificio,
       direccion: client.direccion,
       contacto: client.contacto,
@@ -86,6 +89,7 @@ export async function createCliente(client: Partial<Client>): Promise<Client> {
 export async function updateCliente(id: string, client: Partial<Client>): Promise<Client> {
   const updateData: Record<string, unknown> = {};
   if (client.nombre !== undefined) updateData.nombre = client.nombre;
+  if (client.nitCedula !== undefined) updateData.nit_cedula = client.nitCedula || null;
   if (client.edificio !== undefined) updateData.edificio = client.edificio;
   if (client.direccion !== undefined) updateData.direccion = client.direccion;
   if (client.contacto !== undefined) updateData.contacto = client.contacto;

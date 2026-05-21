@@ -47,6 +47,7 @@ export interface WorkGroup {
 export interface Client {
   id: string;
   nombre: string;
+  nitCedula: string;
   edificio: string;
   direccion: string;
   contacto: string;
@@ -169,6 +170,10 @@ export interface MaintenanceContract {
   anio: number;
   mesInicio: number;
   diaInicio: number;
+  puertasPeatonales: number;
+  puertasVehiculares: number;
+  valorPuertaPeatonal: number;
+  valorPuertaVehicular: number;
   costoTotalAnual: number;
   cantidadMantenimientos: number;
   costoPorMantenimiento: number;
