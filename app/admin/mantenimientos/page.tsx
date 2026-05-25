@@ -386,13 +386,8 @@ export default function MantenimientosPage() {
       return Number(maintenance.costoTecnicoTotal ?? 0) || 0;
     }
 
-    const contract = getMaintenanceContract(maintenance);
-    if (maintenance.valorRecaudado && maintenance.valorRecaudado > 0) {
-      return maintenance.valorRecaudado;
-    }
-
-    return contract?.costoPorMantenimiento || 0;
-  }, [getMaintenanceContract]);
+    return 0;
+  }, []);
 
   const getMaintenanceAnnualValue = useCallback((maintenance: Maintenance) => {
     return getMaintenanceContract(maintenance)?.costoTotalAnual || 0;
@@ -697,7 +692,7 @@ export default function MantenimientosPage() {
         : "Exportación del mes seleccionado en el calendario.",
       empresa: companyName,
       periodo: periodLabel,
-      headers: ["Cliente", "Puertas", "Avance", "Valor total", "Costo mant.", "Técnico", "Fecha", "Estado"],
+      headers: ["Cliente", "Puertas", "Avance", "Valor total", "Valor técnico", "Técnico", "Fecha", "Estado"],
       rows: calendarFilteredMaintenances.map((maintenance) => [
         getMaintenanceClientLabel(maintenance),
         formatClientDoorBreakdown(getMaintenanceContract(maintenance) || clientsById.get(maintenance.clienteId)) || `${getMaintenanceDoorCount(maintenance)} puertas`,
@@ -711,7 +706,7 @@ export default function MantenimientosPage() {
       summary: [
         { label: "Mantenimientos", value: String(calendarFilteredMaintenances.length) },
         {
-          label: "Costo total",
+          label: "Valor técnico total",
           value: formatCurrency(calendarFilteredMaintenances.reduce((sum, maintenance) => sum + getMaintenancePaymentCost(maintenance), 0)),
         },
         { label: "Vista", value: calendarSelectedDate ? "Día" : "Mes" },
@@ -1265,7 +1260,7 @@ export default function MantenimientosPage() {
                               {getMaintenanceParticipantNames(m).join(", ") || "Sin asignados"} · {m.fechaProgramada} {m.horaProgramada ? `· ${m.horaProgramada}` : ""}
                             </p>
                             <p className="text-xs text-muted-foreground">
-                              {getMaintenanceDoorCount(m)} puertas · avance {getMaintenanceProgressLabel(m)} · valor {formatCurrency(getMaintenanceAnnualValue(m))} · pago {formatCurrency(getMaintenancePaymentCost(m))}
+                              {getMaintenanceDoorCount(m)} puertas · avance {getMaintenanceProgressLabel(m)} · valor contrato {formatCurrency(getMaintenanceAnnualValue(m))} · valor técnico {formatCurrency(getMaintenancePaymentCost(m))}
                             </p>
                           </div>
                         </div>
@@ -1326,7 +1321,7 @@ export default function MantenimientosPage() {
                       <TableHead className="text-muted-foreground">Técnico</TableHead>
                       <TableHead className="text-muted-foreground">Fecha programada</TableHead>
                       <TableHead className="text-muted-foreground">Avance</TableHead>
-                      <TableHead className="text-muted-foreground">Costo mant.</TableHead>
+                      <TableHead className="text-muted-foreground">Valor técnico</TableHead>
                       <TableHead className="text-muted-foreground">Estado</TableHead>
                       <TableHead className="text-muted-foreground text-right">Acción</TableHead>
                     </TableRow>

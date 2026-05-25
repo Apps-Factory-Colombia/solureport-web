@@ -340,6 +340,10 @@ function dedupeReportsByTechnician(reports: ActivityReport[]) {
 function getPreventiveMaintenanceCanonicalKey(report: ActivityReport) {
   if (report.tipo !== "mantenimiento_preventivo") return report.id;
 
+  if (report.mantenimientoId) {
+    return `maintenance:${report.mantenimientoId}:${report.mantenimientoParticipanteId || report.tecnicoId}`;
+  }
+
   return [
     report.periodoId || "sin-periodo",
     report.grupoId || "sin-grupo",
@@ -382,6 +386,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   }
 
   if (report.tipo === "mantenimiento_preventivo") {
+    if (report.mantenimientoId) {
+      return `shared-maintenance-visual:${report.mantenimientoId}`;
+    }
+
     return [
       "shared-maintenance-visual",
       report.periodoId || "sin-periodo",
@@ -423,6 +431,10 @@ function getSharedVisitIdentity(report: ActivityReport) {
   if (!isSharedVisit(report)) return report.id;
 
   if (report.tipo === "mantenimiento_preventivo") {
+    if (report.mantenimientoId) {
+      return `shared-maintenance:${report.mantenimientoId}`;
+    }
+
     return [
       "shared-maintenance",
       report.periodoId || "sin-periodo",
@@ -1113,9 +1125,9 @@ export default function InformesPage() {
       .replace(/[^a-zA-Z0-9_-]/g, "") || "reporte";
   };
 
-  const getEvidenceCount = (report: ActivityReport) => {
+  const getEvidenceCount = useCallback((report: ActivityReport) => {
     return (report.fotosAntes?.length || 0) + (report.fotosDespues?.length || 0) + (report.fotoBitacora ? 1 : 0) + (report.fotoHerramienta ? 1 : 0);
-  };
+  }, []);
 
   const applySentState = (targetReport: ActivityReport, sentAt: string) => {
     setReports((current) => current.map((item) => {
@@ -1612,13 +1624,16 @@ export default function InformesPage() {
       });
   }, [grupoFilter, matchesActivitySearch]);
 
-  const filteredPreventivos = useMemo(() => filterGroupedRows(buildGroupedActivityRows(preventivos)), [buildGroupedActivityRows, filterGroupedRows, preventivos]);
-  const filteredVisitas = useMemo(() => filterGroupedRows(buildGroupedActivityRows(visitas)), [buildGroupedActivityRows, filterGroupedRows, visitas]);
+  const groupedPreventivos = useMemo(() => buildGroupedActivityRows(preventivos).filter((row) => row.reports.some((r) => getEvidenceCount(r) > 0)), [buildGroupedActivityRows, preventivos, getEvidenceCount]);
+  const groupedVisitas = useMemo(() => buildGroupedActivityRows(visitas), [buildGroupedActivityRows, visitas]);
+  const groupedGrupales = useMemo(() => buildGroupedActivityRows(grupales), [buildGroupedActivityRows, grupales]);
+  const filteredPreventivos = useMemo(() => filterGroupedRows(groupedPreventivos), [filterGroupedRows, groupedPreventivos]);
+  const filteredVisitas = useMemo(() => filterGroupedRows(groupedVisitas), [filterGroupedRows, groupedVisitas]);
   const filteredRecorridos = useMemo(() => sortReportsByNewestCreation(filterReports(recorridos)), [filterReports, recorridos]);
-  const filteredGrupales = useMemo(() => filterGroupedRows(buildGroupedActivityRows(grupales)), [buildGroupedActivityRows, filterGroupedRows, grupales]);
-  const groupedPreventivosCount = filteredPreventivos.length;
-  const groupedVisitasCount = filteredVisitas.length;
-  const groupedGrupalesCount = filteredGrupales.length;
+  const filteredGrupales = useMemo(() => filterGroupedRows(groupedGrupales), [filterGroupedRows, groupedGrupales]);
+  const groupedPreventivosCount = groupedPreventivos.length;
+  const groupedVisitasCount = groupedVisitas.length;
+  const groupedGrupalesCount = groupedGrupales.length;
 
   const paginatedPreventivos = useMemo(() => paginateReports(filteredPreventivos, tablePages.preventivos), [filteredPreventivos, tablePages.preventivos]);
   const paginatedVisitas = useMemo(() => paginateReports(filteredVisitas, tablePages.visitas), [filteredVisitas, tablePages.visitas]);
@@ -1724,11 +1739,7 @@ export default function InformesPage() {
         });
         const maintenanceDate = report.fecha || matchingMaintenance?.fechaRealizado || matchingMaintenance?.fechaProgramada || "";
         const reportedCost = Number(report.costoActividad) || 0;
-        const maintenanceValue = reportedCost > 0
-          ? reportedCost
-          : matchingMaintenance?.valorRecaudado && matchingMaintenance.valorRecaudado > 0
-            ? matchingMaintenance.valorRecaudado
-            : contract?.costoPorMantenimiento || 0;
+        const maintenanceValue = reportedCost;
 
         return {
           report,
@@ -1899,7 +1910,7 @@ export default function InformesPage() {
           { label: "Cliente", value: selectedPreventiveClientLabel },
           { label: "Total mensual / rango", value: formatCurrency(selectedPreventiveMaintenanceTotal) },
         ],
-        headers: ["Fecha", "Cliente", "Edificio", "Técnico", "Detalle", "Valor mantenimiento", "Cierre mensual"],
+        headers: ["Fecha", "Cliente", "Edificio", "Técnico", "Detalle", "Valor técnico", "Cierre mensual"],
         rows,
         totales: ["", "", "", "", "Total", formatCurrency(selectedPreventiveMaintenanceTotal), ""],
       });
@@ -2221,7 +2232,7 @@ export default function InformesPage() {
                   <Wrench className="h-5 w-5 text-blue-400" />
                 </div>
                 <div>
-                  <p className="text-xl font-bold text-foreground">{preventivos.length}</p>
+                  <p className="text-xl font-bold text-foreground">{groupedPreventivosCount}</p>
                   <p className="text-xs text-muted-foreground">Mant. Preventivos</p>
                 </div>
               </CardContent>

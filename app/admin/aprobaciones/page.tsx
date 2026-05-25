@@ -235,6 +235,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   }
 
   if (report.tipo === "mantenimiento_preventivo") {
+    if (report.mantenimientoId) {
+      return `shared-maintenance-visual:${report.mantenimientoId}`;
+    }
+
     return [
       "shared-maintenance-visual",
       report.periodoId || "sin-periodo",
@@ -266,6 +270,10 @@ function getSharedPricingIdentity(report: ActivityReport) {
   }
 
   if (report.tipo === "mantenimiento_preventivo") {
+    if (report.mantenimientoId) {
+      return `shared-maintenance:${report.mantenimientoId}`;
+    }
+
     return [
       "shared-maintenance",
       report.periodoId || "sin-periodo",
@@ -493,6 +501,10 @@ function dedupeSharedParticipantDrafts(drafts: SharedParticipantDraft[]) {
 function getPreventiveMaintenanceCanonicalKey(report: ActivityReport) {
   if (report.tipo !== "mantenimiento_preventivo") return report.id;
 
+  if (report.mantenimientoId) {
+    return `maintenance:${report.mantenimientoId}:${report.mantenimientoParticipanteId || report.tecnicoId}`;
+  }
+
   return [
     report.periodoId || "sin-periodo",
     report.grupoId || "sin-grupo",
@@ -542,7 +554,7 @@ export default function AprobacionesPage() {
   const [savingDefaultVisitCost, setSavingDefaultVisitCost] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
-  const previousCostDraftRef = useRef<number | null>(null);
+  const activeReportIdRef = useRef<string | null>(null);
 
   // Paginación
   const [currentPage, setCurrentPage] = useState(1);
@@ -825,6 +837,9 @@ export default function AprobacionesPage() {
       };
     });
   }, [normalizeParticipantDrafts]);
+  const rebalanceParticipantDraftsForTotal = useCallback((nextDrafts: SharedParticipantDraft[], nextTotal: number) => {
+    return syncParticipantDraftAmounts(redistributeParticipantDraftAmounts(nextDrafts, nextTotal));
+  }, [redistributeParticipantDraftAmounts, syncParticipantDraftAmounts]);
   const getNormalizedSharedParticipantDrafts = useCallback(() => {
     return normalizeParticipantDrafts(sharedParticipantDrafts).map((draft) => ({
       ...draft,
@@ -833,15 +848,20 @@ export default function AprobacionesPage() {
     }));
   }, [normalizeParticipantDrafts, sharedParticipantDrafts]);
   const handleSharedParticipantAmountChange = useCallback((reportId: string, value: string) => {
-    setSharedParticipantDrafts((current) => syncParticipantDraftAmounts(
-      current.map((draft) => {
-        if (draft.reportId !== reportId) return draft;
-        return {
-          ...draft,
-          amount: String(Math.max(0, Number(value || 0))),
-        };
-      })
-    ));
+    setSharedParticipantDrafts((current) => {
+      const next = syncParticipantDraftAmounts(
+        current.map((draft) => {
+          if (draft.reportId !== reportId) return draft;
+          return {
+            ...draft,
+            amount: String(Math.max(0, Number(value || 0))),
+          };
+        })
+      );
+      const nextTotal = next.reduce((sum, d) => sum + (Number(d.amount) || 0), 0);
+      setEditableCost(String(nextTotal));
+      return next;
+    });
   }, [syncParticipantDraftAmounts]);
   const handleEditableCostChange = useCallback((value: string) => {
     setEditableCost(value);
@@ -850,44 +870,30 @@ export default function AprobacionesPage() {
 
     setSharedParticipantDrafts((current) => {
       if (current.length === 0) return current;
-      return redistributeParticipantDraftAmounts(current, Number(value || 0));
+      return rebalanceParticipantDraftsForTotal(current, Number(value || 0));
     });
-  }, [redistributeParticipantDraftAmounts, selectedReport]);
-  useEffect(() => {
-    previousCostDraftRef.current = null;
-  }, [selectedReport?.id]);
-  useEffect(() => {
-    if (!selectedReport || !usesSharedBasePricing(selectedReport)) {
-      previousCostDraftRef.current = costDraft;
-      return;
-    }
-
-    if (previousCostDraftRef.current == null) {
-      previousCostDraftRef.current = costDraft;
-      return;
-    }
-
-    if (previousCostDraftRef.current === costDraft || sharedParticipantDrafts.length === 0) {
-      return;
-    }
-
-    previousCostDraftRef.current = costDraft;
-    setSharedParticipantDrafts((current) => redistributeParticipantDraftAmounts(current, costDraft));
-  }, [costDraft, redistributeParticipantDraftAmounts, selectedReport, sharedParticipantDrafts.length]);
+  }, [rebalanceParticipantDraftsForTotal, selectedReport]);
   useEffect(() => {
     if (!selectedReport) {
       setEditableCost("");
       setSharedParticipantDrafts([]);
       setSaveSuccessMessage(null);
+      activeReportIdRef.current = null;
       return;
     }
 
+    // Only reset if the report ID changed to avoid resetting while typing or after a background refresh
+    if (activeReportIdRef.current === selectedReport.id) {
+      return;
+    }
+    
+    activeReportIdRef.current = selectedReport.id;
     setEditableCost(String(getEditableValueForReport(selectedReport)));
     setSharedParticipantDrafts(usesSharedBasePricing(selectedReport)
-      ? buildSharedParticipantDrafts(selectedReport)
+      ? syncParticipantDraftAmounts(buildSharedParticipantDrafts(selectedReport))
       : []);
     setSaveSuccessMessage(null);
-  }, [buildSharedParticipantDrafts, getEditableValueForReport, selectedReport]);
+  }, [buildSharedParticipantDrafts, getEditableValueForReport, selectedReport, syncParticipantDraftAmounts]);
   const isSharedParticipantDraftDirty = useMemo(() => {
     if (!selectedReport || !usesSharedBasePricing(selectedReport)) return false;
 
@@ -1573,7 +1579,7 @@ export default function AprobacionesPage() {
     });
   }, [getActivityTotalForReport, getParticipantName, periodScopedReports]);
   const preventivos = useMemo(
-    () => groupedReports.filter((row) => row.tipo === "mantenimiento_preventivo"),
+    () => groupedReports.filter((row) => row.tipo === "mantenimiento_preventivo" && row.reports.some((r) => (r.fotosAntes?.length || 0) + (r.fotosDespues?.length || 0) + (r.fotoBitacora ? 1 : 0) > 0)),
     [groupedReports]
   );
   const visitas = useMemo(

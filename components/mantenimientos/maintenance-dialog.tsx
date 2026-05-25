@@ -118,7 +118,7 @@ function buildInitialFormData(maintenance?: Maintenance | null) {
     horaProgramada: maintenance?.horaProgramada || "",
     estado: maintenance?.estado || "programado" as MaintenanceStatus,
     observaciones: maintenance?.observaciones || "",
-    costoTecnicoTotal: String(Math.max(0, Math.round(Number(maintenance?.costoTecnicoTotal ?? maintenance?.valorRecaudado ?? 0) || 0))),
+    costoTecnicoTotal: String(Math.max(0, Math.round(Number(maintenance?.costoTecnicoTotal ?? 0) || 0))),
   };
 }
 
@@ -397,7 +397,7 @@ export function MaintenanceDialog({
           </div>
 
           <div className="space-y-2">
-            <Label className="text-foreground/80">Costo técnico total</Label>
+            <Label className="text-foreground/80">Valor técnico total</Label>
               <Input
                 type="number"
                 min="0"
@@ -409,6 +409,7 @@ export function MaintenanceDialog({
                 className="bg-secondary/50 border-border/50"
                 required
               />
+              <p className="text-xs text-muted-foreground">Déjalo en 0 mientras administración define el valor técnico real.</p>
           </div>
 
           <div className="space-y-3 rounded-lg border border-border/50 bg-secondary/20 p-4">

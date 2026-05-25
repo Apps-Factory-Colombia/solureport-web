@@ -59,6 +59,7 @@ const monthNames = [
 type ContractParticipantDraft = {
   usuarioId: string;
   porcentaje: string;
+  valorCalculado: string;
 };
 
 type CalculatedContractParticipantDraft = {
@@ -71,6 +72,7 @@ type ContractMaintenanceDraft = {
   mes: number;
   fechaProgramada: string;
   horaProgramada: string;
+  valorTecnico: string;
   tecnicoId: string;
   participantDrafts: ContractParticipantDraft[];
   participantSearch: string;
@@ -83,45 +85,36 @@ function buildDefaultParticipantDrafts(tecnicoId?: string) {
   return [{
     usuarioId: tecnicoId,
     porcentaje: "100",
+    valorCalculado: "0",
   }];
 }
 
-function calculateParticipantBreakdown(drafts: ContractParticipantDraft[], totalCost: number) {
+function calculateParticipantBreakdown(drafts: ContractParticipantDraft[], totalCost?: number) {
   const visibleDrafts = drafts.filter((draft) => !!draft.usuarioId);
   if (visibleDrafts.length === 0) {
     return {
       drafts: [] as CalculatedContractParticipantDraft[],
-      totalCost: Math.max(0, Math.round(Number(totalCost) || 0)),
+      totalCost: Math.max(0, Math.round(Number(totalCost ?? 0) || 0)),
       totalPercentage: 0,
       totalAssigned: 0,
       isBalanced: false,
     };
   }
 
-  const normalizedTotal = Math.max(0, Math.round(Number(totalCost) || 0));
   const normalizedDrafts = visibleDrafts.map((draft) => ({
     usuarioId: draft.usuarioId,
     porcentaje: Number((Math.max(0, Number(draft.porcentaje || 0) || 0)).toFixed(2)),
+    valorCalculado: Math.max(0, Math.round(Number(draft.valorCalculado || 0) || 0)),
   }));
   const totalPercentage = Number(normalizedDrafts.reduce((sum, draft) => sum + draft.porcentaje, 0).toFixed(2));
-
-  let assigned = 0;
-
-  const calculatedDrafts = normalizedDrafts.map((draft, index) => {
-    const valorCalculado = totalPercentage === 100 && index === normalizedDrafts.length - 1
-      ? Math.max(0, normalizedTotal - assigned)
-      : Math.max(0, Math.round((draft.porcentaje / 100) * normalizedTotal));
-
-    assigned += valorCalculado;
-
-    return {
-      usuarioId: draft.usuarioId,
-      porcentaje: String(draft.porcentaje),
-      valorCalculado: String(valorCalculado),
-    };
-  });
+  const calculatedDrafts = normalizedDrafts.map((draft) => ({
+    usuarioId: draft.usuarioId,
+    porcentaje: String(draft.porcentaje),
+    valorCalculado: String(draft.valorCalculado),
+  }));
 
   const totalAssigned = calculatedDrafts.reduce((sum, draft) => sum + (Number(draft.valorCalculado || 0) || 0), 0);
+  const normalizedTotal = Math.max(0, Math.round(Number(totalCost ?? totalAssigned) || 0));
 
   return {
     drafts: calculatedDrafts,
@@ -130,6 +123,58 @@ function calculateParticipantBreakdown(drafts: ContractParticipantDraft[], total
     totalAssigned,
     isBalanced: calculatedDrafts.length > 0 && totalPercentage === 100 && totalAssigned === normalizedTotal,
   };
+}
+
+function recalculateParticipantValuesFromPercentages(drafts: ContractParticipantDraft[], totalCost: number) {
+  const visibleDrafts = drafts.filter((draft) => !!draft.usuarioId);
+  const totalAssigned = Math.max(0, Math.round(Number(totalCost) || 0));
+
+  if (totalAssigned <= 0) {
+    return visibleDrafts.map((draft) => ({ ...draft, valorCalculado: "0" }));
+  }
+
+  let assigned = 0;
+  return visibleDrafts.map((draft, index) => {
+    const porcentaje = Math.max(0, Number(draft.porcentaje || 0) || 0);
+    const valorCalculado = index === visibleDrafts.length - 1
+      ? Math.max(0, totalAssigned - assigned)
+      : Math.max(0, Math.round((porcentaje / 100) * totalAssigned));
+
+    assigned += valorCalculado;
+
+    return {
+      ...draft,
+      porcentaje: String(porcentaje),
+      valorCalculado: String(valorCalculado),
+    };
+  });
+}
+
+function recalculateParticipantPercentagesFromValues(drafts: ContractParticipantDraft[]) {
+  const visibleDrafts = drafts.filter((draft) => !!draft.usuarioId);
+  const totalAssigned = visibleDrafts.reduce((sum, draft) => sum + (Math.max(0, Math.round(Number(draft.valorCalculado || 0) || 0))), 0);
+
+  if (totalAssigned <= 0) {
+    return visibleDrafts.length === 1
+      ? [{ ...visibleDrafts[0], porcentaje: "100" }]
+      : visibleDrafts;
+  }
+
+  let assignedPercentage = 0;
+  return visibleDrafts.map((draft, index) => {
+    const value = Math.max(0, Math.round(Number(draft.valorCalculado || 0) || 0));
+    const porcentaje = index === visibleDrafts.length - 1
+      ? Number((100 - assignedPercentage).toFixed(2))
+      : Number(((value / totalAssigned) * 100).toFixed(2));
+
+    assignedPercentage = Number((assignedPercentage + porcentaje).toFixed(2));
+
+    return {
+      ...draft,
+      porcentaje: String(Math.max(0, porcentaje)),
+      valorCalculado: String(value),
+    };
+  });
 }
 
 function buildContractMaintenanceDraftKey(mes: number, fechaProgramada: string) {
@@ -325,6 +370,7 @@ export default function ContratosPage() {
         mes: maintenance.mes,
         fechaProgramada: maintenance.fechaProgramada,
         horaProgramada: previous?.horaProgramada || "",
+        valorTecnico: previous?.valorTecnico || "0",
         tecnicoId: previous?.tecnicoId || "",
         participantDrafts: previous?.participantDrafts || [],
         participantSearch: previous?.participantSearch || "",
@@ -365,7 +411,7 @@ export default function ContratosPage() {
     return {
       ...draft,
       tecnicoId,
-      participantDrafts: [...visibleParticipants, { usuarioId: tecnicoId, porcentaje: "0" }],
+      participantDrafts: [...visibleParticipants, { usuarioId: tecnicoId, porcentaje: "0", valorCalculado: "0" }],
     };
   };
 
@@ -409,7 +455,7 @@ export default function ContratosPage() {
     updateCreateMaintenanceDraft(targetIndex, (draft) => {
       const visibleParticipants = draft.participantDrafts.filter((participant) => !!participant.usuarioId);
       const nextParticipants = checked
-        ? [...visibleParticipants, { usuarioId: userId, porcentaje: visibleParticipants.length === 0 ? "100" : "0" }]
+        ? [...visibleParticipants, { usuarioId: userId, porcentaje: visibleParticipants.length === 0 ? "100" : "0", valorCalculado: "0" }]
         : visibleParticipants.filter((participant) => participant.usuarioId !== userId);
 
       if (nextParticipants.length === 1) {
@@ -441,6 +487,7 @@ export default function ContratosPage() {
           ...draft,
           tecnicoId: source.tecnicoId,
           horaProgramada: source.horaProgramada,
+          valorTecnico: source.valorTecnico,
           participantDrafts: source.participantDrafts.map((participant) => ({ ...participant })),
           participantSearch: "",
           participantSelectorOpen: false,
@@ -456,15 +503,21 @@ export default function ContratosPage() {
 
     for (let index = 0; index < createMaintenanceDrafts.length; index += 1) {
       const draft = createMaintenanceDrafts[index];
-      const summary = calculateParticipantBreakdown(draft.participantDrafts, costoPorMant);
+      const technicalValue = Math.max(0, Math.round(Number(draft.valorTecnico || 0) || 0));
+      const summary = calculateParticipantBreakdown(draft.participantDrafts, technicalValue);
 
       if (!draft.tecnicoId) {
         window.alert(`Selecciona un técnico responsable para el mantenimiento ${index + 1}.`);
         return false;
       }
 
+      if (draft.valorTecnico.trim() === "" || Number.isNaN(Number(draft.valorTecnico))) {
+        window.alert(`Ingresa un valor técnico válido para el mantenimiento ${index + 1}.`);
+        return false;
+      }
+
       if (!summary.isBalanced) {
-        window.alert(`El reparto de participantes del mantenimiento ${index + 1} debe sumar 100% y coincidir con ${formatCurrency(costoPorMant)}.`);
+        window.alert(`El reparto de participantes del mantenimiento ${index + 1} debe sumar 100% y coincidir con ${formatCurrency(technicalValue)}.`);
         return false;
       }
     }
@@ -521,13 +574,14 @@ export default function ContratosPage() {
         const createdMaintenance = createdMaintenancesByKey.get(buildContractMaintenanceDraftKey(draft.mes, draft.fechaProgramada));
         if (!createdMaintenance) return;
 
-        const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, costoPorMantenimiento);
+        const technicalValue = Math.max(0, Math.round(Number(draft.valorTecnico || 0) || 0));
+        const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, technicalValue);
         await updateMantenimiento(createdMaintenance.id, {
           tecnicoId: draft.tecnicoId,
           fechaProgramada: draft.fechaProgramada,
           horaProgramada: draft.horaProgramada || undefined,
           estado: "programado" as MaintenanceStatus,
-          costoTecnicoTotal: costoPorMantenimiento,
+          costoTecnicoTotal: technicalValue,
           participantes: participantSummary.drafts.map((participant): MaintenanceParticipant => ({
             usuarioId: participant.usuarioId,
             porcentaje: Number(participant.porcentaje || 0) || 0,
@@ -1915,11 +1969,11 @@ export default function ContratosPage() {
                       <span className="font-semibold text-gold">{newCostoTotal ? formatCurrency(Number(newCostoTotal)) : "—"}</span>
                     </div>
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Costo por mantenimiento</span>
+                      <span className="text-muted-foreground">Referencia contrato por mantenimiento</span>
                       <span className="font-semibold text-gold">{costoPorMant > 0 ? formatCurrency(costoPorMant) : "—"}</span>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      En el siguiente paso podrás asignar técnico, hora y participantes a cada mantenimiento antes de crear el contrato.
+                      En el siguiente paso podrás asignar técnico, hora y participantes. El valor técnico real quedará pendiente para administración.
                     </p>
                   </div>
 
@@ -1946,7 +2000,7 @@ export default function ContratosPage() {
                     </p>
                   </div>
                   <div className="text-right text-sm">
-                    <p className="text-muted-foreground">Costo fijo por mantenimiento</p>
+                    <p className="text-muted-foreground">Referencia del contrato</p>
                     <p className="font-semibold text-gold">{formatCurrency(costoPorMant)}</p>
                   </div>
                 </div>
@@ -1955,7 +2009,8 @@ export default function ContratosPage() {
               <ScrollArea className="h-[52vh] rounded-xl border border-border/50 p-0">
                 <div className="space-y-4 p-4">
                   {createMaintenanceDrafts.map((draft, index) => {
-                    const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, costoPorMant);
+                    const technicalValue = Math.max(0, Math.round(Number(draft.valorTecnico || 0) || 0));
+                    const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, technicalValue);
                     const selectedParticipantIds = new Set(draft.participantDrafts.filter((participant) => !!participant.usuarioId).map((participant) => participant.usuarioId));
                     const filteredAssignableUsers = assignableUsers.filter((user) => {
                       const query = draft.participantSearch.trim().toLowerCase();
@@ -1968,14 +2023,14 @@ export default function ContratosPage() {
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div>
                             <p className="text-sm font-semibold text-foreground">Mantenimiento {index + 1} · {monthNames[draft.mes - 1]}</p>
-                            <p className="text-xs text-muted-foreground">Se creará en estado programado y con reparto técnico inicial.</p>
+                            <p className="text-xs text-muted-foreground">Se creará en estado programado y con reparto porcentual inicial.</p>
                           </div>
                           <Button type="button" variant="outline" className="border-border/50 bg-card text-xs" onClick={() => handleCopyDraftConfigurationToAll(index)}>
                             Copiar configuración al resto
                           </Button>
                         </div>
 
-                        <div className="grid gap-4 md:grid-cols-3">
+                        <div className="grid gap-4 md:grid-cols-4">
                           <div className="space-y-2">
                             <Label className="text-foreground/80">Fecha programada</Label>
                             <Input
@@ -2010,13 +2065,30 @@ export default function ContratosPage() {
                               </SelectContent>
                             </Select>
                           </div>
+                          <div className="space-y-2">
+                            <Label className="text-foreground/80">Valor técnico total</Label>
+                            <Input
+                              type="number"
+                              min="0"
+                              value={draft.valorTecnico}
+                              onChange={(event) => updateCreateMaintenanceDraft(index, (current) => ({
+                                ...current,
+                                valorTecnico: event.target.value,
+                                participantDrafts: recalculateParticipantValuesFromPercentages(
+                                  current.participantDrafts,
+                                  Number(event.target.value || 0)
+                                ),
+                              }))}
+                              className="bg-card border-border/50"
+                            />
+                          </div>
                         </div>
 
                         <div className="rounded-lg border border-border/50 bg-card/70 p-4 space-y-3">
                           <div className="flex flex-wrap items-center justify-between gap-3">
                             <div>
                               <p className="text-sm font-medium text-foreground">Participantes</p>
-                              <p className="text-xs text-muted-foreground">La suma debe ser 100% para repartir {formatCurrency(costoPorMant)}.</p>
+                              <p className="text-xs text-muted-foreground">Usa el valor técnico total para repartir por porcentaje, o ajusta valores individuales para recalcular el total.</p>
                             </div>
                             <Popover open={draft.participantSelectorOpen} onOpenChange={(open) => updateCreateMaintenanceDraft(index, (current) => ({ ...current, participantSelectorOpen: open }))}>
                               <PopoverTrigger asChild>
@@ -2082,16 +2154,34 @@ export default function ContratosPage() {
                                         value={participant.porcentaje}
                                         onChange={(event) => updateCreateMaintenanceDraft(index, (current) => ({
                                           ...current,
-                                          participantDrafts: current.participantDrafts.map((item) => item.usuarioId === participant.usuarioId ? { ...item, porcentaje: event.target.value } : item),
+                                          participantDrafts: recalculateParticipantValuesFromPercentages(
+                                            current.participantDrafts.map((item) => item.usuarioId === participant.usuarioId ? { ...item, porcentaje: event.target.value } : item),
+                                            Number(current.valorTecnico || 0)
+                                          ),
                                         }))}
                                         className="h-9 bg-card border-border/50"
                                       />
                                     </div>
                                     <div className="space-y-1">
                                       <Label className="text-[11px] text-muted-foreground">Valor</Label>
-                                      <div className="flex h-9 items-center rounded-md border border-border/50 bg-card px-3 text-sm text-foreground">
-                                        {formatCurrency(Number(calculatedParticipant?.valorCalculado || 0) || 0)}
-                                      </div>
+                                      <Input
+                                        type="number"
+                                        min="0"
+                                        value={calculatedParticipant?.valorCalculado || participant.valorCalculado || "0"}
+                                        onChange={(event) => updateCreateMaintenanceDraft(index, (current) => {
+                                          const nextParticipants = recalculateParticipantPercentagesFromValues(current.participantDrafts.map((item) => item.usuarioId === participant.usuarioId
+                                            ? { ...item, valorCalculado: event.target.value }
+                                            : item));
+                                          const nextSummary = calculateParticipantBreakdown(nextParticipants);
+
+                                          return {
+                                            ...current,
+                                            valorTecnico: String(nextSummary.totalAssigned),
+                                            participantDrafts: nextParticipants,
+                                          };
+                                        })}
+                                        className="h-9 bg-card border-border/50"
+                                      />
                                     </div>
                                     <Button
                                       type="button"
@@ -2116,10 +2206,10 @@ export default function ContratosPage() {
                           )}>
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <span>Porcentaje total: {participantSummary.totalPercentage}%</span>
-                              <span>Valor asignado: {formatCurrency(participantSummary.totalAssigned)}</span>
+                              <span>Valor técnico total: {formatCurrency(technicalValue)}</span>
                             </div>
                             {!participantSummary.isBalanced && (
-                              <p className="mt-1">Ajusta el reparto hasta completar 100% y {formatCurrency(costoPorMant)}.</p>
+                              <p className="mt-1">Ajusta el reparto hasta completar 100% y {formatCurrency(technicalValue)}.</p>
                             )}
                           </div>
                         </div>

@@ -216,7 +216,6 @@ async function upsertExecutableMaintenanceFromContract(
   if (clientError) throw clientError;
 
   const liderId = await resolveMaintenanceLeaderId(tecnicoId);
-  const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? contratoMant.costo_tecnico_total ?? 0) || 0));
   const estadoContrato = String((m.estado ?? contratoMant.estado) || "programado").toLowerCase();
   const estadoEjecutable = estadoContrato === "realizado" || estadoContrato === "completado"
     ? "realizado"
@@ -224,6 +223,9 @@ async function upsertExecutableMaintenanceFromContract(
       ? "pendiente"
       : "programado";
   const clientLabel = client?.edificio || client?.nombre || "cliente";
+  const costoTecnicoTotal = Math.max(0, Math.round(Number(
+    m.costoTecnicoTotal ?? existing?.costo_tecnico_total ?? 0
+  ) || 0));
 
   const payload: Record<string, unknown> = {
     cliente_id: clienteId,
@@ -425,7 +427,7 @@ async function upsertMaintenanceParticipantActivityReports(params: {
       .in("id", participantUserIds),
     supabase
       .from("reportes_actividad")
-      .select("id, tecnico_id, descripcion")
+      .select("id, tecnico_id, descripcion, mantenimiento_id, mantenimiento_participante_id")
       .eq("tipo", "mantenimiento_preventivo")
       .eq("fecha", params.fecha)
       .eq("mantenimiento_id", params.maintenanceId),
@@ -457,14 +459,39 @@ async function upsertMaintenanceParticipantActivityReports(params: {
   }
 
   if (!periodoId) {
+    console.warn(`upsertMaintenanceParticipantActivityReports: no open period found for maintenance ${params.maintenanceId}`);
     return;
   }
 
   const usersById = new Map((users || []).map((user: { id: string; grupo_id?: string | null }) => [user.id, user]));
   const groupsById = new Map<string, string | null>();
 
+  const groupIdsToResolve = Array.from(new Set(
+    (users || []).map((user: { grupo_id?: string | null }) => user.grupo_id).filter(Boolean) as string[]
+  ));
+
+  const usersWithoutGroup = (users || []).filter((user: { grupo_id?: string | null }) => !user.grupo_id);
+  if (usersWithoutGroup.length > 0) {
+    const techIdsWithoutGroup = usersWithoutGroup.map((u: { id: string }) => u.id);
+    const { data: ledGroups, error: ledGroupsError } = await supabase
+      .from("grupos_trabajo")
+      .select("id, lider_id")
+      .in("lider_id", techIdsWithoutGroup);
+    if (ledGroupsError) throw ledGroupsError;
+    for (const g of ledGroups || []) {
+      if (!groupIdsToResolve.includes(g.id)) {
+        groupIdsToResolve.push(g.id);
+      }
+      groupsById.set(g.id, g.lider_id || null);
+      const member = usersWithoutGroup.find((u: { id: string }) => u.id === g.lider_id);
+      if (member) {
+        (member as Record<string, unknown>).grupo_id = g.id;
+      }
+    }
+  }
+
   await Promise.all(
-    Array.from(new Set((users || []).map((user: { grupo_id?: string | null }) => user.grupo_id).filter(Boolean) as string[])).map(async (groupId) => {
+    groupIdsToResolve.filter((gid) => !groupsById.has(gid)).map(async (groupId) => {
       const { data: group, error: groupError } = await supabase
         .from("grupos_trabajo")
         .select("id, lider_id")
@@ -476,17 +503,35 @@ async function upsertMaintenanceParticipantActivityReports(params: {
   );
 
   const existingReportByParticipantKey = new Map(
-    (existingReports || []).map((report: { id: string; tecnico_id: string; descripcion?: string | null }) => [
-      `${report.tecnico_id}|${report.descripcion || ""}`,
-      report,
-    ])
+    (existingReports || []).flatMap((report: {
+      id: string;
+      tecnico_id: string;
+      descripcion?: string | null;
+      mantenimiento_id?: string | null;
+      mantenimiento_participante_id?: string | null;
+    }) => {
+      const keys = [
+        `${report.tecnico_id}|${report.descripcion || ""}`,
+        `${report.tecnico_id}|${report.mantenimiento_id || params.maintenanceId}`,
+      ];
+
+      if (report.mantenimiento_participante_id) {
+        keys.unshift(`participant:${report.mantenimiento_participante_id}`);
+      }
+
+      return keys.map((key) => [key, report] as const);
+    })
   );
 
   await Promise.all(params.participants.map(async (participant) => {
     const user = usersById.get(participant.usuarioId);
     const grupoId = user?.grupo_id || null;
     const liderId = grupoId ? (groupsById.get(grupoId) || null) : null;
-    const existingReport = existingReportByParticipantKey.get(`${participant.usuarioId}|${params.descripcion}`);
+    const existingReport = (participant.id
+      ? existingReportByParticipantKey.get(`participant:${participant.id}`)
+      : undefined)
+      || existingReportByParticipantKey.get(`${participant.usuarioId}|${params.maintenanceId}`)
+      || existingReportByParticipantKey.get(`${participant.usuarioId}|${params.descripcion}`);
     const payload = {
       tipo: "mantenimiento_preventivo",
       tecnico_id: participant.usuarioId,
@@ -505,6 +550,7 @@ async function upsertMaintenanceParticipantActivityReports(params: {
     };
 
     if (!payload.grupo_id || !payload.lider_grupo_id) {
+      console.warn(`upsertMaintenanceParticipantActivityReports: skipping participant ${participant.usuarioId} for maintenance ${params.maintenanceId} - no grupo_id/lider_grupo_id resolved`);
       return;
     }
 
@@ -604,7 +650,6 @@ export async function getMantenimientos(): Promise<Maintenance[]> {
         maintenance.clienteId,
         maintenance.tecnicoId,
         maintenance.fechaProgramada,
-        String(maintenance.estado).toLowerCase(),
       ].join("|"))
     );
     const contractRows = mantenimientosContrato
@@ -615,7 +660,6 @@ export async function getMantenimientos(): Promise<Maintenance[]> {
           contrato?.cliente_id || "",
           mant.tecnico_id || "",
           toDateOnly(mant.fecha_programada),
-          String(mant.estado).toLowerCase(),
         ].join("|");
         return !executableMaintenanceKeys.has(key);
       })
@@ -651,7 +695,7 @@ export async function getMantenimientos(): Promise<Maintenance[]> {
 }
 
 export async function createMantenimiento(m: Partial<Maintenance>): Promise<Maintenance> {
-  const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? m.valorRecaudado ?? 0) || 0));
+  const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? 0) || 0));
   const liderId = await resolveMaintenanceLeaderId(m.tecnicoId);
   const { data, error } = await supabase
     .from("mantenimientos")
@@ -723,16 +767,18 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
       .maybeSingle();
     if (contratoError) throw contratoError;
 
-    invalidateMantenimientosCache();
-    const costoTecnicoTotal = Math.max(0, Math.round(Number(m.costoTecnicoTotal ?? contratoMant.costo_tecnico_total ?? 0) || 0));
-
     const executableMaintenance = await upsertExecutableMaintenanceFromContract(contratoMant, contrato, {
       ...m,
       tecnicoId: m.tecnicoId ?? contratoMant.tecnico_id,
       fechaProgramada: toDateOnly(contratoMant.fecha_programada),
       estado: m.estado ?? contratoMant.estado,
-      costoTecnicoTotal,
+      costoTecnicoTotal: m.costoTecnicoTotal,
     });
+
+    invalidateMantenimientosCache();
+    const costoTecnicoTotal = Math.max(0, Math.round(Number(
+      m.costoTecnicoTotal ?? executableMaintenance?.costo_tecnico_total ?? 0
+    ) || 0));
 
     if (executableMaintenance?.id) {
       await replaceMaintenanceParticipants(
