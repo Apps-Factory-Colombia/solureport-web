@@ -105,6 +105,17 @@ interface ReporteActividadFotoRow {
   url: string;
 }
 
+interface MaintenancePhotoRow {
+  mantenimiento_id: string;
+  tipo: string;
+  url: string;
+}
+
+interface MaintenanceMetadataRow {
+  id: string;
+  foto_bitacora_url?: string | null;
+}
+
 interface MaintenanceParticipantRow {
   id: string;
   maintenance_id: string;
@@ -418,6 +429,10 @@ function chunkArray<T>(items: T[], size: number): T[][] {
   }
 
   return chunks;
+}
+
+function mergeUniquePhotoUrls(...photoGroups: Array<string[] | undefined>): string[] {
+  return Array.from(new Set(photoGroups.flatMap((group) => group || []).filter(Boolean)));
 }
 
 function parseLegacyGroupActivityReportId(id: string) {
@@ -2280,14 +2295,35 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 
     if (visitLiquidationError) throw visitLiquidationError;
 
-    const { data: maintenanceParticipantRows, error: maintenanceParticipantRowsError } = preventiveMaintenanceIds.length > 0
-      ? await supabase
-        .from("mantenimiento_participantes")
-        .select("id, maintenance_id, usuario_id, porcentaje, valor_calculado")
-        .in("maintenance_id", preventiveMaintenanceIds)
-      : { data: [], error: null };
+    const [
+      { data: maintenanceParticipantRows, error: maintenanceParticipantRowsError },
+      { data: maintenancePhotoRows, error: maintenancePhotoRowsError },
+      { data: maintenanceMetadataRows, error: maintenanceMetadataRowsError },
+    ] = preventiveMaintenanceIds.length > 0
+      ? await Promise.all([
+        supabase
+          .from("mantenimiento_participantes")
+          .select("id, maintenance_id, usuario_id, porcentaje, valor_calculado")
+          .in("maintenance_id", preventiveMaintenanceIds),
+        supabase
+          .from("mantenimiento_fotos")
+          .select("mantenimiento_id, tipo, url, orden")
+          .in("mantenimiento_id", preventiveMaintenanceIds)
+          .order("orden"),
+        supabase
+          .from("mantenimientos")
+          .select("id, foto_bitacora_url")
+          .in("id", preventiveMaintenanceIds),
+      ])
+      : [
+        { data: [], error: null },
+        { data: [], error: null },
+        { data: [], error: null },
+      ];
 
     if (maintenanceParticipantRowsError) throw maintenanceParticipantRowsError;
+    if (maintenancePhotoRowsError) throw maintenancePhotoRowsError;
+    if (maintenanceMetadataRowsError) throw maintenanceMetadataRowsError;
 
     const companySettings = await companySettingsPromise;
 
@@ -2306,6 +2342,8 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       fallback: new Map<string, RecorridoMirrorRow>(),
     };
     const maintenanceParticipantMaps = buildMaintenanceParticipantMaps((maintenanceParticipantRows || []) as MaintenanceParticipantRow[]);
+    const maintenancePhotosById = new Map<string, { antes: string[]; despues: string[] }>();
+    const maintenanceBitacoraById = new Map<string, string>();
 
     for (const row of (visitMirrorData || []) as VisitMirrorRow[]) {
       const fecha = row.fecha_inicio?.split("T")[0] || "";
@@ -2371,6 +2409,20 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       }
     }
 
+    for (const row of (maintenancePhotoRows || []) as MaintenancePhotoRow[]) {
+      if (!row.mantenimiento_id) continue;
+
+      const current = maintenancePhotosById.get(row.mantenimiento_id) || { antes: [], despues: [] };
+      if (row.tipo === "antes") current.antes.push(row.url);
+      if (row.tipo === "despues") current.despues.push(row.url);
+      maintenancePhotosById.set(row.mantenimiento_id, current);
+    }
+
+    for (const row of (maintenanceMetadataRows || []) as MaintenanceMetadataRow[]) {
+      if (!row.id || !row.foto_bitacora_url) continue;
+      maintenanceBitacoraById.set(row.id, row.foto_bitacora_url);
+    }
+
     const fotosByReporte = new Map<string, Array<{ tipo: string; url: string }>>();
     for (const foto of (fotosData || []) as ReporteActividadFotoRow[]) {
       const reporteId = foto.reporte_actividad_id;
@@ -2388,9 +2440,25 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 
     for (const row of data || []) {
       const fotos = fotosByReporte.get(row.id) || [];
-      const fotosAntes = fotos.filter((f) => f.tipo === "antes").map((f) => f.url);
-      const fotosDespues = fotos.filter((f) => f.tipo === "despues").map((f) => f.url);
-      const visitEnrichedReport = enrichVisitReport(mapReport(row, fotosAntes, fotosDespues), visitMirrors);
+      const maintenanceId = row.mantenimiento_id || undefined;
+      const maintenancePhotos = maintenanceId ? maintenancePhotosById.get(maintenanceId) : undefined;
+      const fotosAntes = mergeUniquePhotoUrls(
+        fotos.filter((f) => f.tipo === "antes").map((f) => f.url),
+        row.tipo === "mantenimiento_preventivo" ? maintenancePhotos?.antes : undefined
+      );
+      const fotosDespues = mergeUniquePhotoUrls(
+        fotos.filter((f) => f.tipo === "despues").map((f) => f.url),
+        row.tipo === "mantenimiento_preventivo" ? maintenancePhotos?.despues : undefined
+      );
+      const baseReport = mapReport(row, fotosAntes, fotosDespues);
+      const maintenanceEnrichedReport = row.tipo === "mantenimiento_preventivo"
+        ? {
+          ...baseReport,
+          bitacora: baseReport.bitacora || Boolean(maintenanceId && maintenanceBitacoraById.get(maintenanceId)),
+          fotoBitacora: (maintenanceId && maintenanceBitacoraById.get(maintenanceId)) || baseReport.fotoBitacora,
+        }
+        : baseReport;
+      const visitEnrichedReport = enrichVisitReport(maintenanceEnrichedReport, visitMirrors);
       const mappedReport = enrichRecorridoReport(
         enrichVisitLiquidationReport(
           enrichPreventiveMaintenanceReport(visitEnrichedReport, row, maintenanceParticipantMaps),

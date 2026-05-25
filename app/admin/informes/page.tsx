@@ -1236,7 +1236,9 @@ export default function InformesPage() {
         puertasDetalle,
         direccionCliente: client?.direccion || "—",
         correoCliente: client?.correo || "—",
-        valorActividad: report.tipo === "visita_tecnica" ? undefined : getExportTechnicalValue(report),
+        valorActividad: report.tipo === "visita_tecnica" || report.tipo === "mantenimiento_preventivo"
+          ? undefined
+          : getExportTechnicalValue(report),
         observaciones: observaciones || report.descripcion || "Sin detalle registrado.",
         fotosAntes: report.fotosAntes,
         fotosDespues: report.fotosDespues,
