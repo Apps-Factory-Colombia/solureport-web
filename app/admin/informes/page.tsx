@@ -75,7 +75,7 @@ import { getContratos } from "@/lib/supabase/services/contratos";
 import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
-import { formatClientDoorBreakdown, sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
+import { buildReportMultilineText, formatClientDoorBreakdown, getDisplayReportObservations, getReportServiceDetail } from "@/lib/utils/report-content";
 
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 const TABLE_PAGE_SIZE = 10;
@@ -1115,8 +1115,7 @@ export default function InformesPage() {
     return "Actividades Grupales";
   };
 
-  const buildMultilineText = (parts: Array<string | undefined | null>) =>
-    parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
+  const buildMultilineText = buildReportMultilineText;
 
   const getSafeFileSegment = (value: string) => {
     return value
@@ -1174,14 +1173,11 @@ export default function InformesPage() {
     const tipoLabel = getTipoLabel(report.tipo);
     const edificio = client?.edificio || group?.nombre || tipoLabel;
     const visitCategoryLabel = report.tipo === "visita_tecnica" ? getVisitCategoryLabel(report.tipoVisita) : undefined;
+    const maintenanceDetail = getReportServiceDetail(report);
     const puertasDetalle = report.tipo === "mantenimiento_preventivo" || report.tipo === "visita_tecnica"
       ? formatClientDoorBreakdown(contract || client)
       : undefined;
-    const normalizedObservaciones = report.tipo === "actividad_grupal"
-      ? sanitizeGroupActivityObservations(report.observaciones)
-      : report.tipo === "visita_tecnica"
-        ? sanitizeTechnicalVisitObservations(report.observaciones)
-        : report.observaciones?.trim() || undefined;
+    const normalizedObservaciones = getDisplayReportObservations(report);
 
     const observaciones = (() => {
       if (report.tipo === "visita_tecnica") {
@@ -1205,6 +1201,14 @@ export default function InformesPage() {
           report.descripcion,
           report.especificacion ? `Especificación: ${report.especificacion}` : undefined,
           normalizedObservaciones,
+        ]);
+      }
+
+      if (report.tipo === "mantenimiento_preventivo") {
+        return buildMultilineText([
+          maintenanceDetail,
+          normalizedObservaciones,
+          !maintenanceDetail ? report.descripcion : undefined,
         ]);
       }
 
@@ -1251,7 +1255,7 @@ export default function InformesPage() {
         valorActividad: report.tipo === "visita_tecnica" || report.tipo === "mantenimiento_preventivo"
           ? undefined
           : getExportTechnicalValue(report),
-        observaciones: observaciones || report.descripcion || "Sin detalle registrado.",
+        observaciones: observaciones || maintenanceDetail || report.descripcion || "Sin detalle registrado.",
         fotosAntes: report.fotosAntes,
         fotosDespues: report.fotosDespues,
         fotoBitacora: report.fotoBitacora,
@@ -1266,12 +1270,9 @@ export default function InformesPage() {
     const operationalEmail = companySettings?.correoEmpresa || DEFAULT_NOTIFICATION_BCC;
     const clienteNombre = client?.contacto || client?.nombre || "Cliente";
     const fileBaseName = getSafeFileSegment(client?.edificio || group?.nombre || tipoLabel);
-    const normalizedObservaciones = report.tipo === "actividad_grupal"
-      ? sanitizeGroupActivityObservations(report.observaciones)
-      : report.tipo === "visita_tecnica"
-        ? sanitizeTechnicalVisitObservations(report.observaciones)
-        : report.observaciones?.trim() || undefined;
-    const resumen = report.descripcion || report.especificacion || normalizedObservaciones || `Servicio de ${tipoLabel.toLowerCase()}`;
+    const maintenanceDetail = getReportServiceDetail(report);
+    const normalizedObservaciones = getDisplayReportObservations(report);
+    const resumen = maintenanceDetail || report.descripcion || report.especificacion || normalizedObservaciones || `Servicio de ${tipoLabel.toLowerCase()}`;
 
     const detailLines = (() => {
       if (report.tipo === "visita_tecnica") {
@@ -1296,6 +1297,14 @@ export default function InformesPage() {
           report.descripcion,
           report.especificacion ? `Especificación: ${report.especificacion}` : undefined,
           normalizedObservaciones,
+        ]);
+      }
+
+      if (report.tipo === "mantenimiento_preventivo") {
+        return buildMultilineText([
+          maintenanceDetail,
+          normalizedObservaciones,
+          !maintenanceDetail ? report.descripcion : undefined,
         ]);
       }
 
@@ -3353,6 +3362,13 @@ export default function InformesPage() {
                   <p className="text-sm text-foreground">{activeDetailReport.descripcion || "—"}</p>
                 </div>
 
+                {getReportServiceDetail(activeDetailReport) && (
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                    <p className="text-xs text-muted-foreground">Actividades realizadas</p>
+                    <p className="text-sm text-foreground whitespace-pre-wrap">{getReportServiceDetail(activeDetailReport)}</p>
+                  </div>
+                )}
+
                 {activeDetailReport.especificacion && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Especificación</p>
@@ -3360,10 +3376,10 @@ export default function InformesPage() {
                   </div>
                 )}
 
-                {activeDetailReport.observaciones && (
+                {getDisplayReportObservations(activeDetailReport) && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Observaciones</p>
-                    <p className="text-sm text-foreground">{activeDetailReport.observaciones}</p>
+                    <p className="text-sm text-foreground whitespace-pre-wrap">{getDisplayReportObservations(activeDetailReport)}</p>
                   </div>
                 )}
 

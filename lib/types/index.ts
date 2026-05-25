@@ -260,6 +260,7 @@ export interface ActivityReport {
   fecha: string;
   clienteId?: string;
   descripcion: string;
+  actividadesRealizadas?: string;
   especificacion?: string;
   observaciones?: string;
   fotosAntes?: string[];

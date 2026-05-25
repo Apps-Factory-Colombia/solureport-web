@@ -113,6 +113,8 @@ interface MaintenancePhotoRow {
 
 interface MaintenanceMetadataRow {
   id: string;
+  observaciones?: string | null;
+  actividades_realizadas?: string | null;
   foto_bitacora_url?: string | null;
 }
 
@@ -2414,7 +2416,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           .order("orden"),
         supabase
           .from("mantenimientos")
-          .select("id, foto_bitacora_url")
+          .select("id, observaciones, actividades_realizadas, foto_bitacora_url")
           .in("id", preventiveMaintenanceIds),
       ])
       : [
@@ -2446,6 +2448,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     const maintenanceParticipantMaps = buildMaintenanceParticipantMaps((maintenanceParticipantRows || []) as MaintenanceParticipantRow[]);
     const maintenancePhotosById = new Map<string, { antes: string[]; despues: string[] }>();
     const maintenanceBitacoraById = new Map<string, string>();
+    const maintenanceMetadataById = new Map<string, MaintenanceMetadataRow>();
     const maintenanceIdsWithParticipantReports = new Set<string>();
     const orphanMaintenanceMetadataById = new Map<string, Partial<ActivityReport>>();
 
@@ -2523,8 +2526,11 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     }
 
     for (const row of (maintenanceMetadataRows || []) as MaintenanceMetadataRow[]) {
-      if (!row.id || !row.foto_bitacora_url) continue;
-      maintenanceBitacoraById.set(row.id, row.foto_bitacora_url);
+      if (!row.id) continue;
+      maintenanceMetadataById.set(row.id, row);
+      if (row.foto_bitacora_url) {
+        maintenanceBitacoraById.set(row.id, row.foto_bitacora_url);
+      }
     }
 
     for (const row of data || []) {
@@ -2592,10 +2598,12 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
         mantenimiento_id: maintenanceId || row.mantenimiento_id,
       }, fotosAntes, fotosDespues);
       const orphanMetadata = maintenanceId ? orphanMaintenanceMetadataById.get(maintenanceId) : undefined;
+      const maintenanceMetadata = maintenanceId ? maintenanceMetadataById.get(maintenanceId) : undefined;
       const maintenanceEnrichedReport = row.tipo === "mantenimiento_preventivo"
         ? {
           ...baseReport,
-          observaciones: orphanMetadata?.observaciones || baseReport.observaciones,
+          actividadesRealizadas: maintenanceMetadata?.actividades_realizadas?.trim() || baseReport.actividadesRealizadas,
+          observaciones: orphanMetadata?.observaciones || baseReport.observaciones || maintenanceMetadata?.observaciones || undefined,
           firmaReceptor: orphanMetadata?.firmaReceptor || baseReport.firmaReceptor,
           datosReceptor: orphanMetadata?.datosReceptor || baseReport.datosReceptor,
           bitacora: (orphanMetadata?.bitacora ?? baseReport.bitacora) || Boolean(maintenanceId && maintenanceBitacoraById.get(maintenanceId)),

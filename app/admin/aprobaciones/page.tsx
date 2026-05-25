@@ -68,7 +68,7 @@ import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
-import { formatClientDoorBreakdown, sanitizeGroupActivityObservations, sanitizeTechnicalVisitObservations } from "@/lib/utils/report-content";
+import { buildReportMultilineText, formatClientDoorBreakdown, getDisplayReportObservations, getReportServiceDetail } from "@/lib/utils/report-content";
 import { CompanySettings, LiquidationPeriod, MaintenanceContract } from "@/lib/types";
 import {
   Pagination,
@@ -942,7 +942,7 @@ export default function AprobacionesPage() {
   }, [calculateTechnicalCostForReport, getActivityTotalForReport, getParticipationPercentageForReport]);
 
   const buildMultilineText = useCallback((parts: Array<string | undefined | null>) => {
-    return parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
+    return buildReportMultilineText(parts);
   }, []);
 
   const getSafeFileSegment = useCallback((value: string) => {
@@ -970,12 +970,9 @@ export default function AprobacionesPage() {
       ? formatClientDoorBreakdown(contract || client)
       : undefined;
     const fileBaseName = getSafeFileSegment(client?.edificio || group?.nombre || tipo.label);
-    const normalizedObservaciones = report.tipo === "actividad_grupal"
-      ? sanitizeGroupActivityObservations(report.observaciones)
-      : report.tipo === "visita_tecnica"
-        ? sanitizeTechnicalVisitObservations(report.observaciones)
-        : report.observaciones?.trim() || undefined;
-    const resumen = report.descripcion || report.especificacion || normalizedObservaciones || `Servicio de ${tipo.label.toLowerCase()}`;
+    const maintenanceDetail = getReportServiceDetail(report);
+    const normalizedObservaciones = getDisplayReportObservations(report);
+    const resumen = maintenanceDetail || report.descripcion || report.especificacion || normalizedObservaciones || `Servicio de ${tipo.label.toLowerCase()}`;
 
     const detailLines = (() => {
       if (report.tipo === "visita_tecnica") {
@@ -1000,6 +997,14 @@ export default function AprobacionesPage() {
           report.descripcion,
           report.especificacion ? `Especificación: ${report.especificacion}` : undefined,
           normalizedObservaciones,
+        ]);
+      }
+
+      if (report.tipo === "mantenimiento_preventivo") {
+        return buildMultilineText([
+          maintenanceDetail,
+          normalizedObservaciones,
+          !maintenanceDetail ? report.descripcion : undefined,
         ]);
       }
 
@@ -2239,6 +2244,15 @@ export default function AprobacionesPage() {
                   </p>
                 </div>
 
+                {getReportServiceDetail(selectedReport) && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">Actividades realizadas</p>
+                    <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50 whitespace-pre-wrap">
+                      {getReportServiceDetail(selectedReport)}
+                    </p>
+                  </div>
+                )}
+
                 {selectedReport.especificacion && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">Especificación</p>
@@ -2248,11 +2262,11 @@ export default function AprobacionesPage() {
                   </div>
                 )}
 
-                {selectedReport.observaciones && (
+                {getDisplayReportObservations(selectedReport) && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">Observaciones</p>
-                    <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50">
-                      {selectedReport.observaciones}
+                    <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50 whitespace-pre-wrap">
+                      {getDisplayReportObservations(selectedReport)}
                     </p>
                   </div>
                 )}

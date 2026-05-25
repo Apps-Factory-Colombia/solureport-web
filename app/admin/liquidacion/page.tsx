@@ -69,6 +69,7 @@ import {
   PaginationPrevious,
 } from "@/components/ui/pagination";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { getDisplayReportObservations, getReportServiceDetail } from "@/lib/utils/report-content";
 
 import { CompanySettings } from "@/lib/types";
 
@@ -2115,6 +2116,13 @@ export default function LiquidacionPage() {
                   <p className="text-sm text-foreground">{selectedReport.descripcion || "—"}</p>
                 </div>
 
+                {getReportServiceDetail(selectedReport) && (
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                    <p className="text-xs text-muted-foreground">Actividades realizadas</p>
+                    <p className="text-sm text-foreground whitespace-pre-wrap">{getReportServiceDetail(selectedReport)}</p>
+                  </div>
+                )}
+
                 {selectedReport.especificacion && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Especificación</p>
@@ -2122,10 +2130,10 @@ export default function LiquidacionPage() {
                   </div>
                 )}
 
-                {selectedReport.observaciones && (
+                {getDisplayReportObservations(selectedReport) && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Observaciones</p>
-                    <p className="text-sm text-foreground">{selectedReport.observaciones}</p>
+                    <p className="text-sm text-foreground whitespace-pre-wrap">{getDisplayReportObservations(selectedReport)}</p>
                   </div>
                 )}
 
