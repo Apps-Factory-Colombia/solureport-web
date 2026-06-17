@@ -386,7 +386,11 @@ export default function ContratosPage() {
     setCreateMaintenanceDrafts((current) => current.map((draft, index) => index === targetIndex ? updater(draft) : draft));
   };
 
-  const ensureTechnicianParticipant = (draft: ContractMaintenanceDraft, tecnicoId: string) => {
+  const ensureTechnicianParticipant = (
+    draft: ContractMaintenanceDraft,
+    tecnicoId: string,
+    previousTechnicianId = draft.tecnicoId
+  ) => {
     if (!tecnicoId) return draft;
 
     const visibleParticipants = draft.participantDrafts.filter((participant) => !!participant.usuarioId);
@@ -406,6 +410,26 @@ export default function ContratosPage() {
           ? [{ ...visibleParticipants[0], porcentaje: "100" }]
           : visibleParticipants,
       };
+    }
+
+    if (previousTechnicianId && previousTechnicianId !== tecnicoId) {
+      const previousTechnicianIndex = visibleParticipants.findIndex((participant) => participant.usuarioId === previousTechnicianId);
+
+      if (previousTechnicianIndex >= 0) {
+        const nextParticipants = [...visibleParticipants];
+        nextParticipants[previousTechnicianIndex] = {
+          ...nextParticipants[previousTechnicianIndex],
+          usuarioId: tecnicoId,
+        };
+
+        return {
+          ...draft,
+          tecnicoId,
+          participantDrafts: nextParticipants.length === 1
+            ? [{ ...nextParticipants[0], porcentaje: "100" }]
+            : nextParticipants,
+        };
+      }
     }
 
     return {
@@ -470,9 +494,8 @@ export default function ContratosPage() {
 
       return ensureTechnicianParticipant({
         ...draft,
-        tecnicoId: nextTechnicianId,
         participantDrafts: nextParticipants,
-      }, nextTechnicianId);
+      }, nextTechnicianId, draft.tecnicoId);
     });
   };
 
@@ -2053,7 +2076,7 @@ export default function ContratosPage() {
                             <Label className="text-foreground/80">Técnico responsable</Label>
                             <Select
                               value={draft.tecnicoId}
-                              onValueChange={(value) => updateCreateMaintenanceDraft(index, (current) => ensureTechnicianParticipant({ ...current, tecnicoId: value }, value))}
+                              onValueChange={(value) => updateCreateMaintenanceDraft(index, (current) => ensureTechnicianParticipant(current, value, current.tecnicoId))}
                             >
                               <SelectTrigger className="bg-card border-border/50">
                                 <SelectValue placeholder="Seleccionar técnico" />

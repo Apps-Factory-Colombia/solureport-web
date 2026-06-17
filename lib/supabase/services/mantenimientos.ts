@@ -62,8 +62,8 @@ function mapRow(row: any): Maintenance {
   };
 }
 
-async function resolveMaintenanceLeaderId(tecnicoId?: string | null): Promise<string | null> {
-  if (!tecnicoId) return null;
+async function resolveMaintenanceGroupContext(tecnicoId?: string | null): Promise<{ groupId: string | null; leaderId: string | null }> {
+  if (!tecnicoId) return { groupId: null, leaderId: null };
 
   const { data: tecnico, error: tecnicoError } = await supabase
     .from("usuarios")
@@ -72,16 +72,42 @@ async function resolveMaintenanceLeaderId(tecnicoId?: string | null): Promise<st
     .maybeSingle();
   if (tecnicoError) throw tecnicoError;
 
-  if (!tecnico?.grupo_id) return null;
+  const groupId = tecnico?.grupo_id || null;
+
+  if (!groupId) {
+    const { data: ledGroup, error: ledGroupError } = await supabase
+      .from("grupos_trabajo")
+      .select("id, lider_id")
+      .eq("lider_id", tecnicoId)
+      .maybeSingle();
+    if (ledGroupError) throw ledGroupError;
+
+    if (ledGroup?.id) {
+      return {
+        groupId: ledGroup.id,
+        leaderId: ledGroup.lider_id || tecnicoId,
+      };
+    }
+
+    return { groupId: null, leaderId: null };
+  }
 
   const { data: grupo, error: grupoError } = await supabase
     .from("grupos_trabajo")
     .select("lider_id")
-    .eq("id", tecnico.grupo_id)
+    .eq("id", groupId)
     .maybeSingle();
   if (grupoError) throw grupoError;
 
-  return grupo?.lider_id || null;
+  return {
+    groupId,
+    leaderId: grupo?.lider_id || null,
+  };
+}
+
+async function resolveMaintenanceLeaderId(tecnicoId?: string | null): Promise<string | null> {
+  const context = await resolveMaintenanceGroupContext(tecnicoId);
+  return context?.leaderId || null;
 }
 
 async function syncContractMaintenanceFromExecutable(row: any) {

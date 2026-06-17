@@ -715,9 +715,22 @@ export function generateComprobantePDF(data: {
 }): void {
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
   let y = 15;
-  const tableMargin = { left: 14, right: 14 };
+  const tableMargin = { left: 14, right: 14, bottom: 20 };
   const tableContentWidth = pageWidth - tableMargin.left - tableMargin.right;
+  const contentBottomY = pageHeight - 20;
+  const resetPageY = 20;
+  const ensurePageSpace = (requiredHeight: number) => {
+    if (y + requiredHeight <= contentBottomY) return;
+    doc.addPage();
+    y = resetPageY;
+  };
+  const legalLines = doc.splitTextToSize(
+    "Este pago se realiza bajo los términos de la Cláusula Tercera del contrato de trabajo (Pagos No Prestacionales - Art. 128 CST). Los valores aquí descritos corresponden a auxilios extralegales y compensaciones que no constituyen salario ni factor prestacional.",
+    pageWidth - 28
+  );
+  const legalBlockHeight = legalLines.length * 3.5;
 
   // Header
   doc.setFontSize(10);
@@ -773,12 +786,14 @@ export function generateComprobantePDF(data: {
     },
     theme: "grid",
     margin: tableMargin,
+    rowPageBreak: "avoid",
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   y = (doc as any).lastAutoTable.finalY + 8;
 
   if ((data.desplazamientos || []).length > 0) {
+    ensurePageSpace(18);
     doc.setFontSize(9);
     doc.setTextColor(60);
     doc.text("CONCEPTO: RECORRIDOS Y DESPLAZAMIENTOS", 14, y);
@@ -801,6 +816,7 @@ export function generateComprobantePDF(data: {
       },
       theme: "grid",
       margin: tableMargin,
+      rowPageBreak: "avoid",
     });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -812,6 +828,13 @@ export function generateComprobantePDF(data: {
   }
 
   // Totals
+  let totalsBlockHeight = 11;
+  if ((data.totalDescuentoTardanza || 0) > 0) totalsBlockHeight += 12;
+  if (data.totalRodamiento > 0) totalsBlockHeight += 6;
+  if ((data.totalExtraLider || 0) > 0) totalsBlockHeight += 6;
+  totalsBlockHeight += 40 + legalBlockHeight;
+  ensurePageSpace(totalsBlockHeight);
+
   const totalsX = pageWidth - 80;
   doc.setFontSize(9);
 
@@ -860,7 +883,6 @@ export function generateComprobantePDF(data: {
 
   // Signatures
   y += 25;
-  if (y > 250) { doc.addPage(); y = 30; }
   doc.setDrawColor(150);
   doc.line(14, y, 80, y);
   doc.line(pageWidth - 80, y, pageWidth - 14, y);
@@ -877,10 +899,6 @@ export function generateComprobantePDF(data: {
   y += 12;
   doc.setFontSize(7);
   doc.setTextColor(150);
-  const legalLines = doc.splitTextToSize(
-    "Este pago se realiza bajo los términos de la Cláusula Tercera del contrato de trabajo (Pagos No Prestacionales - Art. 128 CST). Los valores aquí descritos corresponden a auxilios extralegales y compensaciones que no constituyen salario ni factor prestacional.",
-    pageWidth - 28
-  );
   doc.text(legalLines, 14, y);
 
   // Footer
