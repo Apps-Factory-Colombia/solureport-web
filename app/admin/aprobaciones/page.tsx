@@ -68,6 +68,7 @@ import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
+import { filterPreventiveMirrorReports } from "@/lib/utils/report-filters";
 import { buildReportMultilineText, formatClientDoorBreakdown, getDisplayReportObservations, getReportServiceDetail } from "@/lib/utils/report-content";
 import { CompanySettings, LiquidationPeriod, MaintenanceContract } from "@/lib/types";
 import {
@@ -1503,7 +1504,7 @@ export default function AprobacionesPage() {
 
   const groupedReports = useMemo(() => {
     const grouped = new Map<string, ActivityReport[]>();
-    const uiScopedReports = dedupeGroupActivityRowsForUi(periodScopedReports);
+    const uiScopedReports = dedupeGroupActivityRowsForUi(filterPreventiveMirrorReports(periodScopedReports));
     const canonicalPreventiveByKey = new Map<string, ActivityReport>();
 
     uiScopedReports.forEach((report) => {

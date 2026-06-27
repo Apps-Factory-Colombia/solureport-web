@@ -6,8 +6,9 @@ import LiquidationClosedEmail from "@/components/emails/LiquidationClosedEmail";
 import TechnicalVisitEmail from "@/components/emails/TechnicalVisitEmail";
 import ApprovalReportEmail from "@/components/emails/ApprovalReportEmail";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-const resendFromEmail = "notificaciones@solucionesyautomatizaciones.com";
+const resendApiKey = process.env.RESEND_API_KEY;
+const resend = resendApiKey ? new Resend(resendApiKey) : null;
+const resendFromEmail = process.env.RESEND_FROM_EMAIL || "notificaciones@solucionesyautomatizaciones.com";
 const resendReplyTo = process.env.RESEND_REPLY_TO || "solucionesyautomatizaciones@hotmail.com";
 
 function normalizeRecipients(value: string | string[] | undefined): string[] | undefined {
@@ -40,6 +41,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "Faltan campos requeridos: to, subject y template o html" },
         { status: 400 }
+      );
+    }
+
+    if (!resend) {
+      return NextResponse.json(
+        { error: "La configuracion de correo esta incompleta. Falta RESEND_API_KEY." },
+        { status: 500 }
       );
     }
 

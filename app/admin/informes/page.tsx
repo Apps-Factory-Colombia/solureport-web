@@ -75,6 +75,7 @@ import { getContratos } from "@/lib/supabase/services/contratos";
 import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
+import { filterPreventiveMirrorReports } from "@/lib/utils/report-filters";
 import { buildReportMultilineText, formatClientDoorBreakdown, getDisplayReportObservations, getReportServiceDetail } from "@/lib/utils/report-content";
 
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
@@ -287,6 +288,20 @@ function isSharedVisit(report: ActivityReport) {
     && participationPercentage < 100;
 }
 
+function scoreTechnicianScopedReport(report: ActivityReport) {
+  let score = 0;
+
+  if ((report.fotosAntes?.length || 0) + (report.fotosDespues?.length || 0) > 0) score += 8;
+  if (report.fotoBitacora) score += 6;
+  if (report.firmaReceptor) score += 3;
+  if (report.datosReceptor?.nombre) score += 3;
+  if (normalizeSearchValue(report.descripcion) && normalizeSearchValue(report.descripcion) !== "sin novedad") score += 2;
+  if (normalizeSearchValue(report.observaciones) && normalizeSearchValue(report.observaciones) !== "sin novedad") score += 2;
+  if (report.mantenimientoParticipanteId) score += 1;
+
+  return score;
+}
+
 function usesSharedBasePricing(report: ActivityReport) {
   return isGroupActivity(report)
     || isSharedVisit(report)
@@ -322,6 +337,15 @@ function dedupeReportsByTechnician(reports: ActivityReport[]) {
 
       if (!!report.registroActividadId !== !!current.registroActividadId) {
         if (report.registroActividadId) {
+          map.set(report.tecnicoId, report);
+        }
+        return map;
+      }
+
+      const currentScore = scoreTechnicianScopedReport(current);
+      const nextScore = scoreTechnicianScopedReport(report);
+      if (nextScore !== currentScore) {
+        if (nextScore > currentScore) {
           map.set(report.tecnicoId, report);
         }
         return map;
@@ -793,8 +817,8 @@ export default function InformesPage() {
   );
 
   const preventivos = useMemo(
-    () => viewScopedReports.filter((r) => r.tipo === "mantenimiento_preventivo"),
-    [viewScopedReports]
+    () => filterPreventiveMirrorReports(periodScopedReports).filter((r) => r.tipo === "mantenimiento_preventivo"),
+    [periodScopedReports]
   );
   const visitas = useMemo(
     () => viewScopedReports.filter((r) => r.tipo === "visita_tecnica"),
@@ -1426,7 +1450,7 @@ export default function InformesPage() {
       alert("Correo enviado correctamente.");
     } catch (err) {
       console.error("Error enviando correo del informe:", err);
-      alert("Hubo un error al enviar el correo del informe.");
+      alert(err instanceof Error ? err.message : "Hubo un error al enviar el correo del informe.");
     } finally {
       setSendingReportId(null);
     }
@@ -1584,8 +1608,27 @@ export default function InformesPage() {
     });
 
     return Array.from(grouped.values()).map((items) => {
-      const uniqueTechnicianItems = dedupeReportsByTechnician(items);
-      const leadReport = sortReportsForSharedActivity(items)[0];
+      const uniqueTechnicianItems = Array.from(
+        items.reduce((map, item) => {
+          if (!map.has(item.tecnicoId) || item.registroActividadId) {
+            map.set(item.tecnicoId, item);
+          }
+          return map;
+        }, new Map<string, ActivityReport>()).values()
+      );
+      const leadReport = [...items].sort((a, b) => {
+        if (a.id.startsWith("reg-") !== b.id.startsWith("reg-")) {
+          return a.id.startsWith("reg-") ? 1 : -1;
+        }
+
+        if (!!a.registroActividadId !== !!b.registroActividadId) {
+          return a.registroActividadId ? -1 : 1;
+        }
+
+        const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
+        if (creationCompare !== 0) return creationCompare;
+        return b.id.localeCompare(a.id);
+      })[0];
       const participantNames = Array.from(new Set(uniqueTechnicianItems.map((item) => getParticipantName(item.tecnicoId))));
       const approvalDate = items
         .map((item) => item.fechaAprobacionLider)

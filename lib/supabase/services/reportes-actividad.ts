@@ -1,6 +1,7 @@
 import { supabase } from "../client";
 import { ActivityReport, LeaderApprovalBatch, LeaderAccumulation } from "@/lib/types";
 import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache";
+import { filterPreventiveMirrorReports } from "@/lib/utils/report-filters";
 import { getConfiguracion } from "./configuracion";
 import { syncReporteMantenimientoToActividad } from "./mantenimientos";
 
@@ -123,6 +124,9 @@ interface MaintenanceMatchRow {
   cliente_id?: string | null;
   tecnico_id?: string | null;
   fecha_programada?: string | null;
+  observaciones?: string | null;
+  actividades_realizadas?: string | null;
+  foto_bitacora_url?: string | null;
 }
 
 interface MaintenanceParticipantRow {
@@ -292,6 +296,12 @@ function addOneDay(date: string): string {
   return nextDate.toISOString().split("T")[0];
 }
 
+function shiftDate(date: string, days: number): string {
+  const nextDate = new Date(`${date}T00:00:00`);
+  nextDate.setDate(nextDate.getDate() + days);
+  return nextDate.toISOString().split("T")[0];
+}
+
 function normalizeUnmodifiedActivityValue(
   currentValue?: number | string | null,
   fallbackValue?: number | string | null,
@@ -444,6 +454,31 @@ function mergeUniquePhotoUrls(...photoGroups: Array<string[] | undefined>): stri
   return Array.from(new Set(photoGroups.flatMap((group) => group || []).filter(Boolean)));
 }
 
+function extractStorageObjectPath(url?: string | null): string | null {
+  if (!url) return null;
+
+  const match = url.match(/\/storage\/v1\/object\/(?:public|sign)\/[^/]+\/(.+?)(?:\?|$)/);
+  if (!match?.[1]) return null;
+
+  return decodeURIComponent(match[1]);
+}
+
+function extractMaintenanceIdFromReportMedia(row: Pick<ReporteActividadRow, "mantenimiento_id" | "foto_bitacora_url" | "firma_receptor_url">): string | null {
+  if (row.mantenimiento_id) return row.mantenimiento_id;
+
+  const mediaUrls = [row.foto_bitacora_url, row.firma_receptor_url].filter(Boolean) as string[];
+  for (const mediaUrl of mediaUrls) {
+    const objectPath = extractStorageObjectPath(mediaUrl);
+    const candidate = objectPath?.split("/")[0]?.trim();
+
+    if (candidate && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 function buildPreventiveMaintenanceMatchKey(params: {
   clienteId?: string | null;
   tecnicoId?: string | null;
@@ -454,6 +489,15 @@ function buildPreventiveMaintenanceMatchKey(params: {
     params.tecnicoId || "",
     params.fecha || "",
   ].join("|");
+}
+
+function getDateDistanceInDays(left?: string | null, right?: string | null) {
+  if (!left || !right) return Number.POSITIVE_INFINITY;
+
+  const leftDate = new Date(`${left}T00:00:00`);
+  const rightDate = new Date(`${right}T00:00:00`);
+  const diffMs = Math.abs(leftDate.getTime() - rightDate.getTime());
+  return Math.round(diffMs / 86_400_000);
 }
 
 function dedupePreventiveMaintenanceParticipantReports(reports: ActivityReport[]): ActivityReport[] {
@@ -2291,31 +2335,51 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     const orphanPreventiveDates = orphanPreventiveRows.map((row) => row.fecha).filter(Boolean);
     const orphanPreventiveMinDate = orphanPreventiveDates.length > 0 ? [...orphanPreventiveDates].sort()[0] : null;
     const orphanPreventiveMaxDate = orphanPreventiveDates.length > 0 ? [...orphanPreventiveDates].sort().at(-1) || null : null;
-    const { data: orphanMaintenanceMatches, error: orphanMaintenanceMatchesError } = orphanPreventiveClientIds.length > 0 && orphanPreventiveMinDate && orphanPreventiveMaxDate
+    const orphanMaintenanceLookupStart = orphanPreventiveMinDate ? shiftDate(orphanPreventiveMinDate, -3) : null;
+    const { data: orphanMaintenanceMatches, error: orphanMaintenanceMatchesError } = orphanPreventiveClientIds.length > 0 && orphanMaintenanceLookupStart && orphanPreventiveMaxDate
       ? await supabase
         .from("mantenimientos")
-        .select("id, cliente_id, tecnico_id, fecha_programada")
+        .select("id, cliente_id, tecnico_id, fecha_programada, observaciones, actividades_realizadas, foto_bitacora_url")
         .in("cliente_id", orphanPreventiveClientIds)
-        .gte("fecha_programada", orphanPreventiveMinDate)
+        .gte("fecha_programada", orphanMaintenanceLookupStart)
         .lte("fecha_programada", orphanPreventiveMaxDate)
       : { data: [], error: null };
 
     if (orphanMaintenanceMatchesError) throw orphanMaintenanceMatchesError;
 
     const orphanMaintenanceMatchByKey = new Map<string, MaintenanceMatchRow[]>();
+    const orphanMaintenanceMatchesByClient = new Map<string, MaintenanceMatchRow[]>();
+    const maintenanceDateById = new Map<string, string>();
     for (const row of (orphanMaintenanceMatches || []) as MaintenanceMatchRow[]) {
+      const maintenanceDate = row.fecha_programada?.split("T")[0] || row.fecha_programada || "";
       const key = buildPreventiveMaintenanceMatchKey({
         clienteId: row.cliente_id,
         tecnicoId: row.tecnico_id,
-        fecha: row.fecha_programada?.split("T")[0] || row.fecha_programada,
+        fecha: maintenanceDate,
       });
       const current = orphanMaintenanceMatchByKey.get(key) || [];
       current.push(row);
       orphanMaintenanceMatchByKey.set(key, current);
+      if (row.id && maintenanceDate) {
+        maintenanceDateById.set(row.id, maintenanceDate);
+      }
+
+      const clientKey = row.cliente_id || "";
+      const clientMatches = orphanMaintenanceMatchesByClient.get(clientKey) || [];
+      clientMatches.push(row);
+      orphanMaintenanceMatchesByClient.set(clientKey, clientMatches);
     }
 
     const orphanResolvedMaintenanceIdByReportId = new Map<string, string>();
+    const orphanResolvedViaMediaReportIds = new Set<string>();
     for (const row of orphanPreventiveRows) {
+      const mediaLinkedMaintenanceId = extractMaintenanceIdFromReportMedia(row);
+      if (mediaLinkedMaintenanceId) {
+        orphanResolvedMaintenanceIdByReportId.set(row.id, mediaLinkedMaintenanceId);
+        orphanResolvedViaMediaReportIds.add(row.id);
+        continue;
+      }
+
       const exactKey = buildPreventiveMaintenanceMatchKey({
         clienteId: row.cliente_id,
         tecnicoId: row.tecnico_id,
@@ -2324,6 +2388,21 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       const exactMatches = orphanMaintenanceMatchByKey.get(exactKey) || [];
       if (exactMatches.length === 1) {
         orphanResolvedMaintenanceIdByReportId.set(row.id, exactMatches[0].id);
+        continue;
+      }
+
+      const clientMatches = orphanMaintenanceMatchesByClient.get(row.cliente_id || "") || [];
+      const contentMatches = clientMatches.filter((candidate) => {
+        const candidateDate = candidate.fecha_programada?.split("T")[0] || candidate.fecha_programada;
+        if (getDateDistanceInDays(row.fecha, candidateDate) > 3) return false;
+        if (candidate.tecnico_id && row.tecnico_id && candidate.tecnico_id !== row.tecnico_id) return false;
+
+        return normalizeActivityMatchText(row.descripcion) === normalizeActivityMatchText(candidate.actividades_realizadas)
+          && normalizeActivityMatchText(row.observaciones) === normalizeActivityMatchText(candidate.observaciones);
+      });
+
+      if (contentMatches.length === 1) {
+        orphanResolvedMaintenanceIdByReportId.set(row.id, contentMatches[0].id);
       }
     }
 
@@ -2449,6 +2528,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     const maintenancePhotosById = new Map<string, { antes: string[]; despues: string[] }>();
     const maintenanceBitacoraById = new Map<string, string>();
     const maintenanceMetadataById = new Map<string, MaintenanceMetadataRow>();
+    const maintenanceParticipantReportKeys = new Set<string>();
     const maintenanceIdsWithParticipantReports = new Set<string>();
     const orphanMaintenanceMetadataById = new Map<string, Partial<ActivityReport>>();
 
@@ -2535,6 +2615,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 
     for (const row of data || []) {
       if (row.tipo !== "mantenimiento_preventivo" || !row.mantenimiento_id || !row.mantenimiento_participante_id) continue;
+      maintenanceParticipantReportKeys.add(`${row.mantenimiento_id}|${row.fecha}`);
       maintenanceIdsWithParticipantReports.add(row.mantenimiento_id);
     }
 
@@ -2578,7 +2659,33 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
       const resolvedMaintenanceId = row.tipo === "mantenimiento_preventivo"
         ? row.mantenimiento_id || orphanResolvedMaintenanceIdByReportId.get(row.id)
         : undefined;
-      if (row.tipo === "mantenimiento_preventivo" && !row.mantenimiento_id && resolvedMaintenanceId && maintenanceIdsWithParticipantReports.has(resolvedMaintenanceId)) {
+      const resolvedMaintenanceMetadata = resolvedMaintenanceId ? maintenanceMetadataById.get(resolvedMaintenanceId) : undefined;
+      const resolvedMaintenanceDate = resolvedMaintenanceId ? maintenanceDateById.get(resolvedMaintenanceId) : undefined;
+      const resolvedMaintenanceDistance = getDateDistanceInDays(row.fecha, resolvedMaintenanceDate);
+      const matchesResolvedMaintenanceContent = row.tipo === "mantenimiento_preventivo"
+        && !row.mantenimiento_id
+        && Boolean(resolvedMaintenanceId)
+        && normalizeActivityMatchText(row.descripcion) === normalizeActivityMatchText(resolvedMaintenanceMetadata?.actividades_realizadas)
+        && normalizeActivityMatchText(row.observaciones) === normalizeActivityMatchText(resolvedMaintenanceMetadata?.observaciones);
+      const isExactMaintenanceMirror = row.tipo === "mantenimiento_preventivo"
+        && !row.mantenimiento_id
+        && orphanResolvedViaMediaReportIds.has(row.id)
+        && Boolean(resolvedMaintenanceId)
+        && Boolean(row.foto_bitacora_url)
+        && row.foto_bitacora_url === resolvedMaintenanceMetadata?.foto_bitacora_url;
+      if (
+        row.tipo === "mantenimiento_preventivo"
+        && !row.mantenimiento_id
+        && resolvedMaintenanceId
+        && (
+          (maintenanceParticipantReportKeys.has(`${resolvedMaintenanceId}|${row.fecha}`)
+            && matchesResolvedMaintenanceContent)
+          || (maintenanceIdsWithParticipantReports.has(resolvedMaintenanceId)
+            && matchesResolvedMaintenanceContent
+            && resolvedMaintenanceDistance <= 2)
+          || isExactMaintenanceMirror
+        )
+      ) {
         continue;
       }
 
@@ -2593,10 +2700,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
         fotos.filter((f) => f.tipo === "despues").map((f) => f.url),
         row.tipo === "mantenimiento_preventivo" ? maintenancePhotos?.despues : undefined
       );
-      const baseReport = mapReport({
-        ...row,
-        mantenimiento_id: maintenanceId || row.mantenimiento_id,
-      }, fotosAntes, fotosDespues);
+      const baseReport = mapReport(row, fotosAntes, fotosDespues);
       const orphanMetadata = maintenanceId ? orphanMaintenanceMetadataById.get(maintenanceId) : undefined;
       const maintenanceMetadata = maintenanceId ? maintenanceMetadataById.get(maintenanceId) : undefined;
       const maintenanceEnrichedReport = row.tipo === "mantenimiento_preventivo"
@@ -2741,7 +2845,8 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     const normalizedPreventiveReports = normalizePreventiveMaintenanceIds(reports);
     const dedupedPreventiveReports = dedupePreventiveMaintenanceParticipantReports(normalizedPreventiveReports);
     const dedupedReports = dedupeGroupActivityReports(dedupedPreventiveReports);
-    dedupedReports.sort((a, b) => {
+    const cleanedReports = filterPreventiveMirrorReports(dedupedReports);
+    cleanedReports.sort((a, b) => {
       const dateCompare = b.fecha.localeCompare(a.fecha);
       if (dateCompare !== 0) return dateCompare;
 
@@ -2750,7 +2855,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
 
       return b.id.localeCompare(a.id);
     });
-    return dedupedReports;
+    return cleanedReports;
   });
 }
 
