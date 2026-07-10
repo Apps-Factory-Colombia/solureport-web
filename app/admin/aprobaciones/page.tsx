@@ -50,11 +50,13 @@ import {
   RotateCcw,
   Trash2,
   Loader2,
+  Upload,
 } from "lucide-react";
 import { ActivityReport, User, Client, WorkGroup } from "@/lib/types";
 import {
   deleteReporteActividadAdmin,
   getReportesActividad,
+  uploadActividadGrupalEvidenciaAdmin,
   updateActividadGrupalBaseAdmin,
   updateCostoActividadAdmin,
   updateEstadoAprobacion,
@@ -555,7 +557,10 @@ export default function AprobacionesPage() {
   const [savingDefaultVisitCost, setSavingDefaultVisitCost] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
+  const [uploadingEvidence, setUploadingEvidence] = useState(false);
+  const [evidenceUploadMessage, setEvidenceUploadMessage] = useState<string | null>(null);
   const activeReportIdRef = useRef<string | null>(null);
+  const evidenceInputRef = useRef<HTMLInputElement | null>(null);
 
   // Paginación
   const [currentPage, setCurrentPage] = useState(1);
@@ -729,6 +734,13 @@ export default function AprobacionesPage() {
     const sharedKey = getVisualActivityIdentity(report);
     return reports.filter((item) => usesSharedBasePricing(item) && getVisualActivityIdentity(item) === sharedKey);
   }, [reports]);
+  const getEvidenceCountForReport = useCallback((report: ActivityReport) => {
+    return (report.fotosAntes?.length || 0)
+      + (report.fotosDespues?.length || 0)
+      + (report.fotoBitacora ? 1 : 0)
+      + (report.fotoHerramienta ? 1 : 0)
+      + (report.fotoEvidencia ? 1 : 0);
+  }, []);
   const selectedPeriod = useMemo(
     () => periods.find((period) => period.id === selectedPeriodId),
     [periods, selectedPeriodId]
@@ -879,6 +891,7 @@ export default function AprobacionesPage() {
       setEditableCost("");
       setSharedParticipantDrafts([]);
       setSaveSuccessMessage(null);
+      setEvidenceUploadMessage(null);
       activeReportIdRef.current = null;
       return;
     }
@@ -894,6 +907,7 @@ export default function AprobacionesPage() {
       ? syncParticipantDraftAmounts(buildSharedParticipantDrafts(selectedReport))
       : []);
     setSaveSuccessMessage(null);
+    setEvidenceUploadMessage(null);
   }, [buildSharedParticipantDrafts, getEditableValueForReport, selectedReport, syncParticipantDraftAmounts]);
   const isSharedParticipantDraftDirty = useMemo(() => {
     if (!selectedReport || !usesSharedBasePricing(selectedReport)) return false;
@@ -1303,6 +1317,43 @@ export default function AprobacionesPage() {
       setSavingCost(false);
     }
   };
+
+  const handleGroupEvidenceUpload = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !selectedReport || selectedReport.tipo !== "actividad_grupal") {
+      event.target.value = "";
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      alert("Debes seleccionar una imagen válida para la evidencia.");
+      event.target.value = "";
+      return;
+    }
+
+    setUploadingEvidence(true);
+    setEvidenceUploadMessage(null);
+
+    try {
+      const sharedReports = getSharedReportsForReport(selectedReport);
+      const realSourceParticipant = sharedReports.find((participant) => !isLegacyGroupDraftReportId(participant.id));
+      const sourceReportId = !selectedReport.id.startsWith("reg-")
+        ? selectedReport.id
+        : realSourceParticipant?.id;
+
+      await uploadActividadGrupalEvidenciaAdmin(selectedReport.registroActividadId || sourceReportId || selectedReport.id, file, {
+        sourceReportId,
+      });
+      await refreshReports(selectedReport.id);
+      setEvidenceUploadMessage("Foto de evidencia guardada correctamente.");
+    } catch (error) {
+      console.error("Error guardando evidencia de actividad grupal:", error);
+      alert("No se pudo guardar la foto de evidencia.");
+    } finally {
+      setUploadingEvidence(false);
+      event.target.value = "";
+    }
+  }, [getSharedReportsForReport, refreshReports, selectedReport]);
 
   const handleSaveParticipantSplit = async () => {
     if (!selectedReport || !usesSharedBasePricing(selectedReport)) return;
@@ -1739,6 +1790,11 @@ export default function AprobacionesPage() {
                       {report.tipo === "visita_tecnica" && (
                         <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
                           {getVisitCategoryLabel(report.tipoVisita)}
+                        </Badge>
+                      )}
+                      {getEvidenceCountForReport(report) > 0 && (
+                        <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
+                          <ImageIcon className="mr-1 h-3 w-3" /> Evidencia
                         </Badge>
                       )}
                     </div>
@@ -2269,6 +2325,54 @@ export default function AprobacionesPage() {
                     <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50 whitespace-pre-wrap">
                       {getDisplayReportObservations(selectedReport)}
                     </p>
+                  </div>
+                )}
+
+                {selectedReport.tipo === "actividad_grupal" && (
+                  <div className="space-y-3">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-purple-400">Foto de evidencia</p>
+                        <p className="text-xs text-muted-foreground">Adjunta la evidencia visual del trabajo para esta actividad grupal.</p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="gap-2 border-purple-500/30 text-purple-300 hover:bg-purple-500/10 hover:text-purple-200"
+                        onClick={() => evidenceInputRef.current?.click()}
+                        disabled={uploadingEvidence || processing}
+                      >
+                        {uploadingEvidence ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                        {uploadingEvidence ? "Guardando..." : selectedReport.fotoEvidencia ? "Reemplazar foto" : "Cargar foto"}
+                      </Button>
+                      <input
+                        ref={evidenceInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={handleGroupEvidenceUpload}
+                      />
+                    </div>
+                    <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
+                      {selectedReport.fotoEvidencia ? (
+                        <a
+                          href={selectedReport.fotoEvidencia}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="block max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/20"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={selectedReport.fotoEvidencia} alt="Foto de evidencia de actividad grupal" className="h-full w-full object-cover" />
+                        </a>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">No hay foto de evidencia registrada.</p>
+                      )}
+                    </div>
+                    {evidenceUploadMessage && (
+                      <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs font-medium text-emerald-400">
+                        {evidenceUploadMessage}
+                      </div>
+                    )}
                   </div>
                 )}
 

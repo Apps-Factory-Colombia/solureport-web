@@ -22,6 +22,7 @@ interface LiquidationEntryRow {
   lugar?: string | null;
   edificio?: string | null;
   fecha: string;
+  foto_evidencia_url?: string | null;
   periodo_id?: string | null;
 }
 
@@ -146,6 +147,7 @@ function mapEntry(row: LiquidationEntryRow, participantes: LiquidationParticipan
     grupoId: row.grupo_id,
     lugar: row.lugar || row.edificio || "",
     fecha: row.fecha,
+    fotoEvidencia: row.foto_evidencia_url || undefined,
     participantes,
     periodoId: row.periodo_id || "",
   };

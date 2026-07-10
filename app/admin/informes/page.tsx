@@ -1149,7 +1149,11 @@ export default function InformesPage() {
   };
 
   const getEvidenceCount = useCallback((report: ActivityReport) => {
-    return (report.fotosAntes?.length || 0) + (report.fotosDespues?.length || 0) + (report.fotoBitacora ? 1 : 0) + (report.fotoHerramienta ? 1 : 0);
+    return (report.fotosAntes?.length || 0)
+      + (report.fotosDespues?.length || 0)
+      + (report.fotoBitacora ? 1 : 0)
+      + (report.fotoHerramienta ? 1 : 0)
+      + (report.fotoEvidencia ? 1 : 0);
   }, []);
 
   const applySentState = (targetReport: ActivityReport, sentAt: string) => {
@@ -3681,6 +3685,20 @@ export default function InformesPage() {
                           >
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img src={activeDetailReport.fotoHerramienta} alt="Foto de herramienta" className="h-full w-full object-cover" />
+                          </a>
+                        </div>
+                      )}
+                      {activeDetailReport.fotoEvidencia && (
+                        <div className="space-y-2 md:col-span-2">
+                          <p className="text-xs text-muted-foreground">Foto de evidencia de actividad grupal</p>
+                          <a
+                            href={activeDetailReport.fotoEvidencia}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/20"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={activeDetailReport.fotoEvidencia} alt="Foto de evidencia de actividad grupal" className="h-full w-full object-cover" />
                           </a>
                         </div>
                       )}
