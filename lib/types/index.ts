@@ -131,6 +131,7 @@ export interface LiquidationEntry {
   grupoId: string;
   lugar: string;
   fecha: string;
+  fotoEvidencia?: string;
   participantes: LiquidationParticipant[];
   periodoId: string;
 }
@@ -263,6 +264,7 @@ export interface ActivityReport {
   actividadesRealizadas?: string;
   especificacion?: string;
   observaciones?: string;
+  fotoEvidencia?: string;
   fotosAntes?: string[];
   fotosDespues?: string[];
   firmaReceptor?: string;

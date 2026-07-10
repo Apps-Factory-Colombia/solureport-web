@@ -8,6 +8,8 @@ export const BUCKETS = {
   FOTOS_RECORRIDOS: "fotos-recorridos",
 } as const;
 
+const GROUP_ACTIVITY_EVIDENCE_FOLDER = "group-activities";
+
 export type BucketName = (typeof BUCKETS)[keyof typeof BUCKETS];
 
 // ── Upload file ─────────────────────────────────────────────────────
@@ -262,6 +264,31 @@ export async function uploadHerramientaRecorrido(
   }
 
   return url;
+}
+
+export async function replaceGroupActivityEvidenceFile(
+  activityId: string,
+  file: File | Blob
+): Promise<string> {
+  const folder = `${GROUP_ACTIVITY_EVIDENCE_FOLDER}/${activityId}`;
+  const existingFiles = await listFiles(BUCKETS.FOTOS_REPORTES, folder).catch(() => []);
+
+  if (existingFiles.length > 0) {
+    await deleteFiles(BUCKETS.FOTOS_REPORTES, existingFiles);
+  }
+
+  const ext = file instanceof File ? (file.name.split(".").pop() || "jpg") : "jpg";
+  const path = `${folder}/evidencia_${Date.now()}.${ext}`;
+  return uploadFile(BUCKETS.FOTOS_REPORTES, path, file);
+}
+
+export async function deleteGroupActivityEvidenceFiles(activityId: string): Promise<void> {
+  const folder = `${GROUP_ACTIVITY_EVIDENCE_FOLDER}/${activityId}`;
+  const files = await listFiles(BUCKETS.FOTOS_REPORTES, folder).catch(() => []);
+
+  if (files.length > 0) {
+    await deleteFiles(BUCKETS.FOTOS_REPORTES, files);
+  }
 }
 
 // ── Helper: delete all files for a mantenimiento ────────────────────

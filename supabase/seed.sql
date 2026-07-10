@@ -217,11 +217,11 @@ VALUES
   ('80000000-0000-0000-0000-000000000004', '2025-02-12', '2025-02-25', 'abierto', NULL);
 
 -- ── 9. Registros de Actividades (para liquidación) ─────────
-INSERT INTO registros_actividades (id, actividad_id, lider_id, grupo_id, cliente_nombre, cliente_id, edificio, lugar, fecha, confirmado)
+INSERT INTO registros_actividades (id, actividad_id, lider_id, grupo_id, cliente_nombre, cliente_id, edificio, lugar, fecha, confirmado, foto_evidencia_url)
 VALUES
-  ('90000000-0000-0000-0000-000000000001', '40000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000001', 'Conjunto Residencial Los Pinos', '30000000-0000-0000-0000-000000000001', 'Torre A Los Pinos', 'Torre A Los Pinos', '2025-01-05', true),
-  ('90000000-0000-0000-0000-000000000002', '40000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000001', 'Edificio Corporativo Zentral', '30000000-0000-0000-0000-000000000002', 'Zentral Office', 'Zentral Office', '2025-01-08', true),
-  ('90000000-0000-0000-0000-000000000003', '40000000-0000-0000-0000-000000000003', '10000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000001', 'Centro Comercial Plaza Norte', '30000000-0000-0000-0000-000000000003', 'Plaza Norte', 'Plaza Norte', '2025-01-12', true);
+  ('90000000-0000-0000-0000-000000000001', '40000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000001', 'Conjunto Residencial Los Pinos', '30000000-0000-0000-0000-000000000001', 'Torre A Los Pinos', 'Torre A Los Pinos', '2025-01-05', true, 'https://example.com/group-activities/9001/evidencia-1.jpg'),
+  ('90000000-0000-0000-0000-000000000002', '40000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000001', 'Edificio Corporativo Zentral', '30000000-0000-0000-0000-000000000002', 'Zentral Office', 'Zentral Office', '2025-01-08', true, NULL),
+  ('90000000-0000-0000-0000-000000000003', '40000000-0000-0000-0000-000000000003', '10000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000001', 'Centro Comercial Plaza Norte', '30000000-0000-0000-0000-000000000003', 'Plaza Norte', 'Plaza Norte', '2025-01-12', true, NULL);
 
 -- Participantes de actividades
 INSERT INTO actividad_participantes (registro_actividad_id, tecnico_id, porcentaje, valor_calculado)

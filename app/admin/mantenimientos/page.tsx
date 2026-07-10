@@ -58,14 +58,16 @@ import {
   ChevronRight,
   Loader2,
   Download,
+  FileSpreadsheet,
 } from "lucide-react";
-import { Maintenance, MaintenanceStatus, Client, User, CompanySettings } from "@/lib/types";
+import { Maintenance, MaintenanceStatus, Client, User, CompanySettings, LiquidationPeriod } from "@/lib/types";
 import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/supabase/services/mantenimientos";
 import { getContratos, createContrato } from "@/lib/supabase/services/contratos";
 import { getClientes } from "@/lib/supabase/services/clientes";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { getConfiguracion } from "@/lib/supabase/services/configuracion";
+import { getPeriodos } from "@/lib/supabase/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 import { formatClientDoorBreakdown } from "@/lib/utils/report-content";
@@ -252,6 +254,7 @@ export default function MantenimientosPage() {
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -275,6 +278,7 @@ export default function MantenimientosPage() {
   const [reactivateLoading, setReactivateLoading] = useState(false);
   const [programadosMonthFilter, setProgramadosMonthFilter] = useState<string>(() => getMonthInputValue(new Date()));
   const [vencidosMonthFilter, setVencidosMonthFilter] = useState<string>(() => getMonthInputValue(new Date()));
+  const [completedPeriodFilter, setCompletedPeriodFilter] = useState<string>("");
 
   const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
   const [calendarSelectedDate, setCalendarSelectedDate] = useState<Date | null>(null);
@@ -287,7 +291,7 @@ export default function MantenimientosPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, ct, c, u, s] = await Promise.all([
+      const [m, ct, c, u, s, p] = await Promise.all([
         getMantenimientos(),
         getContratos(),
         getClientes(),
@@ -296,12 +300,21 @@ export default function MantenimientosPage() {
           console.error("Error cargando configuración de empresa:", error);
           return null;
         }),
+        getPeriodos().catch((error) => {
+          console.error("Error cargando períodos de liquidación:", error);
+          return [];
+        }),
       ]);
       setMaintenances(m);
       setContracts(ct);
       setClients(c);
       setUsers(u);
       setCompanySettings(s);
+      setPeriods(p);
+      setCompletedPeriodFilter((current) => {
+        if (current && p.some((period) => period.id === current)) return current;
+        return p[0]?.id || "";
+      });
     } catch (err) {
       console.error("Error cargando mantenimientos:", err);
     } finally {
@@ -389,6 +402,16 @@ export default function MantenimientosPage() {
     return 0;
   }, []);
 
+  const getMaintenanceChargedValue = useCallback((maintenance: Maintenance) => {
+    if ((Number(maintenance.valorRecaudado ?? 0) || 0) > 0) {
+      return Number(maintenance.valorRecaudado ?? 0) || 0;
+    }
+
+    const contract = getMaintenanceContract(maintenance);
+    const contractMaintenance = contract?.mantenimientosRealizados.find((item) => item.id === (maintenance.contratoMantenimientoId || maintenance.id));
+    return Number(contractMaintenance?.valorRecaudado ?? 0) || 0;
+  }, [getMaintenanceContract]);
+
   const getMaintenanceAnnualValue = useCallback((maintenance: Maintenance) => {
     return getMaintenanceContract(maintenance)?.costoTotalAnual || 0;
   }, [getMaintenanceContract]);
@@ -396,6 +419,15 @@ export default function MantenimientosPage() {
   const isMaintenanceCompleted = useCallback((maintenance: Maintenance) => {
     const status = String(maintenance.estado).toLowerCase();
     return status === "realizado" || status === "completado";
+  }, []);
+
+  const getMaintenanceCompletedDate = useCallback((maintenance: Maintenance) => {
+    return maintenance.fechaCierre || maintenance.fechaProgramada || "";
+  }, []);
+
+  const getPeriodLabel = useCallback((period?: LiquidationPeriod) => {
+    if (!period) return "Sin período";
+    return `${period.fechaInicio} al ${period.fechaFin}`;
   }, []);
 
   const canScheduleMaintenance = useCallback((maintenance: Maintenance) => {
@@ -586,6 +618,29 @@ export default function MantenimientosPage() {
     });
   }, [clientsById, uncoveredContracts, uncoveredSearch]);
 
+  const completedMaintenances = useMemo(() => {
+    return maintenances.filter((maintenance) => isMaintenanceCompleted(maintenance));
+  }, [isMaintenanceCompleted, maintenances]);
+
+  const completedMaintenancesByPeriod = useMemo(() => {
+    const selectedPeriod = periods.find((period) => period.id === completedPeriodFilter);
+    if (!selectedPeriod) return [];
+
+    return completedMaintenances.filter((maintenance) => {
+      const completedDate = getMaintenanceCompletedDate(maintenance);
+      return !!completedDate && completedDate >= selectedPeriod.fechaInicio && completedDate <= selectedPeriod.fechaFin;
+    }).sort((left, right) => {
+      const dateCompare = getMaintenanceCompletedDate(right).localeCompare(getMaintenanceCompletedDate(left));
+      if (dateCompare !== 0) return dateCompare;
+      return right.id.localeCompare(left.id);
+    });
+  }, [completedMaintenances, completedPeriodFilter, getMaintenanceCompletedDate, periods]);
+
+  const selectedCompletedPeriod = useMemo(
+    () => periods.find((period) => period.id === completedPeriodFilter),
+    [completedPeriodFilter, periods]
+  );
+
   const calendarFilteredMaintenances = useMemo(() => {
     return filtered.filter((m) => {
       if (!m.fechaProgramada) return false;
@@ -603,10 +658,10 @@ export default function MantenimientosPage() {
 
   const companyName = companySettings?.nombre || "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
 
-  const getMaintenanceClientLabel = (maintenance: Maintenance) => {
+  const getMaintenanceClientLabel = useCallback((maintenance: Maintenance) => {
     const client = clientsById.get(maintenance.clienteId);
     return client?.edificio || client?.nombre || "Cliente no registrado";
-  };
+  }, [clientsById]);
 
   const getMaintenanceParticipantNames = useCallback((maintenance: Maintenance) => {
     const participantIds = maintenance.participantes?.map((participant) => participant.usuarioId).filter(Boolean) || [];
@@ -622,16 +677,16 @@ export default function MantenimientosPage() {
     }).filter(Boolean) as string[];
   }, [usersById]);
 
-  const getMaintenanceTechnicianLabel = (maintenance: Maintenance) => {
+  const getMaintenanceTechnicianLabel = useCallback((maintenance: Maintenance) => {
     const participantNames = getMaintenanceParticipantNames(maintenance);
     if (participantNames.length === 0) return "Sin técnico asignado";
     if (participantNames.length === 1) return participantNames[0];
     return `${participantNames.length} participantes`;
-  };
+  }, [getMaintenanceParticipantNames]);
 
-  const getMaintenanceStatusLabel = (maintenance: Maintenance) => {
+  const getMaintenanceStatusLabel = useCallback((maintenance: Maintenance) => {
     return (statusConfig[maintenance.estado] || defaultStatusConfig).label;
-  };
+  }, []);
 
   const formatSelectedCalendarLabel = () => {
     if (calendarSelectedDate) {
@@ -715,6 +770,44 @@ export default function MantenimientosPage() {
       landscape: true,
     });
   };
+
+  const handleExportCompletedByPeriodPDF = useCallback(() => {
+    if (!selectedCompletedPeriod) {
+      alert("Debes seleccionar un período para exportar los mantenimientos realizados.");
+      return;
+    }
+
+    if (completedMaintenancesByPeriod.length === 0) {
+      alert("No hay mantenimientos realizados en el período seleccionado.");
+      return;
+    }
+
+    generateTablePDF({
+      titulo: "MANTENIMIENTOS REALIZADOS POR PERIODO",
+      subtitulo: "Exportación de mantenimientos realizados con el valor cobrado de cada mantenimiento.",
+      empresa: companyName,
+      periodo: getPeriodLabel(selectedCompletedPeriod),
+      headers: ["Fecha realizada", "Cliente", "Tecnico", "Avance", "Estado", "Valor cobrado"],
+      rows: completedMaintenancesByPeriod.map((maintenance) => [
+        getMaintenanceCompletedDate(maintenance),
+        getMaintenanceClientLabel(maintenance),
+        getMaintenanceTechnicianLabel(maintenance),
+        getMaintenanceProgressLabel(maintenance),
+        getMaintenanceStatusLabel(maintenance),
+        formatCurrency(getMaintenanceChargedValue(maintenance)),
+      ]),
+      summary: [
+        { label: "Periodo", value: getPeriodLabel(selectedCompletedPeriod) },
+        { label: "Mantenimientos realizados", value: String(completedMaintenancesByPeriod.length) },
+        {
+          label: "Valor cobrado total",
+          value: formatCurrency(completedMaintenancesByPeriod.reduce((sum, maintenance) => sum + getMaintenanceChargedValue(maintenance), 0)),
+        },
+      ],
+      fileName: `mantenimientos_realizados_${selectedCompletedPeriod.fechaInicio}_${selectedCompletedPeriod.fechaFin}`,
+      landscape: true,
+    });
+  }, [companyName, completedMaintenancesByPeriod, getMaintenanceChargedValue, getMaintenanceClientLabel, getMaintenanceCompletedDate, getMaintenanceProgressLabel, getMaintenanceStatusLabel, getMaintenanceTechnicianLabel, getPeriodLabel, selectedCompletedPeriod]);
 
   const handleSave = async (data: Partial<Maintenance>) => {
     try {
@@ -891,6 +984,16 @@ export default function MantenimientosPage() {
               Programados
               <Badge className="ml-1.5 bg-blue-500/20 text-blue-400 text-[10px] border-0 px-1.5">
                 {programados.length}
+              </Badge>
+            </TabsTrigger>
+            <TabsTrigger
+              value="realizados"
+              className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold"
+            >
+              <FileSpreadsheet className="h-4 w-4 mr-2" />
+              Realizados
+              <Badge className="ml-1.5 bg-emerald-500/20 text-emerald-400 text-[10px] border-0 px-1.5">
+                {completedMaintenancesByPeriod.length}
               </Badge>
             </TabsTrigger>
             <TabsTrigger
@@ -1111,6 +1214,96 @@ export default function MantenimientosPage() {
                                 <Bell className="h-3 w-3 mr-1" />
                                 Notificado
                               </Badge>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="realizados">
+            <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+              <CardHeader>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <CardTitle className="text-lg text-foreground flex items-center gap-2">
+                      <FileSpreadsheet className="h-5 w-5 text-emerald-400" />
+                      Mantenimientos Realizados por Período
+                    </CardTitle>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      En el módulo de mantenimiento se puede exportar la información de los mantenimientos realizados en cada período y exportar únicamente el valor cobrado de cada mantenimiento.
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-3 sm:items-end">
+                    <Select value={completedPeriodFilter} onValueChange={setCompletedPeriodFilter}>
+                      <SelectTrigger className="w-[260px] bg-secondary/50 border-border/50">
+                        <SelectValue placeholder="Seleccionar período" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-card border-border">
+                        {periods.map((period) => (
+                          <SelectItem key={period.id} value={period.id}>
+                            {getPeriodLabel(period)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
+                      onClick={handleExportCompletedByPeriodPDF}
+                      disabled={!selectedCompletedPeriod || completedMaintenancesByPeriod.length === 0}
+                    >
+                      <Download className="h-4 w-4" />
+                      Exportar PDF
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-border/50 hover:bg-transparent">
+                      <TableHead className="text-muted-foreground">Fecha realizada</TableHead>
+                      <TableHead className="text-muted-foreground">Cliente</TableHead>
+                      <TableHead className="text-muted-foreground">Técnico</TableHead>
+                      <TableHead className="text-muted-foreground">Avance</TableHead>
+                      <TableHead className="text-muted-foreground">Estado</TableHead>
+                      <TableHead className="text-muted-foreground text-right">Valor cobrado</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {completedMaintenancesByPeriod.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                          {selectedCompletedPeriod
+                            ? "No hay mantenimientos realizados en el período seleccionado"
+                            : "No hay períodos disponibles para exportar"}
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      completedMaintenancesByPeriod.map((maintenance) => {
+                        const status = statusConfig[maintenance.estado] || defaultStatusConfig;
+                        return (
+                          <TableRow key={maintenance.id} className="border-border/50 hover:bg-secondary/30">
+                            <TableCell className="text-sm text-foreground/80">{getMaintenanceCompletedDate(maintenance)}</TableCell>
+                            <TableCell>
+                              <p className="font-medium text-foreground">{getMaintenanceClientLabel(maintenance)}</p>
+                              <p className="text-xs text-muted-foreground">{clientsById.get(maintenance.clienteId)?.nombre || "Cliente no registrado"}</p>
+                            </TableCell>
+                            <TableCell className="text-sm text-foreground/80">{getMaintenanceTechnicianLabel(maintenance)}</TableCell>
+                            <TableCell className="text-sm text-foreground/80">{getMaintenanceProgressLabel(maintenance)}</TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className={cn("text-xs", status.color)}>
+                                {status.label}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-right text-sm font-medium text-gold">
+                              {formatCurrency(getMaintenanceChargedValue(maintenance))}
                             </TableCell>
                           </TableRow>
                         );

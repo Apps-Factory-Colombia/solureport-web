@@ -4,6 +4,7 @@ import { getCachedValue, invalidateCachedValue } from "@/lib/utils/request-cache
 import { filterPreventiveMirrorReports } from "@/lib/utils/report-filters";
 import { getConfiguracion } from "./configuracion";
 import { syncReporteMantenimientoToActividad } from "./mantenimientos";
+import { deleteGroupActivityEvidenceFiles, replaceGroupActivityEvidenceFile } from "./storage";
 
 const REPORTES_ACTIVIDAD_CACHE_KEY = "reportes-actividad:list";
 const REPORTES_ACTIVIDAD_CACHE_TTL = 60_000;
@@ -25,6 +26,7 @@ interface ReporteActividadRow {
   cliente_id?: string | null;
   descripcion?: string | null;
   observaciones?: string | null;
+  foto_evidencia_url?: string | null;
   firma_receptor_url?: string | null;
   nombre_receptor?: string | null;
   cedula_receptor?: string | null;
@@ -59,6 +61,7 @@ interface RegistroActividadRow {
   cliente_id?: string | null;
   cliente_nombre?: string | null;
   especificacion?: string | null;
+  foto_evidencia_url?: string | null;
   valor_actividad_base?: number | string | null;
   valor_actividad_aplicado?: number | string | null;
   valor_sugerido?: number | string | null;
@@ -166,6 +169,29 @@ interface RegistroBaseRow {
   id: string;
 }
 
+interface LegacyRegistroCandidateRow {
+  id: string;
+  actividad_id?: string | null;
+  lider_id?: string | null;
+  grupo_id?: string | null;
+  cliente_id?: string | null;
+  fecha: string;
+  especificacion?: string | null;
+  valor_actividad_base?: number | string | null;
+  fecha_creacion?: string | null;
+  foto_evidencia_url?: string | null;
+}
+
+interface GroupActivitySourceRow {
+  id: string;
+  fecha: string;
+  grupo_id: string;
+  cliente_id?: string | null;
+  descripcion?: string | null;
+  periodo_id?: string | null;
+  lider_grupo_id?: string | null;
+}
+
 interface ParticipanteRelacionRow {
   registro_actividad_id: string;
   tecnico_id: string;
@@ -261,6 +287,7 @@ function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues:
     clienteId: row.cliente_id || undefined,
     descripcion: row.descripcion || "",
     observaciones: row.observaciones || undefined,
+    fotoEvidencia: row.foto_evidencia_url || undefined,
     fotosAntes: fotosAntes.length > 0 ? fotosAntes : undefined,
     fotosDespues: fotosDespues.length > 0 ? fotosDespues : undefined,
     firmaReceptor: row.firma_receptor_url || undefined,
@@ -1249,6 +1276,7 @@ function enrichLegacyActivityReport(
   return {
     ...report,
     observaciones: mirror.observaciones || report.observaciones,
+    fotoEvidencia: mirror.fotoEvidencia || report.fotoEvidencia,
     fotosAntes: mirror.fotosAntes || report.fotosAntes,
     fotosDespues: mirror.fotosDespues || report.fotosDespues,
     firmaReceptor: mirror.firmaReceptor || report.firmaReceptor,
@@ -1270,6 +1298,7 @@ function mergeGroupActivityMetadata(report: ActivityReport, relatedReport: Activ
     ...report,
     registroActividadId: relatedReport.registroActividadId || report.registroActividadId,
     porcentajeParticipacion: relatedReport.porcentajeParticipacion ?? report.porcentajeParticipacion,
+    fotoEvidencia: report.fotoEvidencia || relatedReport.fotoEvidencia,
     costoActividadDefault: report.costoActividadDefault || relatedReport.costoActividadDefault,
     costoActividad: report.costoActividad,
     valorActividadBaseGlobal: relatedReport.valorActividadBaseGlobal ?? report.valorActividadBaseGlobal,
@@ -1316,6 +1345,98 @@ async function resolveRegistrosPeriodoIds(rows: RegistroActividadRow[]): Promise
   });
 
   return resolved;
+}
+
+async function resolveLegacyRegistroForGroupActivitySource(
+  sourceReport: GroupActivitySourceRow,
+  participantIds: string[]
+): Promise<LegacyRegistroCandidateRow | undefined> {
+  let legacyRegistroQuery = supabase
+    .from("registros_actividades")
+    .select("id, actividad_id, lider_id, grupo_id, cliente_id, fecha, especificacion, valor_actividad_base, fecha_creacion, foto_evidencia_url")
+    .eq("fecha", sourceReport.fecha)
+    .eq("grupo_id", sourceReport.grupo_id);
+
+  if (sourceReport.cliente_id) {
+    legacyRegistroQuery = legacyRegistroQuery.eq("cliente_id", sourceReport.cliente_id);
+  } else {
+    legacyRegistroQuery = legacyRegistroQuery.is("cliente_id", null);
+  }
+
+  const { data: legacyRegistroCandidates, error: legacyRegistroCandidatesError } = await legacyRegistroQuery;
+  if (legacyRegistroCandidatesError) throw legacyRegistroCandidatesError;
+
+  let legacyRegistro = (legacyRegistroCandidates || [])[0] as LegacyRegistroCandidateRow | undefined;
+  const canonicalIdentity = buildLegacyRegistroCandidateIdentity({
+    leaderId: sourceReport.lider_grupo_id,
+    grupoId: sourceReport.grupo_id,
+    clienteId: sourceReport.cliente_id,
+    fecha: sourceReport.fecha,
+    descripcion: sourceReport.descripcion,
+  });
+
+  if ((legacyRegistroCandidates || []).length > 1) {
+    const candidateRegistroIds = (legacyRegistroCandidates || []).map((item: { id: string }) => item.id);
+    const { data: candidateParticipants, error: candidateParticipantsError } = await supabase
+      .from("actividad_participantes")
+      .select("registro_actividad_id, tecnico_id")
+      .in("registro_actividad_id", candidateRegistroIds);
+    if (candidateParticipantsError) throw candidateParticipantsError;
+
+    const expectedTechnicianIds = Array.from(new Set(participantIds)).sort();
+    const participantsByRegistro = new Map<string, string[]>();
+
+    (candidateParticipants || []).forEach((row: { registro_actividad_id: string; tecnico_id: string }) => {
+      const current = participantsByRegistro.get(row.registro_actividad_id) || [];
+      current.push(row.tecnico_id);
+      participantsByRegistro.set(row.registro_actividad_id, current);
+    });
+
+    const participantMatchedRegistro = (legacyRegistroCandidates || []).find((candidate: { id: string }) => {
+      const registroParticipantIds = Array.from(new Set(participantsByRegistro.get(candidate.id) || [])).sort();
+      return registroParticipantIds.length === expectedTechnicianIds.length
+        && registroParticipantIds.every((value, index) => value === expectedTechnicianIds[index]);
+    });
+
+    const identityMatchedRegistro = (legacyRegistroCandidates || []).find((candidate: LegacyRegistroCandidateRow) => buildLegacyRegistroCandidateIdentity({
+      actividadId: candidate.actividad_id,
+      leaderId: candidate.lider_id,
+      grupoId: candidate.grupo_id,
+      clienteId: candidate.cliente_id,
+      fecha: candidate.fecha,
+      especificacion: candidate.especificacion,
+      descripcion: sourceReport.descripcion,
+    }) === canonicalIdentity);
+
+    legacyRegistro = identityMatchedRegistro || participantMatchedRegistro || legacyRegistro;
+
+    if ((legacyRegistroCandidates || []).length > 1) {
+      legacyRegistro = (legacyRegistroCandidates || []).reduce<LegacyRegistroCandidateRow | undefined>((best, candidate) => {
+        if (!best) return candidate;
+
+        const candidateScore = scoreLegacyActivityCompleteness({
+          description: sourceReport.descripcion,
+          especificacion: candidate.especificacion,
+          registroActividadId: candidate.id,
+        });
+        const bestScore = scoreLegacyActivityCompleteness({
+          description: sourceReport.descripcion,
+          especificacion: best.especificacion,
+          registroActividadId: best.id,
+        });
+
+        if (candidateScore !== bestScore) {
+          return candidateScore > bestScore ? candidate : best;
+        }
+
+        return isNewerActivityCandidate(best.fecha_creacion, candidate.fecha_creacion, best.id, candidate.id)
+          ? candidate
+          : best;
+      }, legacyRegistro);
+    }
+  }
+
+  return legacyRegistro;
 }
 
 function buildVisitMirrorStrictKey(params: {
@@ -2215,7 +2336,7 @@ async function syncGroupedActivityLiquidationValue(params: {
 
 async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Promise<ActivityReport[]> {
     const [{ data: registros }, { data: allParticipantes }, { data: actividades }, { data: periodos }, { data: approvalItems }] = await Promise.all([
-    supabase.from("registros_actividades").select("id, actividad_id, lider_id, grupo_id, fecha, cliente_id, cliente_nombre, especificacion, valor_actividad_base, valor_actividad_aplicado, valor_sugerido, motivo_sugerencia_valor, valor_modificado, motivo_modificacion_valor, enviado_correo, fecha_ultimo_envio_correo, periodo_id, fecha_creacion").order("fecha", { ascending: false }),
+    supabase.from("registros_actividades").select("id, actividad_id, lider_id, grupo_id, fecha, cliente_id, cliente_nombre, especificacion, foto_evidencia_url, valor_actividad_base, valor_actividad_aplicado, valor_sugerido, motivo_sugerencia_valor, valor_modificado, motivo_modificacion_valor, enviado_correo, fecha_ultimo_envio_correo, periodo_id, fecha_creacion").order("fecha", { ascending: false }),
     supabase.from("actividad_participantes").select("registro_actividad_id, tecnico_id, porcentaje, valor_calculado"),
     supabase.from("actividades").select("id, codigo, nombre"),
     supabase.from("periodos_liquidacion").select("id, fecha_inicio, fecha_fin").order("fecha_inicio", { ascending: false }),
@@ -2288,6 +2409,7 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
         clienteId: reg.cliente_id || undefined,
         descripcion: act ? `${act.codigo} — ${act.nombre}` : reg.cliente_nombre || "Actividad grupal",
         especificacion: reg.especificacion || undefined,
+        fotoEvidencia: reg.foto_evidencia_url || undefined,
         estadoAprobacionLider: estadoAprobacion,
         fechaAprobacionLider: approval?.fecha_aprobacion?.split("T")[0] || undefined,
         costoActividadDefault: valorBaseParticipante,
@@ -3198,108 +3320,10 @@ export async function updateActividadGrupalBaseAdmin(
       0
     );
 
-    let legacyRegistroQuery = supabase
-      .from("registros_actividades")
-      .select("id, actividad_id, lider_id, grupo_id, cliente_id, fecha, especificacion, valor_actividad_base, fecha_creacion")
-      .eq("fecha", sourceReport.fecha)
-      .eq("grupo_id", sourceReport.grupo_id);
-
-    if (sourceReport.cliente_id) {
-      legacyRegistroQuery = legacyRegistroQuery.eq("cliente_id", sourceReport.cliente_id);
-    } else {
-      legacyRegistroQuery = legacyRegistroQuery.is("cliente_id", null);
-    }
-
-    const { data: legacyRegistroCandidates, error: legacyRegistroCandidatesError } = await legacyRegistroQuery;
-    if (legacyRegistroCandidatesError) throw legacyRegistroCandidatesError;
-
-    let legacyRegistro = (legacyRegistroCandidates || [])[0] as {
-      id: string;
-      actividad_id?: string | null;
-      lider_id?: string | null;
-      grupo_id?: string | null;
-      cliente_id?: string | null;
-      fecha: string;
-      especificacion?: string | null;
-      valor_actividad_base?: number | string | null;
-      fecha_creacion?: string | null;
-    } | undefined;
-
-    const canonicalIdentity = buildLegacyRegistroCandidateIdentity({
-      leaderId: sourceReport.lider_grupo_id,
-      grupoId: sourceReport.grupo_id,
-      clienteId: sourceReport.cliente_id,
-      fecha: sourceReport.fecha,
-      descripcion: sourceReport.descripcion,
-    });
-
-    if ((legacyRegistroCandidates || []).length > 1) {
-      const candidateRegistroIds = (legacyRegistroCandidates || []).map((item: { id: string }) => item.id);
-      const { data: candidateParticipants, error: candidateParticipantsError } = await supabase
-        .from("actividad_participantes")
-        .select("registro_actividad_id, tecnico_id")
-        .in("registro_actividad_id", candidateRegistroIds);
-      if (candidateParticipantsError) throw candidateParticipantsError;
-
-      const expectedTechnicianIds = Array.from(new Set(participants.map((participant: { tecnico_id: string }) => participant.tecnico_id))).sort();
-      const participantsByRegistro = new Map<string, string[]>();
-
-      (candidateParticipants || []).forEach((row: { registro_actividad_id: string; tecnico_id: string }) => {
-        const current = participantsByRegistro.get(row.registro_actividad_id) || [];
-        current.push(row.tecnico_id);
-        participantsByRegistro.set(row.registro_actividad_id, current);
-      });
-
-      const participantMatchedRegistro = (legacyRegistroCandidates || []).find((candidate: { id: string }) => {
-        const registroParticipantIds = Array.from(new Set(participantsByRegistro.get(candidate.id) || [])).sort();
-        return registroParticipantIds.length === expectedTechnicianIds.length
-          && registroParticipantIds.every((value, index) => value === expectedTechnicianIds[index]);
-      });
-
-      const identityMatchedRegistro = (legacyRegistroCandidates || []).find((candidate: {
-        actividad_id?: string | null;
-        lider_id?: string | null;
-        grupo_id?: string | null;
-        cliente_id?: string | null;
-        fecha: string;
-        especificacion?: string | null;
-      }) => buildLegacyRegistroCandidateIdentity({
-        actividadId: candidate.actividad_id,
-        leaderId: candidate.lider_id,
-        grupoId: candidate.grupo_id,
-        clienteId: candidate.cliente_id,
-        fecha: candidate.fecha,
-        especificacion: candidate.especificacion,
-        descripcion: sourceReport.descripcion,
-      }) === canonicalIdentity);
-
-      legacyRegistro = identityMatchedRegistro || participantMatchedRegistro || legacyRegistro;
-
-      if ((legacyRegistroCandidates || []).length > 1) {
-        legacyRegistro = (legacyRegistroCandidates || []).reduce<typeof legacyRegistro>((best, candidate) => {
-          if (!best) return candidate;
-
-          const candidateScore = scoreLegacyActivityCompleteness({
-            description: sourceReport.descripcion,
-            especificacion: candidate.especificacion,
-            registroActividadId: candidate.id,
-          });
-          const bestScore = scoreLegacyActivityCompleteness({
-            description: sourceReport.descripcion,
-            especificacion: best.especificacion,
-            registroActividadId: best.id,
-          });
-
-          if (candidateScore !== bestScore) {
-            return candidateScore > bestScore ? candidate : best;
-          }
-
-          return isNewerActivityCandidate(best.fecha_creacion, candidate.fecha_creacion, best.id, candidate.id)
-            ? candidate
-            : best;
-        }, legacyRegistro);
-      }
-    }
+      const legacyRegistro = await resolveLegacyRegistroForGroupActivitySource(
+        sourceReport,
+        participants.map((participant: { tecnico_id: string }) => participant.tecnico_id)
+      );
 
     const participantResults = participants.map((participant: { id: string; tecnico_id: string; costo_actividad?: number | string | null; periodo_id?: string | null }) => {
       const currentValue = Number(participant.costo_actividad) || 0;
@@ -3673,6 +3697,136 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
   invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
 }
 
+export async function uploadActividadGrupalEvidenciaAdmin(
+  id: string,
+  file: File,
+  options?: { sourceReportId?: string }
+): Promise<string> {
+  const legacyGroupActivity = parseLegacyGroupActivityReportId(id);
+  const sourceReportLookupId = options?.sourceReportId && !options.sourceReportId.startsWith("reg-")
+    ? options.sourceReportId
+    : (!id.startsWith("reg-") ? id : undefined);
+
+  if (sourceReportLookupId) {
+    const { data: sourceReport, error: sourceReportError } = await supabase
+      .from("reportes_actividad")
+      .select("id, fecha, grupo_id, cliente_id, descripcion, periodo_id, lider_grupo_id")
+      .eq("id", sourceReportLookupId)
+      .maybeSingle();
+    if (sourceReportError) throw sourceReportError;
+    if (!sourceReport) {
+      throw new Error(`No se encontró el reporte fuente para la actividad grupal: ${sourceReportLookupId}`);
+    }
+
+    let relatedReportsQuery = supabase
+      .from("reportes_actividad")
+      .select("id, tecnico_id")
+      .in("tipo", ["actividad", "actividad_grupal"])
+      .eq("fecha", sourceReport.fecha)
+      .eq("grupo_id", sourceReport.grupo_id);
+
+    if (sourceReport.cliente_id) {
+      relatedReportsQuery = relatedReportsQuery.eq("cliente_id", sourceReport.cliente_id);
+    } else {
+      relatedReportsQuery = relatedReportsQuery.is("cliente_id", null);
+    }
+
+    if (sourceReport.descripcion) {
+      relatedReportsQuery = relatedReportsQuery.eq("descripcion", sourceReport.descripcion);
+    } else {
+      relatedReportsQuery = relatedReportsQuery.is("descripcion", null);
+    }
+
+    const { data: relatedReports, error: relatedReportsError } = await relatedReportsQuery;
+    if (relatedReportsError) throw relatedReportsError;
+
+    const legacyRegistro = await resolveLegacyRegistroForGroupActivitySource(
+      sourceReport,
+      (relatedReports || []).map((participant: { tecnico_id: string }) => participant.tecnico_id)
+    );
+    const storageTargetId = legacyRegistro?.id || sourceReport.id;
+    const url = await replaceGroupActivityEvidenceFile(storageTargetId, file);
+
+    if ((relatedReports || []).length > 0) {
+      const { error: reportUpdateError } = await supabase
+        .from("reportes_actividad")
+        .update({ foto_evidencia_url: url })
+        .in("id", (relatedReports || []).map((report: { id: string }) => report.id));
+      if (reportUpdateError) throw reportUpdateError;
+    }
+
+    if (legacyRegistro?.id) {
+      const { error: registroUpdateError } = await supabase
+        .from("registros_actividades")
+        .update({ foto_evidencia_url: url })
+        .eq("id", legacyRegistro.id);
+      if (registroUpdateError) throw registroUpdateError;
+    }
+
+    invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+    invalidateCachedValue("liquidacion:entries");
+    return url;
+  }
+
+  const registroId = legacyGroupActivity?.registroId || id;
+  const { data: registro, error: registroError } = await supabase
+    .from("registros_actividades")
+    .select("id, fecha, grupo_id, cliente_id")
+    .eq("id", registroId)
+    .maybeSingle();
+  if (registroError) throw registroError;
+  if (!registro) {
+    throw new Error(`No se encontró el registro de actividad grupal: ${registroId}`);
+  }
+
+  const { data: participantes, error: participantesError } = await supabase
+    .from("actividad_participantes")
+    .select("tecnico_id")
+    .eq("registro_actividad_id", registroId);
+  if (participantesError) throw participantesError;
+
+  const participantIds = (participantes || []).map((item: { tecnico_id: string }) => item.tecnico_id).filter(Boolean);
+  let mirroredReportsQuery = supabase
+    .from("reportes_actividad")
+    .select("id")
+    .in("tipo", ["actividad", "actividad_grupal"])
+    .eq("fecha", registro.fecha)
+    .eq("grupo_id", registro.grupo_id);
+
+  if (registro.cliente_id) {
+    mirroredReportsQuery = mirroredReportsQuery.eq("cliente_id", registro.cliente_id);
+  } else {
+    mirroredReportsQuery = mirroredReportsQuery.is("cliente_id", null);
+  }
+
+  if (participantIds.length > 0) {
+    mirroredReportsQuery = mirroredReportsQuery.in("tecnico_id", participantIds);
+  }
+
+  const { data: mirroredReports, error: mirroredReportsError } = await mirroredReportsQuery;
+  if (mirroredReportsError) throw mirroredReportsError;
+
+  const url = await replaceGroupActivityEvidenceFile(registro.id, file);
+
+  const { error: registroUpdateError } = await supabase
+    .from("registros_actividades")
+    .update({ foto_evidencia_url: url })
+    .eq("id", registro.id);
+  if (registroUpdateError) throw registroUpdateError;
+
+  if ((mirroredReports || []).length > 0) {
+    const { error: reportUpdateError } = await supabase
+      .from("reportes_actividad")
+      .update({ foto_evidencia_url: url })
+      .in("id", (mirroredReports || []).map((report: { id: string }) => report.id));
+    if (reportUpdateError) throw reportUpdateError;
+  }
+
+  invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
+  invalidateCachedValue("liquidacion:entries");
+  return url;
+}
+
 export async function markReporteActividadEmailSent(id: string, sentAt: string = new Date().toISOString()): Promise<void> {
   if (id.startsWith("reg-")) {
     const parts = id.split("-");
@@ -3889,6 +4043,7 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
         .eq("registro_actividad_id", registroId);
 
       if (!remaining || remaining.length === 0) {
+        await deleteGroupActivityEvidenceFiles(registroId);
         await supabase
           .from("registros_actividades")
           .delete()
@@ -3901,7 +4056,7 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
 
   const { data: report, error: reportError } = await supabase
     .from("reportes_actividad")
-    .select("id, tipo, tecnico_id, grupo_id, cliente_id, periodo_id, fecha, punto_partida, punto_llegada, mantenimiento_id")
+    .select("id, tipo, tecnico_id, grupo_id, cliente_id, periodo_id, fecha, punto_partida, punto_llegada, mantenimiento_id, foto_evidencia_url")
     .eq("id", id)
     .single();
 
@@ -3986,6 +4141,7 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
       );
 
       if (registroIdsToDelete.length > 0) {
+        await Promise.all(registroIdsToDelete.map((registroId) => deleteGroupActivityEvidenceFiles(registroId)));
         const { error: deleteParticipantesError } = await supabase
           .from("actividad_participantes")
           .delete()
@@ -3998,6 +4154,10 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
           .in("id", registroIdsToDelete);
         if (deleteRegistrosError) throw deleteRegistrosError;
       }
+    }
+
+    if (report.tipo === "actividad" || report.tipo === "actividad_grupal") {
+      await deleteGroupActivityEvidenceFiles(report.id);
     }
   }
 
