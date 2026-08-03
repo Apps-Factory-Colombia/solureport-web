@@ -16,12 +16,15 @@ const ADMIN_VALUE_OVERRIDE_REASON = "Ajuste manual desde administracion";
 
 interface ReporteActividadRow {
   id: string;
+  codigo_registro?: string | null;
   tipo: string;
   tecnico_id: string;
   lider_grupo_id: string;
   grupo_id: string;
   mantenimiento_id?: string | null;
   mantenimiento_participante_id?: string | null;
+  visita_tecnica_id?: string | null;
+  recorrido_id?: string | null;
   fecha: string;
   cliente_id?: string | null;
   descripcion?: string | null;
@@ -35,6 +38,7 @@ interface ReporteActividadRow {
   foto_bitacora_url?: string | null;
   punto_partida?: string | null;
   punto_llegada?: string | null;
+  tipo_visita?: ActivityReport["tipoVisita"] | null;
   tipo_recorrido?: ActivityReport["tipoRecorrido"] | null;
   foto_herramienta_url?: string | null;
   estado_aprobacion_lider: ActivityReport["estadoAprobacionLider"];
@@ -54,6 +58,7 @@ interface ReporteActividadRow {
 
 interface RegistroActividadRow {
   id: string;
+  codigo_registro?: string | null;
   actividad_id?: string | null;
   lider_id: string;
   grupo_id: string;
@@ -204,6 +209,7 @@ interface LegacyActivityMirrorMaps {
 
 interface VisitMirrorRow {
   id: string;
+  codigo_registro?: string | null;
   tecnico_id: string;
   cliente_id?: string | null;
   descripcion?: string | null;
@@ -241,6 +247,7 @@ interface VisitLiquidationMaps {
 
 interface RecorridoMirrorRow {
   id: string;
+  codigo_registro?: string | null;
   tecnico_id: string;
   fecha: string;
   punto_partida?: string | null;
@@ -277,9 +284,12 @@ function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues:
 
   return {
     id: row.id,
+    codigoRegistro: row.codigo_registro || undefined,
     tipo: normalizedTipo,
     mantenimientoId: row.mantenimiento_id || undefined,
     mantenimientoParticipanteId: row.mantenimiento_participante_id || undefined,
+    visitaTecnicaId: row.visita_tecnica_id || undefined,
+    tipoVisita: row.tipo_visita || undefined,
     tecnicoId: row.tecnico_id,
     liderGrupoId: row.lider_grupo_id,
     grupoId: row.grupo_id,
@@ -979,11 +989,14 @@ function dedupeGroupActivityReports(reports: ActivityReport[]) {
     const directKey = report.tipo === "visita_tecnica"
       ? [
         report.tipo,
-        report.visitaTecnicaId || "sin-visita",
         report.tecnicoId,
-        report.fecha,
-        report.clienteId || "sin-cliente",
-        normalizeActivityMatchText(report.descripcion),
+        report.codigoRegistro
+          || report.visitaTecnicaId
+          || [
+            report.fecha,
+            report.clienteId || "sin-cliente",
+            normalizeActivityMatchText(report.descripcion),
+          ].join("|"),
       ].join("|")
       : report.tipo === "mantenimiento_preventivo"
         ? buildPreventiveMaintenanceCanonicalIdentity(report)
@@ -1578,7 +1591,22 @@ function enrichVisitReport(
   report: ActivityReport,
   mirrors?: VisitMirrorMaps
 ): ActivityReport {
-  if (!mirrors || report.tipo !== "visita_tecnica") return report;
+  if (report.tipo !== "visita_tecnica") return report;
+
+  if (report.tipoVisita === "entregas") {
+    return {
+      ...report,
+      costoActividadDefault: 0,
+      costoActividad: 0,
+      costoCliente: 0,
+      valorSugerido: undefined,
+      valorSugeridoGlobal: undefined,
+      valorModificado: false,
+      motivoModificacionValor: undefined,
+    };
+  }
+
+  if (!mirrors) return report;
 
   const strictKey = buildVisitMirrorStrictKey({
     tecnicoId: report.tecnicoId,
@@ -1595,6 +1623,26 @@ function enrichVisitReport(
   const mirror = mirrors.strict.get(strictKey) || mirrors.fallback.get(fallbackKey);
 
   if (!mirror) return report;
+
+  const resolvedVisitType = report.tipoVisita || mirror.tipo_visita || undefined;
+  const resolvedRegistrationCode = report.codigoRegistro || mirror.codigo_registro || undefined;
+
+  if (resolvedVisitType === "entregas") {
+    return {
+      ...report,
+      codigoRegistro: resolvedRegistrationCode,
+      visitaTecnicaId: report.visitaTecnicaId || mirror.id,
+      tipoVisita: resolvedVisitType,
+      costoActividadDefault: 0,
+      costoActividad: 0,
+      costoCliente: 0,
+      valorSugerido: undefined,
+      valorSugeridoGlobal: undefined,
+      motivoSugerenciaValor: report.motivoSugerenciaValor,
+      valorModificado: false,
+      motivoModificacionValor: undefined,
+    };
+  }
 
   const mirrorDefaultCost = Number(mirror.costo_visita_tecnica_default ?? 0) || 0;
   const reportCurrentValue = Number(report.costoActividad ?? 0) || 0;
@@ -1615,8 +1663,9 @@ function enrichVisitReport(
 
   return {
     ...report,
+    codigoRegistro: resolvedRegistrationCode,
     visitaTecnicaId: report.visitaTecnicaId || mirror.id,
-    tipoVisita: report.tipoVisita || mirror.tipo_visita || undefined,
+    tipoVisita: resolvedVisitType,
     costoActividad: normalizedVisitValue,
     costoCliente: mirror.costo_cliente == null ? (report.costoCliente ?? 0) : Number(mirror.costo_cliente) || 0,
     costoActividadDefault: shouldUseMirrorDefault ? mirrorDefaultCost : report.costoActividadDefault,
@@ -1658,6 +1707,7 @@ function enrichRecorridoReport(
 
   return {
     ...report,
+    codigoRegistro: mirror?.codigo_registro || report.codigoRegistro,
     costoActividadDefault: configuredCost,
     costoActividad: effectiveCost,
     fotoHerramienta: mirror?.foto_herramienta_url || report.fotoHerramienta,
@@ -2336,7 +2386,7 @@ async function syncGroupedActivityLiquidationValue(params: {
 
 async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Promise<ActivityReport[]> {
     const [{ data: registros }, { data: allParticipantes }, { data: actividades }, { data: periodos }, { data: approvalItems }] = await Promise.all([
-    supabase.from("registros_actividades").select("id, actividad_id, lider_id, grupo_id, fecha, cliente_id, cliente_nombre, especificacion, foto_evidencia_url, valor_actividad_base, valor_actividad_aplicado, valor_sugerido, motivo_sugerencia_valor, valor_modificado, motivo_modificacion_valor, enviado_correo, fecha_ultimo_envio_correo, periodo_id, fecha_creacion").order("fecha", { ascending: false }),
+    supabase.from("registros_actividades").select("id, codigo_registro, actividad_id, lider_id, grupo_id, fecha, cliente_id, cliente_nombre, especificacion, foto_evidencia_url, valor_actividad_base, valor_actividad_aplicado, valor_sugerido, motivo_sugerencia_valor, valor_modificado, motivo_modificacion_valor, enviado_correo, fecha_ultimo_envio_correo, periodo_id, fecha_creacion").order("fecha", { ascending: false }),
     supabase.from("actividad_participantes").select("registro_actividad_id, tecnico_id, porcentaje, valor_calculado"),
     supabase.from("actividades").select("id, codigo, nombre"),
     supabase.from("periodos_liquidacion").select("id, fecha_inicio, fecha_fin").order("fecha_inicio", { ascending: false }),
@@ -2399,6 +2449,7 @@ async function getRegistrosComoReports(mirrors?: LegacyActivityMirrorMaps): Prom
 
       reports.push(enrichLegacyActivityReport({
         id: `reg-${reg.id}-${part.tecnico_id}`,
+        codigoRegistro: reg.codigo_registro || undefined,
         tipo: "actividad_grupal",
         registroActividadId: reg.id,
         tecnicoId: part.tecnico_id,
@@ -2580,7 +2631,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     const { data: recorridoMirrorData, error: recorridoMirrorError } = uniqueRecorridoTechIds.length > 0 && minRecorridoDate && maxRecorridoDate
       ? await supabase
         .from("recorridos")
-        .select("id, tecnico_id, fecha, punto_partida, punto_llegada, tipo_recorrido, valor, foto_herramienta_url")
+        .select("*")
         .in("tecnico_id", uniqueRecorridoTechIds)
         .gte("fecha", minRecorridoDate)
         .lte("fecha", maxRecorridoDate)

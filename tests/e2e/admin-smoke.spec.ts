@@ -47,6 +47,35 @@ test.describe("Admin E2E", () => {
     await expect(extraLeaderMetric.getByText(/^\$\s*6\.000$/)).toBeVisible();
   });
 
+  test("shows the attached tool photo in recorrido approval details", async ({ page }) => {
+    await page.goto("/admin/aprobaciones");
+
+    await expect(page.getByText("Aprobaciones de Actividades").first()).toBeVisible();
+    await page.getByRole("tab", { name: /Recorrido/i }).click();
+
+    const rowWithEvidence = page.getByRole("row").filter({ hasText: "Evidencia" }).first();
+    await expect(rowWithEvidence).toBeVisible();
+    await rowWithEvidence.locator('button[data-testid^="approval-open-"]').click();
+
+    const detail = page.getByTestId("approval-detail-dialog");
+    const toolPhoto = detail.getByRole("img", { name: "Foto de la herramienta utilizada en el recorrido" });
+    await expect(toolPhoto).toBeVisible();
+    await expect(toolPhoto).toHaveAttribute("src", /fotos-recorridos/);
+  });
+
+  test("shows contractual charged values for completed maintenances", async ({ page }) => {
+    await page.goto("/admin/mantenimientos");
+
+    await expect(page.getByText("Programación de Mantenimientos").first()).toBeVisible();
+    await page.getByRole("tab", { name: /^Realizados/i }).click();
+
+    const completedPanel = page.getByRole("tabpanel", { name: /^Realizados/i });
+    await completedPanel.getByRole("combobox").click();
+    await page.getByRole("option", { name: "2026-06-03 al 2026-06-17" }).click();
+
+    await expect(completedPanel.getByText("$ 612.000", { exact: true }).first()).toBeVisible();
+  });
+
   test("downloads maintenance PDFs from programados and calendario", async ({ page }) => {
     await page.goto("/admin/mantenimientos");
 

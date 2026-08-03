@@ -458,6 +458,7 @@ export default function UsuariosPage() {
                 const members = group.miembros
                   .map((id) => users.find((u) => u.id === id))
                   .filter(Boolean);
+                const reporterCount = group.reporterosIds?.length ?? group.miembros.length;
 
                 return (
                   <Card
@@ -543,9 +544,14 @@ export default function UsuariosPage() {
                         )}
                       </div>
                       <div className="flex items-center justify-between pt-2 border-t border-border/50">
-                        <span className="text-xs text-muted-foreground">
-                          {group.miembros.length} miembros
-                        </span>
+                        <div className="space-y-0.5">
+                          <p className="text-xs text-muted-foreground">
+                            {group.miembros.length} miembros
+                          </p>
+                          <p className="text-xs text-cyan-neon/80">
+                            {reporterCount} pueden reportar
+                          </p>
+                        </div>
                         <Badge
                           variant="outline"
                           className={cn(

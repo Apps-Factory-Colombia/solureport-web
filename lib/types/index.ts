@@ -40,6 +40,7 @@ export interface WorkGroup {
   nombre: string;
   liderId: string;
   miembros: string[];
+  reporterosIds?: string[];
   estado: "activo" | "inactivo";
   fechaCreacion: string;
 }
@@ -195,6 +196,7 @@ export interface MantenimientoContrato {
 
 export interface TechnicalVisit {
   id: string;
+  codigoRegistro?: string;
   clienteId: string;
   tecnicoId: string;
   liderId?: string;
@@ -248,6 +250,7 @@ export type TipoRecorrido = "normal" | "con_herramienta";
 
 export interface ActivityReport {
   id: string;
+  codigoRegistro?: string;
   tipo: TipoInforme;
   mantenimientoId?: string;
   mantenimientoParticipanteId?: string;

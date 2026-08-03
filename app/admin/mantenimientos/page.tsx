@@ -409,7 +409,8 @@ export default function MantenimientosPage() {
 
     const contract = getMaintenanceContract(maintenance);
     const contractMaintenance = contract?.mantenimientosRealizados.find((item) => item.id === (maintenance.contratoMantenimientoId || maintenance.id));
-    return Number(contractMaintenance?.valorRecaudado ?? 0) || 0;
+    const chargedValue = Number(contractMaintenance?.valorRecaudado ?? 0) || 0;
+    return chargedValue > 0 ? chargedValue : Number(contract?.costoPorMantenimiento ?? 0) || 0;
   }, [getMaintenanceContract]);
 
   const getMaintenanceAnnualValue = useCallback((maintenance: Maintenance) => {
@@ -784,30 +785,35 @@ export default function MantenimientosPage() {
 
     generateTablePDF({
       titulo: "MANTENIMIENTOS REALIZADOS POR PERIODO",
-      subtitulo: "Exportación de mantenimientos realizados con el valor cobrado de cada mantenimiento.",
+      subtitulo: "Exportación de mantenimientos realizados con el valor total del contrato y el valor cobrado de cada avance.",
       empresa: companyName,
       periodo: getPeriodLabel(selectedCompletedPeriod),
-      headers: ["Fecha realizada", "Cliente", "Tecnico", "Avance", "Estado", "Valor cobrado"],
+      headers: ["Fecha realizada", "Cliente", "Tecnico", "Avance", "Estado", "Valor total", "Valor cobrado avance"],
       rows: completedMaintenancesByPeriod.map((maintenance) => [
         getMaintenanceCompletedDate(maintenance),
         getMaintenanceClientLabel(maintenance),
         getMaintenanceTechnicianLabel(maintenance),
         getMaintenanceProgressLabel(maintenance),
         getMaintenanceStatusLabel(maintenance),
+        formatCurrency(getMaintenanceAnnualValue(maintenance)),
         formatCurrency(getMaintenanceChargedValue(maintenance)),
       ]),
       summary: [
         { label: "Periodo", value: getPeriodLabel(selectedCompletedPeriod) },
         { label: "Mantenimientos realizados", value: String(completedMaintenancesByPeriod.length) },
         {
-          label: "Valor cobrado total",
+          label: "Valor total contratos",
+          value: formatCurrency(completedMaintenancesByPeriod.reduce((sum, maintenance) => sum + getMaintenanceAnnualValue(maintenance), 0)),
+        },
+        {
+          label: "Valor cobrado avances",
           value: formatCurrency(completedMaintenancesByPeriod.reduce((sum, maintenance) => sum + getMaintenanceChargedValue(maintenance), 0)),
         },
       ],
       fileName: `mantenimientos_realizados_${selectedCompletedPeriod.fechaInicio}_${selectedCompletedPeriod.fechaFin}`,
       landscape: true,
     });
-  }, [companyName, completedMaintenancesByPeriod, getMaintenanceChargedValue, getMaintenanceClientLabel, getMaintenanceCompletedDate, getMaintenanceProgressLabel, getMaintenanceStatusLabel, getMaintenanceTechnicianLabel, getPeriodLabel, selectedCompletedPeriod]);
+  }, [companyName, completedMaintenancesByPeriod, getMaintenanceAnnualValue, getMaintenanceChargedValue, getMaintenanceClientLabel, getMaintenanceCompletedDate, getMaintenanceProgressLabel, getMaintenanceStatusLabel, getMaintenanceTechnicianLabel, getPeriodLabel, selectedCompletedPeriod]);
 
   const handleSave = async (data: Partial<Maintenance>) => {
     try {
@@ -1235,7 +1241,7 @@ export default function MantenimientosPage() {
                       Mantenimientos Realizados por Período
                     </CardTitle>
                     <p className="mt-2 text-sm text-muted-foreground">
-                      En el módulo de mantenimiento se puede exportar la información de los mantenimientos realizados en cada período y exportar únicamente el valor cobrado de cada mantenimiento.
+                      En este módulo puedes ver y exportar por período el valor total del contrato y el valor cobrado correspondiente a cada avance realizado.
                     </p>
                   </div>
                   <div className="flex flex-col gap-3 sm:items-end">
@@ -1273,13 +1279,14 @@ export default function MantenimientosPage() {
                       <TableHead className="text-muted-foreground">Técnico</TableHead>
                       <TableHead className="text-muted-foreground">Avance</TableHead>
                       <TableHead className="text-muted-foreground">Estado</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Valor cobrado</TableHead>
+                      <TableHead className="text-muted-foreground text-right">Valor total</TableHead>
+                      <TableHead className="text-muted-foreground text-right">Valor cobrado avance</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {completedMaintenancesByPeriod.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                        <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
                           {selectedCompletedPeriod
                             ? "No hay mantenimientos realizados en el período seleccionado"
                             : "No hay períodos disponibles para exportar"}
@@ -1301,6 +1308,9 @@ export default function MantenimientosPage() {
                               <Badge variant="outline" className={cn("text-xs", status.color)}>
                                 {status.label}
                               </Badge>
+                            </TableCell>
+                            <TableCell className="text-right text-sm font-medium text-foreground">
+                              {formatCurrency(getMaintenanceAnnualValue(maintenance))}
                             </TableCell>
                             <TableCell className="text-right text-sm font-medium text-gold">
                               {formatCurrency(getMaintenanceChargedValue(maintenance))}

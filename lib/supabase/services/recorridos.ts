@@ -1,6 +1,20 @@
 import { supabase } from "../client";
 import { getConfiguracion } from "./configuracion";
 
+function isMissingRecorridoRegistrationColumnError(error: unknown) {
+  const candidate = error as { code?: string; message?: string } | null | undefined;
+  if (candidate?.code === "42703") return true;
+  const message = String(candidate?.message || "");
+  return message.includes("recorrido_id") || message.includes("codigo_registro");
+}
+
+function stripRecorridoRegistrationFields(payload: Record<string, unknown>) {
+  const nextPayload = { ...payload };
+  delete nextPayload.recorrido_id;
+  delete nextPayload.codigo_registro;
+  return nextPayload;
+}
+
 export interface Recorrido {
   id: string;
   tecnicoId: string;
@@ -116,13 +130,15 @@ export async function createRecorrido(r: Partial<Recorrido>): Promise<Recorrido>
 
   // Crear espejo en reportes_actividad
   if (periodoId) {
-    await supabase.from("reportes_actividad").insert({
+    const reportPayload = {
       tipo: "recorrido",
       tecnico_id: r.tecnicoId,
       lider_grupo_id: liderGrupoId || null,
       grupo_id: grupoId || null,
       fecha: r.fecha || new Date().toISOString().split("T")[0],
       descripcion: `Recorrido ${r.tipoRecorrido === "con_herramienta" ? "con herramienta" : "normal"}: ${r.puntoPartida} → ${r.puntoLlegada}`,
+      recorrido_id: data.id,
+      codigo_registro: data.codigo_registro || null,
       punto_partida: r.puntoPartida,
       punto_llegada: r.puntoLlegada,
       tipo_recorrido: r.tipoRecorrido || "normal",
@@ -133,7 +149,16 @@ export async function createRecorrido(r: Partial<Recorrido>): Promise<Recorrido>
       valor_modificado: normalizedValue !== configuredValue,
       costo_administrable: false,
       periodo_id: periodoId,
-    });
+    };
+
+    const reportInsert = await supabase.from("reportes_actividad").insert(reportPayload);
+    if (reportInsert.error) {
+      if (!isMissingRecorridoRegistrationColumnError(reportInsert.error)) throw reportInsert.error;
+
+      const legacyReportPayload = stripRecorridoRegistrationFields(reportPayload);
+      const { error: legacyReportInsertError } = await supabase.from("reportes_actividad").insert(legacyReportPayload);
+      if (legacyReportInsertError) throw legacyReportInsertError;
+    }
   }
 
   return mapRow(data);
@@ -151,11 +176,23 @@ export async function deleteRecorrido(id: string): Promise<void> {
 
   if (recorridoData) {
     const fecha = recorridoData.fecha?.split("T")[0];
-    await supabase
+    const deleteByRecorridoId = await supabase
       .from("reportes_actividad")
       .delete()
       .eq("tipo", "recorrido")
-      .eq("tecnico_id", recorridoData.tecnico_id)
-      .eq("fecha", fecha);
+      .eq("recorrido_id", id);
+
+    if (deleteByRecorridoId.error && !isMissingRecorridoRegistrationColumnError(deleteByRecorridoId.error)) {
+      throw deleteByRecorridoId.error;
+    }
+
+    if (deleteByRecorridoId.error) {
+      await supabase
+        .from("reportes_actividad")
+        .delete()
+        .eq("tipo", "recorrido")
+        .eq("tecnico_id", recorridoData.tecnico_id)
+        .eq("fecha", fecha);
+    }
   }
 }

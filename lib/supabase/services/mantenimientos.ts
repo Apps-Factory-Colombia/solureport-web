@@ -153,6 +153,29 @@ async function syncContractMaintenanceFromExecutable(row: any) {
 
   if (!contractMaintenanceId) return;
 
+  if (estado === "realizado" || estado === "completado") {
+    const { data: contractMaintenance, error: contractMaintenanceError } = await supabase
+      .from("contrato_mantenimientos")
+      .select("contrato_id, valor_recaudado")
+      .eq("id", contractMaintenanceId)
+      .maybeSingle();
+    if (contractMaintenanceError) throw contractMaintenanceError;
+
+    if (contractMaintenance && (Number(contractMaintenance.valor_recaudado ?? 0) || 0) <= 0) {
+      const { data: contract, error: contractError } = await supabase
+        .from("contratos_mantenimiento")
+        .select("costo_por_mantenimiento")
+        .eq("id", contractMaintenance.contrato_id)
+        .maybeSingle();
+      if (contractError) throw contractError;
+
+      const chargedValue = Math.max(0, Math.round(Number(contract?.costo_por_mantenimiento ?? 0) || 0));
+      if (chargedValue > 0) {
+        updateData.valor_recaudado = chargedValue;
+      }
+    }
+  }
+
   const { error } = await supabase
     .from("contrato_mantenimientos")
     .update(updateData)

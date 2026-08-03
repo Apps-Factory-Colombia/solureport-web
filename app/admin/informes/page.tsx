@@ -288,6 +288,97 @@ function isSharedVisit(report: ActivityReport) {
     && participationPercentage < 100;
 }
 
+function getSharedVisitUiIdentity(report: ActivityReport) {
+  return [
+    report.fecha,
+    report.grupoId || "sin-grupo",
+    report.clienteId || "sin-cliente",
+    report.tipoVisita || "sin-tipo",
+    normalizeSearchValue(report.descripcion),
+  ].join("|");
+}
+
+function shouldNormalizeSharedVisitCluster(reports: ActivityReport[]) {
+  if (reports.length < 2) return false;
+  if (reports.some((report) => report.tipo !== "visita_tecnica")) return false;
+  if (reports.some((report) => isSharedVisit(report))) return false;
+  return new Set(reports.map((report) => report.tecnicoId)).size > 1;
+}
+
+function normalizeSharedVisitRowsForUi(reports: ActivityReport[]) {
+  const visitGroups = new Map<string, ActivityReport[]>();
+
+  reports.forEach((report) => {
+    if (report.tipo !== "visita_tecnica") return;
+    const key = getSharedVisitUiIdentity(report);
+    const current = visitGroups.get(key) || [];
+    current.push(report);
+    visitGroups.set(key, current);
+  });
+
+  const normalizedById = new Map<string, ActivityReport>();
+
+  visitGroups.forEach((groupedVisits) => {
+    if (!shouldNormalizeSharedVisitCluster(groupedVisits)) return;
+
+    const canonicalVisit = [...groupedVisits].sort((a, b) => {
+      const aHasCode = !!a.codigoRegistro;
+      const bHasCode = !!b.codigoRegistro;
+      if (aHasCode !== bHasCode) return aHasCode ? -1 : 1;
+
+      const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
+      if (creationCompare !== 0) return creationCompare;
+
+      return b.id.localeCompare(a.id);
+    })[0];
+
+    const participantCount = groupedVisits.length;
+    const sharedRegistrationCode = canonicalVisit.codigoRegistro || groupedVisits.map((visit) => visit.codigoRegistro).find(Boolean);
+    const sharedBaseValue = Number(
+      canonicalVisit.valorActividadBaseGlobal
+      ?? canonicalVisit.costoActividadDefault
+      ?? canonicalVisit.costoActividad
+      ?? 0
+    ) || 0;
+    const sharedAppliedValue = Number(
+      canonicalVisit.valorActividadAplicadoGlobal
+      ?? canonicalVisit.costoActividad
+      ?? sharedBaseValue
+      ?? 0
+    ) || 0;
+    const weightedParticipantValues = groupedVisits.map((visit) => Number(visit.costoActividad ?? 0) || 0);
+    const uniqueWeightedValues = new Set(weightedParticipantValues.map((value) => value.toFixed(2)));
+    const weightTotal = weightedParticipantValues.reduce((sum, value) => sum + value, 0);
+    const shouldUseWeights = weightTotal > 0 && uniqueWeightedValues.size > 1;
+
+    groupedVisits.forEach((visit, index) => {
+      const rawPercentage = shouldUseWeights
+        ? (weightedParticipantValues[index] / weightTotal) * 100
+        : 100 / participantCount;
+      const percentage = Number((index === participantCount - 1
+        ? 100 - groupedVisits.slice(0, index).reduce((sum, _, currentIndex) => {
+          const currentRawPercentage = shouldUseWeights
+            ? (weightedParticipantValues[currentIndex] / weightTotal) * 100
+            : 100 / participantCount;
+          return sum + Number(currentRawPercentage.toFixed(2));
+        }, 0)
+        : rawPercentage).toFixed(2));
+
+      normalizedById.set(visit.id, {
+        ...visit,
+        codigoRegistro: sharedRegistrationCode || visit.codigoRegistro,
+        porcentajeParticipacion: percentage,
+        costoActividadDefault: Number(((sharedBaseValue * percentage) / 100).toFixed(2)),
+        costoActividad: Number(((sharedAppliedValue * percentage) / 100).toFixed(2)),
+        valorActividadBaseGlobal: sharedBaseValue,
+        valorActividadAplicadoGlobal: sharedAppliedValue,
+      });
+    });
+  });
+
+  return reports.map((report) => normalizedById.get(report.id) || report);
+}
+
 function scoreTechnicianScopedReport(report: ActivityReport) {
   let score = 0;
 
@@ -323,6 +414,10 @@ function getGroupActivityIdentity(report: ActivityReport) {
     normalizeSearchValue(report.descripcion),
     normalizeSearchValue(report.especificacion),
   ].join("|");
+}
+
+function getReportRegistrationCode(report: ActivityReport) {
+  return report.codigoRegistro || report.registroActividadId || report.id;
 }
 
 function dedupeReportsByTechnician(reports: ActivityReport[]) {
@@ -387,23 +482,6 @@ function rankPreventiveMaintenanceReport(report: ActivityReport) {
   return score;
 }
 
-function sortReportsForSharedActivity(reports: ActivityReport[]) {
-  return [...reports].sort((a, b) => {
-    if (!!a.registroActividadId !== !!b.registroActividadId) {
-      return a.registroActividadId ? -1 : 1;
-    }
-
-    if (a.id.startsWith("reg-") !== b.id.startsWith("reg-")) {
-      return a.id.startsWith("reg-") ? -1 : 1;
-    }
-
-    const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
-    if (creationCompare !== 0) return creationCompare;
-
-    return b.id.localeCompare(a.id);
-  });
-}
-
 function getVisualActivityIdentity(report: ActivityReport) {
   if (isGroupActivity(report)) {
     return getGroupActivityUiIdentity(report);
@@ -412,6 +490,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   if (report.tipo === "mantenimiento_preventivo") {
     if (report.mantenimientoId) {
       return `shared-maintenance-visual:${report.mantenimientoId}`;
+    }
+
+    if (report.codigoRegistro) {
+      return `shared-maintenance-visual:${report.codigoRegistro}`;
     }
 
     return [
@@ -425,6 +507,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   }
 
   if (isSharedVisit(report)) {
+    if (report.codigoRegistro) {
+      return `shared-visit-visual:${report.codigoRegistro}`;
+    }
+
     return [
       "shared-visit-visual",
       report.visitaTecnicaId || "sin-visita",
@@ -459,6 +545,10 @@ function getSharedVisitIdentity(report: ActivityReport) {
       return `shared-maintenance:${report.mantenimientoId}`;
     }
 
+    if (report.codigoRegistro) {
+      return `shared-maintenance:${report.codigoRegistro}`;
+    }
+
     return [
       "shared-maintenance",
       report.periodoId || "sin-periodo",
@@ -467,6 +557,10 @@ function getSharedVisitIdentity(report: ActivityReport) {
       normalizeSearchValue(report.descripcion),
       normalizeSearchValue(report.especificacion),
     ].join("|");
+  }
+
+  if (report.codigoRegistro) {
+    return `shared-visit:${report.codigoRegistro}`;
   }
 
   return [
@@ -690,7 +784,8 @@ export default function InformesPage() {
         if (contractsResult.status === "rejected") console.error("Error cargando contratos en informes:", contractsResult.reason);
         if (periodsResult.status === "rejected") console.error("Error cargando períodos en informes:", periodsResult.reason);
 
-        setReports(r); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setContracts(ct); setPeriods(p);
+        const normalizedReports = normalizeSharedVisitRowsForUi(r);
+        setReports(normalizedReports); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setContracts(ct); setPeriods(p);
         setSelectedPeriodId((current) => {
           if (current && p.some((period) => period.id === current)) return current;
           return p[0]?.id || "";
@@ -2693,6 +2788,7 @@ export default function InformesPage() {
                         <TableHead className="text-muted-foreground">Técnico</TableHead>
                         <TableHead className="text-muted-foreground">Cliente</TableHead>
                         <TableHead className="text-muted-foreground">Fecha</TableHead>
+                        <TableHead className="text-muted-foreground">Registro</TableHead>
                         <TableHead className="text-muted-foreground">Receptor</TableHead>
                         <TableHead className="text-muted-foreground">Bitácora</TableHead>
                         <TableHead className="text-muted-foreground">Fotos</TableHead>
@@ -2728,6 +2824,7 @@ export default function InformesPage() {
                               )}
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
+                            <TableCell className="max-w-44 text-xs text-foreground/80 break-all">{getReportRegistrationCode(r)}</TableCell>
                             <TableCell>
                               {r.datosReceptor ? (
                                 <div className="flex items-center gap-1.5">
@@ -2813,6 +2910,7 @@ export default function InformesPage() {
                         <TableHead className="text-muted-foreground">Cliente</TableHead>
                         <TableHead className="text-muted-foreground">Categoría</TableHead>
                         <TableHead className="text-muted-foreground">Fecha</TableHead>
+                        <TableHead className="text-muted-foreground">Registro</TableHead>
                         <TableHead className="text-muted-foreground">Técnicos</TableHead>
                         <TableHead className="text-muted-foreground">Fotos</TableHead>
                         <TableHead className="text-muted-foreground">Aprobación Líder</TableHead>
@@ -2867,6 +2965,7 @@ export default function InformesPage() {
                               </Badge>
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
+                            <TableCell className="max-w-44 text-xs text-foreground/80 break-all">{getReportRegistrationCode(r)}</TableCell>
                             <TableCell className="max-w-56">
                               <div>
                                 <p className="text-sm text-foreground/80 truncate">{row.participantCount} técnico(s)</p>
@@ -3015,6 +3114,7 @@ export default function InformesPage() {
                       <TableRow className="border-border/50 hover:bg-transparent">
                         <TableHead className="text-muted-foreground">Técnico</TableHead>
                         <TableHead className="text-muted-foreground">Fecha</TableHead>
+                        <TableHead className="text-muted-foreground">Registro</TableHead>
                         <TableHead className="text-muted-foreground">Partida</TableHead>
                         <TableHead className="text-muted-foreground">Llegada</TableHead>
                         <TableHead className="text-muted-foreground">Modalidad</TableHead>
@@ -3039,6 +3139,7 @@ export default function InformesPage() {
                               {tech?.nombre} {tech?.apellido}
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
+                            <TableCell className="max-w-44 text-xs text-foreground/80 break-all">{getReportRegistrationCode(r)}</TableCell>
                             <TableCell>
                               <div className="flex items-center gap-1.5 max-w-40">
                                 <MapPin className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
@@ -3164,6 +3265,7 @@ export default function InformesPage() {
                         <TableHead className="text-muted-foreground">Actividad</TableHead>
                         <TableHead className="text-muted-foreground">Grupo</TableHead>
                         <TableHead className="text-muted-foreground">Fecha</TableHead>
+                        <TableHead className="text-muted-foreground">Registro</TableHead>
                         <TableHead className="text-muted-foreground">Técnicos</TableHead>
                         <TableHead className="text-muted-foreground">Líder</TableHead>
                         <TableHead className="text-muted-foreground">Aprobación</TableHead>
@@ -3187,6 +3289,7 @@ export default function InformesPage() {
                             </TableCell>
                             <TableCell className="text-sm text-foreground/80">{group?.nombre || "—"}</TableCell>
                             <TableCell className="text-sm text-foreground/80">{r.fecha}</TableCell>
+                            <TableCell className="max-w-44 text-xs text-foreground/80 break-all">{getReportRegistrationCode(r)}</TableCell>
                             <TableCell className="max-w-56">
                               <div>
                                 <p className="text-sm text-foreground/80 truncate">{row.participantCount} técnico(s)</p>
@@ -3359,6 +3462,10 @@ export default function InformesPage() {
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Fecha</p>
                     <p className="text-sm font-medium text-foreground">{activeDetailReport.fecha}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+                    <p className="text-xs text-muted-foreground">Código de registro</p>
+                    <p className="text-sm font-medium text-foreground break-all">{getReportRegistrationCode(activeDetailReport)}</p>
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Costo técnico</p>

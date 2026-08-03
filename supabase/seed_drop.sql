@@ -6,6 +6,7 @@
 BEGIN;
 
 TRUNCATE TABLE
+  grupo_reportadores_actividad,
   grupo_miembros,
   actividad_participantes,
   actividades_historial_precios,

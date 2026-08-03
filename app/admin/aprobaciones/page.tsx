@@ -209,6 +209,97 @@ function isSharedVisit(report: ActivityReport) {
     && participationPercentage < 100;
 }
 
+function getSharedVisitUiIdentity(report: ActivityReport) {
+  return [
+    report.fecha,
+    report.grupoId || "sin-grupo",
+    report.clienteId || "sin-cliente",
+    report.tipoVisita || "sin-tipo",
+    normalizeSearchValue(report.descripcion),
+  ].join("|");
+}
+
+function shouldNormalizeSharedVisitCluster(reports: ActivityReport[]) {
+  if (reports.length < 2) return false;
+  if (reports.some((report) => report.tipo !== "visita_tecnica")) return false;
+  if (reports.some((report) => isSharedVisit(report))) return false;
+  return new Set(reports.map((report) => report.tecnicoId)).size > 1;
+}
+
+function normalizeSharedVisitRowsForUi(reports: ActivityReport[]) {
+  const visitGroups = new Map<string, ActivityReport[]>();
+
+  reports.forEach((report) => {
+    if (report.tipo !== "visita_tecnica") return;
+    const key = getSharedVisitUiIdentity(report);
+    const current = visitGroups.get(key) || [];
+    current.push(report);
+    visitGroups.set(key, current);
+  });
+
+  const normalizedById = new Map<string, ActivityReport>();
+
+  visitGroups.forEach((groupedVisits) => {
+    if (!shouldNormalizeSharedVisitCluster(groupedVisits)) return;
+
+    const canonicalVisit = [...groupedVisits].sort((a, b) => {
+      const aHasCode = !!a.codigoRegistro;
+      const bHasCode = !!b.codigoRegistro;
+      if (aHasCode !== bHasCode) return aHasCode ? -1 : 1;
+
+      const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
+      if (creationCompare !== 0) return creationCompare;
+
+      return b.id.localeCompare(a.id);
+    })[0];
+
+    const participantCount = groupedVisits.length;
+    const sharedRegistrationCode = canonicalVisit.codigoRegistro || groupedVisits.map((visit) => visit.codigoRegistro).find(Boolean);
+    const sharedBaseValue = Number(
+      canonicalVisit.valorActividadBaseGlobal
+      ?? canonicalVisit.costoActividadDefault
+      ?? canonicalVisit.costoActividad
+      ?? 0
+    ) || 0;
+    const sharedAppliedValue = Number(
+      canonicalVisit.valorActividadAplicadoGlobal
+      ?? canonicalVisit.costoActividad
+      ?? sharedBaseValue
+      ?? 0
+    ) || 0;
+    const weightedParticipantValues = groupedVisits.map((visit) => Number(visit.costoActividad ?? 0) || 0);
+    const uniqueWeightedValues = new Set(weightedParticipantValues.map((value) => value.toFixed(2)));
+    const weightTotal = weightedParticipantValues.reduce((sum, value) => sum + value, 0);
+    const shouldUseWeights = weightTotal > 0 && uniqueWeightedValues.size > 1;
+
+    groupedVisits.forEach((visit, index) => {
+      const rawPercentage = shouldUseWeights
+        ? (weightedParticipantValues[index] / weightTotal) * 100
+        : 100 / participantCount;
+      const percentage = Number((index === participantCount - 1
+        ? 100 - groupedVisits.slice(0, index).reduce((sum, _, currentIndex) => {
+          const currentRawPercentage = shouldUseWeights
+            ? (weightedParticipantValues[currentIndex] / weightTotal) * 100
+            : 100 / participantCount;
+          return sum + Number(currentRawPercentage.toFixed(2));
+        }, 0)
+        : rawPercentage).toFixed(2));
+
+      normalizedById.set(visit.id, {
+        ...visit,
+        codigoRegistro: sharedRegistrationCode || visit.codigoRegistro,
+        porcentajeParticipacion: percentage,
+        costoActividadDefault: Number(((sharedBaseValue * percentage) / 100).toFixed(2)),
+        costoActividad: Number(((sharedAppliedValue * percentage) / 100).toFixed(2)),
+        valorActividadBaseGlobal: sharedBaseValue,
+        valorActividadAplicadoGlobal: sharedAppliedValue,
+      });
+    });
+  });
+
+  return reports.map((report) => normalizedById.get(report.id) || report);
+}
+
 function usesSharedBasePricing(report: ActivityReport) {
   return isGroupActivity(report)
     || isSharedVisit(report)
@@ -232,6 +323,10 @@ function getGroupActivityIdentity(report: ActivityReport) {
   ].join("|");
 }
 
+function getReportRegistrationCode(report: ActivityReport) {
+  return report.codigoRegistro || report.registroActividadId || report.id;
+}
+
 function getVisualActivityIdentity(report: ActivityReport) {
   if (isGroupActivity(report)) {
     return getGroupActivityUiIdentity(report);
@@ -240,6 +335,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   if (report.tipo === "mantenimiento_preventivo") {
     if (report.mantenimientoId) {
       return `shared-maintenance-visual:${report.mantenimientoId}`;
+    }
+
+    if (report.codigoRegistro) {
+      return `shared-maintenance-visual:${report.codigoRegistro}`;
     }
 
     return [
@@ -253,6 +352,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   }
 
   if (isSharedVisit(report)) {
+    if (report.codigoRegistro) {
+      return `shared-visit-visual:${report.codigoRegistro}`;
+    }
+
     return [
       "shared-visit-visual",
       report.visitaTecnicaId || "sin-visita",
@@ -277,6 +380,10 @@ function getSharedPricingIdentity(report: ActivityReport) {
       return `shared-maintenance:${report.mantenimientoId}`;
     }
 
+    if (report.codigoRegistro) {
+      return `shared-maintenance:${report.codigoRegistro}`;
+    }
+
     return [
       "shared-maintenance",
       report.periodoId || "sin-periodo",
@@ -288,6 +395,10 @@ function getSharedPricingIdentity(report: ActivityReport) {
   }
 
   if (isSharedVisit(report)) {
+    if (report.codigoRegistro) {
+      return `shared-visit:${report.codigoRegistro}`;
+    }
+
     return [
       "shared-visit",
       report.visitaTecnicaId || "sin-visita",
@@ -595,7 +706,8 @@ export default function AprobacionesPage() {
       if (groupsResult.status === "rejected") console.error("Error cargando grupos en aprobaciones:", groupsResult.reason);
       if (settingsResult.status === "rejected") console.error("Error cargando configuración en aprobaciones:", settingsResult.reason);
 
-      setReports(r); setUsers(u); setClients(c); setContracts(ct); setGroups(g); setCompanySettings(s); setPeriods(p);
+      const normalizedReports = normalizeSharedVisitRowsForUi(r);
+      setReports(normalizedReports); setUsers(u); setClients(c); setContracts(ct); setGroups(g); setCompanySettings(s); setPeriods(p);
       setSelectedPeriodId((current) => {
         if (current && p.some((period) => period.id === current)) return current;
         return p[0]?.id || "";
@@ -606,7 +718,7 @@ export default function AprobacionesPage() {
   }, []);
 
   const refreshReports = useCallback(async (reportId?: string | null) => {
-    const refreshedReports = await getReportesActividad();
+    const refreshedReports = normalizeSharedVisitRowsForUi(await getReportesActividad());
     setReports(refreshedReports);
 
     if (!reportId) {
@@ -1746,6 +1858,7 @@ export default function AprobacionesPage() {
           <TableHeader>
             <TableRow className="border-border/50 hover:bg-transparent">
               <TableHead>Fecha</TableHead>
+              <TableHead>Registro</TableHead>
               <TableHead>Tipo</TableHead>
               <TableHead>Actividad</TableHead>
               <TableHead>Cliente / Proyecto</TableHead>
@@ -1757,7 +1870,7 @@ export default function AprobacionesPage() {
           <TableBody>
             {currentRows.length === 0 ? (
               <TableRow className="border-border/50">
-                <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
                   No hay registros para esta sección con los filtros actuales.
                 </TableCell>
               </TableRow>
@@ -1781,6 +1894,7 @@ export default function AprobacionesPage() {
                   )}
                 >
                   <TableCell className="text-sm text-foreground/80 whitespace-nowrap">{report.fecha}</TableCell>
+                  <TableCell className="max-w-44 text-xs text-foreground/80 break-all">{getReportRegistrationCode(report)}</TableCell>
                   <TableCell>
                     <div className="flex flex-col items-start gap-1">
                       <Badge variant="outline" className={cn("text-[10px] gap-1", tipo.color)}>
@@ -2256,6 +2370,10 @@ export default function AprobacionesPage() {
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">Código de registro</p>
+                    <p className="text-sm font-medium text-foreground break-all">{getReportRegistrationCode(selectedReport)}</p>
+                  </div>
                   {!isSharedPricing && (
                     <div className="space-y-1">
                       <p className="text-xs text-muted-foreground">Técnico</p>
@@ -2499,6 +2617,24 @@ export default function AprobacionesPage() {
                           </span>
                         )}
                       </div>
+                      {selectedReport.fotoHerramienta && (
+                        <a
+                          href={selectedReport.fotoHerramienta}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="group relative block aspect-video max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/30"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={selectedReport.fotoHerramienta}
+                            alt="Foto de la herramienta utilizada en el recorrido"
+                            className="h-full w-full object-cover"
+                          />
+                          <span className="absolute inset-0 flex items-center justify-center bg-background/50 opacity-0 transition-opacity group-hover:opacity-100">
+                            <Eye className="h-5 w-5 text-foreground" />
+                          </span>
+                        </a>
+                      )}
                     </div>
                   </div>
                 )}
