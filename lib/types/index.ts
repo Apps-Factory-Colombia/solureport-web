@@ -73,6 +73,7 @@ export interface MaintenanceParticipant {
 
 export interface Maintenance {
   id: string;
+  codigoRegistro?: string;
   clienteId: string;
   tecnicoId: string;
   origen?: "mantenimiento" | "contrato";
@@ -94,6 +95,7 @@ export interface Maintenance {
 
 export interface MaintenanceReport {
   id: string;
+  codigoRegistro?: string;
   mantenimientoId: string;
   tecnicoId: string;
   clienteId: string;
@@ -128,6 +130,7 @@ export interface PriceHistory {
 
 export interface LiquidationEntry {
   id: string;
+  codigoRegistro?: string;
   actividadId: string;
   grupoId: string;
   lugar: string;
@@ -158,6 +161,8 @@ export interface CompanySettings {
   correoEmpresa: string;
   plantillaReportePDF: string;
   porcentajeDescuentoTardanza: number;
+  diasDescuentoAutomatico?: ScheduleDay[];
+  horaDescuentoAutomatico?: string;
   porcentajeExtraLider: number;
   extraLiderActivo: boolean;
   costoRevisionLider: number;
@@ -233,6 +238,7 @@ export interface ArrivalRecord {
   estadoSalida?: "normal" | "salida_anticipada" | "no_reportado";
   tarde: boolean;
   minutosRetraso: number;
+  razonTardanza?: string;
   fotoLlegadaUrl?: string;
   ubicacionLlegadaPrecisionMetros?: number;
   ubicacionLlegadaTimestamp?: string;
@@ -255,6 +261,7 @@ export interface ActivityReport {
   mantenimientoId?: string;
   mantenimientoParticipanteId?: string;
   visitaTecnicaId?: string;
+  recorridoId?: string;
   tipoVisita?: "imprevisto" | "garantia" | "emergencia" | "entregas";
   registroActividadId?: string;
   tecnicoId: string;

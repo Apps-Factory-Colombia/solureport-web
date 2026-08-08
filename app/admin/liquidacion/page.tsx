@@ -943,6 +943,7 @@ export default function LiquidacionPage() {
                   const group = groups.find((g) => g.id === r.grupoId);
                   return [
                     tipoLabels[r.tipo] || r.tipo,
+                    r.codigoRegistro || "Histórico sin código",
                     r.descripcion || "\u2014",
                     group?.nombre || "\u2014",
                     r.fecha,
@@ -959,6 +960,7 @@ export default function LiquidacionPage() {
 
                   return [
                     "Extra Líder",
+                    "—",
                     "Reconocimiento extra líder del período",
                     group?.nombre || "\u2014",
                     selectedPeriod?.fechaFin || selectedPeriod?.fechaInicio || "\u2014",
@@ -969,17 +971,17 @@ export default function LiquidacionPage() {
                 });
 
                 const rows = extraLeaderRows.length > 0
-                  ? [...activityRows, ["", "", "", "", "", "", ""], ...extraLeaderRows]
+                  ? [...activityRows, ["", "", "", "", "", "", "", ""], ...extraLeaderRows]
                   : activityRows;
 
                 generateTablePDF({
                   titulo: "LIQUIDACI\u00d3N DE ACTIVIDADES",
                   empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
                   periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} \u2192 ${selectedPeriod.fechaFin}` : "",
-                  headers: ["Tipo", "Descripción", "Grupo", "Fecha", "Técnico", "Estado", "Valor"],
+                  headers: ["Tipo", "Código", "Descripción", "Grupo", "Fecha", "Técnico", "Estado", "Valor"],
                   rows,
                   summary: totalExtraLeaderPeriod > 0 ? [{ label: "Extra líder período", value: formatCurrency(totalExtraLeaderPeriod) }] : undefined,
-                  totales: ["TOTAL", "", "", "", "", `${liquidablePeriodReports.length} actividades + ${extraLeaderRows.length} extra(s)`, formatCurrency(totalPeriod)],
+                  totales: ["TOTAL", "", "", "", "", "", `${liquidablePeriodReports.length} actividades + ${extraLeaderRows.length} extra(s)`, formatCurrency(totalPeriod)],
                 });
               }}
             >
@@ -1189,6 +1191,7 @@ export default function LiquidacionPage() {
                   <TableHeader>
                     <TableRow className="border-border/50 hover:bg-transparent">
                       <TableHead className="w-36 whitespace-normal text-muted-foreground">Tipo</TableHead>
+                      <TableHead className="w-52 whitespace-normal text-muted-foreground">Código</TableHead>
                       <TableHead className="w-104 whitespace-normal text-muted-foreground">Descripción</TableHead>
                       <TableHead className="w-52 whitespace-normal text-muted-foreground">Técnico</TableHead>
                       <TableHead className="w-44 whitespace-normal text-muted-foreground">Grupo</TableHead>
@@ -1216,6 +1219,9 @@ export default function LiquidacionPage() {
                             )}>
                               {tipoLabel}
                             </Badge>
+                          </TableCell>
+                          <TableCell className="text-xs font-mono whitespace-normal text-cyan-neon">
+                            {r.codigoRegistro || "Histórico sin código"}
                           </TableCell>
                           <TableCell className="wrap-break-word text-sm leading-5 whitespace-normal text-foreground/80">
                             {r.descripcion || "\u2014"}
@@ -1270,7 +1276,7 @@ export default function LiquidacionPage() {
                     })}
                     {filteredPeriodReports.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-8">
+                        <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-8">
                           No hay actividades registradas en este período.
                         </TableCell>
                       </TableRow>
@@ -1383,6 +1389,7 @@ export default function LiquidacionPage() {
                             <TableHeader>
                               <TableRow className="border-border/50 hover:bg-transparent">
                                 <TableHead className="w-36 whitespace-normal">Tipo</TableHead>
+                                <TableHead className="w-52 whitespace-normal">Código</TableHead>
                                 <TableHead className="w-96 whitespace-normal">Descripción</TableHead>
                                 <TableHead className="w-44 whitespace-normal">Grupo</TableHead>
                                 <TableHead className="w-32 whitespace-normal">Fecha</TableHead>
@@ -1395,6 +1402,7 @@ export default function LiquidacionPage() {
                               {techReports.map((report) => (
                                 <TableRow key={report.id} className="border-border/50 hover:bg-secondary/30">
                                   <TableCell className="text-sm text-foreground/80">{getTipoLabel(report.tipo)}</TableCell>
+                                  <TableCell className="text-xs font-mono whitespace-normal text-cyan-neon">{report.codigoRegistro || "Histórico sin código"}</TableCell>
                                   <TableCell className="wrap-break-word text-sm leading-5 whitespace-normal text-foreground/80">{report.descripcion || "—"}</TableCell>
                                   <TableCell className="text-sm whitespace-normal text-foreground/80">{groupsById.get(report.grupoId)?.nombre || "—"}</TableCell>
                                   <TableCell className="text-sm text-foreground/80">{report.fecha}</TableCell>
@@ -1420,7 +1428,7 @@ export default function LiquidacionPage() {
                               ))}
                               {techReports.length === 0 && (
                                 <TableRow>
-                                  <TableCell colSpan={7} className="py-6 text-center text-sm text-muted-foreground">
+                                  <TableCell colSpan={8} className="py-6 text-center text-sm text-muted-foreground">
                                     Este usuario no tiene actividades en el período seleccionado.
                                   </TableCell>
                                 </TableRow>
@@ -1501,6 +1509,7 @@ export default function LiquidacionPage() {
                             <TableHeader>
                               <TableRow className="border-border/50 hover:bg-transparent">
                                 <TableHead className="w-36 whitespace-normal">Tipo</TableHead>
+                                <TableHead className="w-52 whitespace-normal">Código</TableHead>
                                 <TableHead className="w-96 whitespace-normal">Descripción</TableHead>
                                 <TableHead className="w-52 whitespace-normal">Técnico</TableHead>
                                 <TableHead className="w-32 whitespace-normal">Fecha</TableHead>
@@ -1516,6 +1525,7 @@ export default function LiquidacionPage() {
                                 return (
                                   <TableRow key={report.id} className="border-border/50 hover:bg-secondary/30">
                                     <TableCell className="text-sm text-foreground/80">{getTipoLabel(report.tipo)}</TableCell>
+                                    <TableCell className="text-xs font-mono whitespace-normal text-cyan-neon">{report.codigoRegistro || "Histórico sin código"}</TableCell>
                                     <TableCell className="wrap-break-word text-sm leading-5 whitespace-normal text-foreground/80">{report.descripcion || "—"}</TableCell>
                                     <TableCell className="text-sm whitespace-normal text-foreground/80">{tech ? `${tech.nombre} ${tech.apellido}` : "—"}</TableCell>
                                     <TableCell className="text-sm text-foreground/80">{report.fecha}</TableCell>
@@ -1542,7 +1552,7 @@ export default function LiquidacionPage() {
                               })}
                               {groupReports.length === 0 && (
                                 <TableRow>
-                                  <TableCell colSpan={7} className="py-6 text-center text-sm text-muted-foreground">
+                                  <TableCell colSpan={8} className="py-6 text-center text-sm text-muted-foreground">
                                     Este grupo no tiene actividades en el período seleccionado.
                                   </TableCell>
                                 </TableRow>
@@ -1889,6 +1899,7 @@ export default function LiquidacionPage() {
                       <TableHeader>
                         <TableRow className="border-border/30 hover:bg-transparent">
                           <TableHead className="text-muted-foreground text-xs">Tipo</TableHead>
+                          <TableHead className="text-muted-foreground text-xs">Código</TableHead>
                           <TableHead className="text-muted-foreground text-xs">Descripción</TableHead>
                           <TableHead className="text-muted-foreground text-xs">Fecha</TableHead>
                           <TableHead className="text-muted-foreground text-xs">Estado</TableHead>
@@ -1901,6 +1912,7 @@ export default function LiquidacionPage() {
                             <TableCell className="text-xs text-foreground/80">
                               {r.tipo === "mantenimiento_preventivo" ? "Mant." : r.tipo === "visita_tecnica" ? "Visita" : r.tipo}
                             </TableCell>
+                            <TableCell className="text-xs font-mono text-cyan-neon">{r.codigoRegistro || "Histórico sin código"}</TableCell>
                             <TableCell className="text-xs text-foreground/80 max-w-40 truncate">{r.descripcion || "—"}</TableCell>
                             <TableCell className="text-xs text-foreground/80">{r.fecha}</TableCell>
                             <TableCell className="text-xs text-foreground/80">
@@ -1912,7 +1924,7 @@ export default function LiquidacionPage() {
                           </TableRow>
                         ))}
                         <TableRow className="border-border/30 bg-gold/5">
-                          <TableCell colSpan={4} className="text-xs font-bold text-foreground">
+                          <TableCell colSpan={5} className="text-xs font-bold text-foreground">
                             Subtotal Auxilio Extralegal
                           </TableCell>
                           <TableCell className="text-right font-bold text-gold">
@@ -1921,7 +1933,7 @@ export default function LiquidacionPage() {
                         </TableRow>
                         {descuentoTardanza > 0 && (
                           <TableRow className="border-border/30 bg-red-500/5">
-                            <TableCell colSpan={4} className="text-xs font-bold text-red-400">
+                            <TableCell colSpan={5} className="text-xs font-bold text-red-400">
                               Descuento por Tardanza ({techData.descuentoPorcentaje}%)
                             </TableCell>
                             <TableCell className="text-right font-bold text-red-400">
@@ -1930,7 +1942,7 @@ export default function LiquidacionPage() {
                           </TableRow>
                         )}
                         <TableRow className="border-border/30 bg-cyan-neon/5">
-                          <TableCell colSpan={4} className="text-xs font-bold text-foreground">
+                          <TableCell colSpan={5} className="text-xs font-bold text-foreground">
                             Auxilio Extralegal Neto
                           </TableCell>
                           <TableCell className="text-right font-bold text-gold">
@@ -2080,6 +2092,10 @@ export default function LiquidacionPage() {
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
                     <p className="text-xs text-muted-foreground">Tipo</p>
                     <p className="text-sm font-medium text-foreground">{getTipoLabel(selectedReport.tipo)}</p>
+                  </div>
+                  <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground">Código de registro</p>
+                    <p className="text-sm font-mono font-medium text-cyan-neon">{selectedReport.codigoRegistro || "Histórico sin código"}</p>
                   </div>
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-1">
                     <p className="text-xs text-muted-foreground">Estado</p>

@@ -575,6 +575,7 @@ export default function MantenimientosPage() {
       .filter(Boolean)
       .map((user) => `${user!.nombre} ${user!.apellido}`.trim());
     const searchableText = [
+      maintenance.codigoRegistro || "",
       client?.edificio || "",
       client?.nombre || "",
       client?.direccion || "",
@@ -714,8 +715,9 @@ export default function MantenimientosPage() {
       titulo: "MANTENIMIENTOS PROGRAMADOS",
       subtitulo: "Programación confirmada con técnico asignado, fecha y hora registradas.",
       empresa: companyName,
-      headers: ["Cliente", "Técnico", "Fecha", "Hora", "Estado"],
+      headers: ["Código", "Cliente", "Técnico", "Fecha", "Hora", "Estado"],
       rows: programados.map((maintenance) => [
+        maintenance.codigoRegistro || "Histórico sin código",
         getMaintenanceClientLabel(maintenance),
         getMaintenanceTechnicianLabel(maintenance),
         maintenance.fechaProgramada,
@@ -748,8 +750,9 @@ export default function MantenimientosPage() {
         : "Exportación del mes seleccionado en el calendario.",
       empresa: companyName,
       periodo: periodLabel,
-      headers: ["Cliente", "Puertas", "Avance", "Valor total", "Valor técnico", "Técnico", "Fecha", "Estado"],
+      headers: ["Código", "Cliente", "Puertas", "Avance", "Valor total", "Valor técnico", "Técnico", "Fecha", "Estado"],
       rows: calendarFilteredMaintenances.map((maintenance) => [
+        maintenance.codigoRegistro || "Histórico sin código",
         getMaintenanceClientLabel(maintenance),
         formatClientDoorBreakdown(getMaintenanceContract(maintenance) || clientsById.get(maintenance.clienteId)) || `${getMaintenanceDoorCount(maintenance)} puertas`,
         getMaintenanceProgressLabel(maintenance),
@@ -788,9 +791,10 @@ export default function MantenimientosPage() {
       subtitulo: "Exportación de mantenimientos realizados con el valor total del contrato y el valor cobrado de cada avance.",
       empresa: companyName,
       periodo: getPeriodLabel(selectedCompletedPeriod),
-      headers: ["Fecha realizada", "Cliente", "Tecnico", "Avance", "Estado", "Valor total", "Valor cobrado avance"],
+      headers: ["Fecha realizada", "Código", "Cliente", "Tecnico", "Avance", "Estado", "Valor total", "Valor cobrado avance"],
       rows: completedMaintenancesByPeriod.map((maintenance) => [
         getMaintenanceCompletedDate(maintenance),
+        maintenance.codigoRegistro || "Histórico sin código",
         getMaintenanceClientLabel(maintenance),
         getMaintenanceTechnicianLabel(maintenance),
         getMaintenanceProgressLabel(maintenance),
@@ -941,7 +945,7 @@ export default function MantenimientosPage() {
             <div className="relative flex-1 max-w-sm">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Buscar por cliente o técnico..."
+                placeholder="Buscar por código, cliente o técnico..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="pl-10 bg-secondary/50 border-border/50"
@@ -1175,6 +1179,7 @@ export default function MantenimientosPage() {
                   <TableHeader>
                     <TableRow className="border-border/50 hover:bg-transparent">
                       <TableHead className="text-muted-foreground">Cliente</TableHead>
+                      <TableHead className="text-muted-foreground">Código</TableHead>
                       <TableHead className="text-muted-foreground">Técnico</TableHead>
                       <TableHead className="text-muted-foreground">Fecha</TableHead>
                       <TableHead className="text-muted-foreground">Observaciones</TableHead>
@@ -1184,7 +1189,7 @@ export default function MantenimientosPage() {
                   <TableBody>
                     {programados.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
+                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
                           No hay mantenimientos programados
                         </TableCell>
                       </TableRow>
@@ -1197,6 +1202,7 @@ export default function MantenimientosPage() {
                               <p className="font-medium text-foreground">{client?.edificio}</p>
                               <p className="text-xs text-muted-foreground">{client?.nombre}</p>
                             </TableCell>
+                            <TableCell className="text-xs font-mono text-cyan-neon">{m.codigoRegistro || "Histórico sin código"}</TableCell>
                             <TableCell className="text-sm text-foreground/80">
                               <p>{getMaintenanceTechnicianLabel(m)}</p>
                               {m.participantes && m.participantes.length > 1 && (
@@ -1275,6 +1281,7 @@ export default function MantenimientosPage() {
                   <TableHeader>
                     <TableRow className="border-border/50 hover:bg-transparent">
                       <TableHead className="text-muted-foreground">Fecha realizada</TableHead>
+                      <TableHead className="text-muted-foreground">Código</TableHead>
                       <TableHead className="text-muted-foreground">Cliente</TableHead>
                       <TableHead className="text-muted-foreground">Técnico</TableHead>
                       <TableHead className="text-muted-foreground">Avance</TableHead>
@@ -1286,7 +1293,7 @@ export default function MantenimientosPage() {
                   <TableBody>
                     {completedMaintenancesByPeriod.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                        <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
                           {selectedCompletedPeriod
                             ? "No hay mantenimientos realizados en el período seleccionado"
                             : "No hay períodos disponibles para exportar"}
@@ -1298,6 +1305,7 @@ export default function MantenimientosPage() {
                         return (
                           <TableRow key={maintenance.id} className="border-border/50 hover:bg-secondary/30">
                             <TableCell className="text-sm text-foreground/80">{getMaintenanceCompletedDate(maintenance)}</TableCell>
+                            <TableCell className="text-xs font-mono text-cyan-neon">{maintenance.codigoRegistro || "Histórico sin código"}</TableCell>
                             <TableCell>
                               <p className="font-medium text-foreground">{getMaintenanceClientLabel(maintenance)}</p>
                               <p className="text-xs text-muted-foreground">{clientsById.get(maintenance.clienteId)?.nombre || "Cliente no registrado"}</p>
@@ -1332,6 +1340,7 @@ export default function MantenimientosPage() {
                   <TableHeader>
                     <TableRow className="border-border/50 hover:bg-transparent">
                       <TableHead className="text-muted-foreground">Cliente</TableHead>
+                      <TableHead className="text-muted-foreground">Código</TableHead>
                       <TableHead className="text-muted-foreground">Técnico</TableHead>
                       <TableHead className="text-muted-foreground">Fecha Programada</TableHead>
                       <TableHead className="text-muted-foreground">Próxima Fecha</TableHead>
@@ -1352,6 +1361,7 @@ export default function MantenimientosPage() {
                             <p className="font-medium text-foreground">{client?.edificio}</p>
                             <p className="text-xs text-muted-foreground">{client?.nombre}</p>
                           </TableCell>
+                          <TableCell className="text-xs font-mono text-cyan-neon">{m.codigoRegistro || "Histórico sin código"}</TableCell>
                           <TableCell className="text-sm text-foreground/80">
                             {tech?.nombre} {tech?.apellido}
                           </TableCell>
@@ -1521,6 +1531,7 @@ export default function MantenimientosPage() {
                   <TableHeader>
                     <TableRow className="border-border/50 hover:bg-transparent">
                       <TableHead className="text-muted-foreground">Cliente</TableHead>
+                      <TableHead className="text-muted-foreground">Código</TableHead>
                       <TableHead className="text-muted-foreground">Técnico</TableHead>
                       <TableHead className="text-muted-foreground">Fecha programada</TableHead>
                       <TableHead className="text-muted-foreground">Avance</TableHead>
@@ -1532,7 +1543,7 @@ export default function MantenimientosPage() {
                   <TableBody>
                     {filteredOverdueMaintenances.length === 0 ? (
                       <TableRow>
-                          <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                          <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
                           {vencidos.length === 0
                             ? "No hay mantenimientos vencidos"
                             : "No se encontraron mantenimientos vencidos con esos filtros"}
@@ -1547,6 +1558,7 @@ export default function MantenimientosPage() {
                               <p className="font-medium text-foreground">{getMaintenanceClientLabel(m)}</p>
                               <p className="text-xs text-muted-foreground">{clientsById.get(m.clienteId)?.nombre}</p>
                             </TableCell>
+                            <TableCell className="text-xs font-mono text-cyan-neon">{m.codigoRegistro || "Histórico sin código"}</TableCell>
                             <TableCell className="text-sm text-foreground/80">
                               {getMaintenanceTechnicianLabel(m)}
                             </TableCell>

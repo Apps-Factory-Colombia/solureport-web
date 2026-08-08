@@ -45,6 +45,7 @@ async function resolveStorageUrl(url?: string): Promise<string | undefined> {
 function mapRow(row: any): Maintenance {
   return {
     id: row.id,
+    codigoRegistro: row.codigo_registro || undefined,
     clienteId: row.cliente_id,
     tecnicoId: row.tecnico_id,
     origen: "mantenimiento",
@@ -321,6 +322,10 @@ function mapContratoRow(row: any, contrato: any): Maintenance {
 }
 
 function buildPreventiveMaintenanceCanonicalKey(maintenance: Maintenance) {
+  if (maintenance.codigoRegistro) {
+    return `code:${maintenance.codigoRegistro.trim().toUpperCase()}`;
+  }
+
   return [
     maintenance.clienteId,
     maintenance.fechaProgramada,
@@ -458,6 +463,7 @@ async function getMaintenanceParticipantsMap(maintenanceIds: string[]) {
 
 async function upsertMaintenanceParticipantActivityReports(params: {
   maintenanceId: string;
+  codigoRegistro?: string | null;
   clienteId?: string | null;
   fecha: string;
   descripcion: string;
@@ -476,7 +482,7 @@ async function upsertMaintenanceParticipantActivityReports(params: {
       .in("id", participantUserIds),
     supabase
       .from("reportes_actividad")
-      .select("id, tecnico_id, descripcion, mantenimiento_id, mantenimiento_participante_id")
+      .select("id, codigo_registro, tecnico_id, descripcion, mantenimiento_id, mantenimiento_participante_id")
       .eq("tipo", "mantenimiento_preventivo")
       .eq("fecha", params.fecha)
       .eq("mantenimiento_id", params.maintenanceId),
@@ -582,6 +588,7 @@ async function upsertMaintenanceParticipantActivityReports(params: {
       || existingReportByParticipantKey.get(`${participant.usuarioId}|${params.maintenanceId}`)
       || existingReportByParticipantKey.get(`${participant.usuarioId}|${params.descripcion}`);
     const payload = {
+      codigo_registro: params.codigoRegistro?.trim().toUpperCase() || null,
       tipo: "mantenimiento_preventivo",
       tecnico_id: participant.usuarioId,
       lider_grupo_id: liderId,
@@ -749,6 +756,7 @@ export async function createMantenimiento(m: Partial<Maintenance>): Promise<Main
   const { data, error } = await supabase
     .from("mantenimientos")
     .insert({
+      codigo_registro: m.codigoRegistro?.trim().toUpperCase() || null,
       cliente_id: m.clienteId,
       tecnico_id: m.tecnicoId,
       lider_id: liderId,
@@ -846,6 +854,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
 
         await upsertMaintenanceParticipantActivityReports({
           maintenanceId: executableMaintenance.id,
+          codigoRegistro: executableMaintenance.codigo_registro,
           clienteId: contrato?.cliente_id,
           fecha: toDateOnly(contratoMant.fecha_programada),
           descripcion: "Mantenimiento preventivo realizado",
@@ -915,6 +924,7 @@ export async function updateMantenimiento(id: string, m: Partial<Maintenance>): 
   if (String(data.estado).toLowerCase() === "realizado" || String(data.estado).toLowerCase() === "completado") {
     await upsertMaintenanceParticipantActivityReports({
       maintenanceId: id,
+      codigoRegistro: data.codigo_registro,
       clienteId: data.cliente_id,
       fecha: toDateOnly(data.fecha_programada),
       descripcion: (data.observaciones || "").trim() || "Mantenimiento preventivo realizado",
@@ -965,6 +975,7 @@ function mapReport(
   const mantenimientoRefId = row.mantenimiento_id || row.id;
   return {
     id: row.id,
+    codigoRegistro: row.codigo_registro || undefined,
     mantenimientoId: mantenimientoRefId,
     tecnicoId: row.tecnico_id,
     clienteId: row.cliente_id,
@@ -1008,7 +1019,7 @@ export async function getReportesMantenimiento(): Promise<MaintenanceReport[]> {
       mantenimientoIds.length > 0
         ? supabase
           .from("mantenimientos")
-          .select("id, foto_bitacora_url, tipo_pendiente, descripcion_pendiente")
+          .select("id, codigo_registro, foto_bitacora_url, tipo_pendiente, descripcion_pendiente")
           .in("id", mantenimientoIds)
         : Promise.resolve({ data: [], error: null }),
       mantenimientoIds.length > 0
@@ -1024,9 +1035,13 @@ export async function getReportesMantenimiento(): Promise<MaintenanceReport[]> {
     if (fotosResponse.error) throw fotosResponse.error;
 
     const bitacoraByMantenimientoId = new Map<string, string>();
+    const codigoByMantenimientoId = new Map<string, string>();
     const tipoPendienteByMantenimientoId = new Map<string, string>();
     const descripcionPendienteByMantenimientoId = new Map<string, string>();
     for (const mantenimiento of mantenimientosResponse.data || []) {
+      if (mantenimiento?.id && mantenimiento?.codigo_registro) {
+        codigoByMantenimientoId.set(mantenimiento.id, mantenimiento.codigo_registro);
+      }
       if (mantenimiento?.id && mantenimiento?.foto_bitacora_url) {
         bitacoraByMantenimientoId.set(mantenimiento.id, mantenimiento.foto_bitacora_url);
       }
@@ -1079,7 +1094,7 @@ export async function getReportesMantenimiento(): Promise<MaintenanceReport[]> {
         undefined;
 
       return mapReport(
-        row,
+        { ...row, codigo_registro: row.codigo_registro || codigoByMantenimientoId.get(mantenimientoRefId) },
         fotos?.antes || [],
         fotos?.despues || [],
         rawBitacoraUrl ? resolvedBitacoras.get(rawBitacoraUrl) : undefined,
@@ -1102,7 +1117,7 @@ export async function syncReporteMantenimientoToActividad(reporteId: string): Pr
   const mantenimientoId = reporte.mantenimiento_id || reporte.id;
   const { data: mantenimiento } = await supabase
     .from("mantenimientos")
-    .select("id, tecnico_id, cliente_id, observaciones, fecha_programada, costo_tecnico_total")
+    .select("id, codigo_registro, tecnico_id, cliente_id, observaciones, fecha_programada, costo_tecnico_total")
     .eq("id", mantenimientoId)
     .single();
 
@@ -1114,6 +1129,7 @@ export async function syncReporteMantenimientoToActividad(reporteId: string): Pr
 
   await upsertMaintenanceParticipantActivityReports({
     maintenanceId: mantenimientoId,
+    codigoRegistro: mantenimiento?.codigo_registro,
     clienteId: mantenimiento?.cliente_id || reporte.cliente_id,
     fecha,
     descripcion: (reporte.observaciones || mantenimiento?.observaciones || "").trim() || "Mantenimiento preventivo realizado",

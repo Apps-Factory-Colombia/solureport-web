@@ -27,6 +27,7 @@ import {
 import {
   Pagination,
   PaginationContent,
+  PaginationEllipsis,
   PaginationItem,
   PaginationLink,
   PaginationNext,
@@ -51,11 +52,14 @@ import {
   Percent,
   ImageIcon,
   MapPin,
+  Pencil,
+  RefreshCw,
+  Settings2,
 } from "lucide-react";
-import { ArrivalRecord, User, CompanySettings } from "@/lib/types";
-import { getLlegadas, updateLlegada } from "@/lib/supabase/services/llegadas";
+import { ArrivalRecord, ScheduleDay, User, CompanySettings } from "@/lib/types";
+import { ensureNoRegistradosForToday, getLlegadas, updateLlegada } from "@/lib/supabase/services/llegadas";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
-import { getConfiguracion } from "@/lib/supabase/services/configuracion";
+import { getConfiguracion, updateConfiguracion } from "@/lib/supabase/services/configuracion";
 import { createNotificacion } from "@/lib/supabase/services/notificaciones";
 import { cn } from "@/lib/utils";
 
@@ -71,6 +75,33 @@ function formatLocationTimestamp(value?: string) {
   }).format(parsed);
 }
 
+function getBogotaDate() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
+}
+
+const WEEKDAY_OPTIONS: Array<{ value: ScheduleDay; label: string }> = [
+  { value: "lunes", label: "Lunes" },
+  { value: "martes", label: "Martes" },
+  { value: "miercoles", label: "Miércoles" },
+  { value: "jueves", label: "Jueves" },
+  { value: "viernes", label: "Viernes" },
+  { value: "sabado", label: "Sábado" },
+  { value: "domingo", label: "Domingo" },
+];
+
+function getWeekdayForDate(fecha: string): ScheduleDay {
+  const [year, month, day] = fecha.split("-").map(Number);
+  const dayIndex = new Date(Date.UTC(year, (month || 1) - 1, day || 1, 12)).getUTCDay();
+  return ["domingo", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado"][dayIndex] as ScheduleDay;
+}
+
+function calculateDelay(scheduled?: string, real?: string) {
+  if (!scheduled || !real) return 0;
+  const [scheduledHour, scheduledMinute] = scheduled.split(":").map(Number);
+  const [realHour, realMinute] = real.split(":").map(Number);
+  return Math.max(0, realHour * 60 + realMinute - (scheduledHour * 60 + scheduledMinute));
+}
+
 export default function LlegadasPage() {
   const [records, setRecords] = useState<ArrivalRecord[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -78,6 +109,7 @@ export default function LlegadasPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [dateFilter, setDateFilter] = useState("");
+  const [dayFilter, setDayFilter] = useState<"todos" | ScheduleDay>("todos");
   const [statusFilter, setStatusFilter] = useState<string>("todos");
   const [messageOpen, setMessageOpen] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<ArrivalRecord | null>(null);
@@ -85,6 +117,18 @@ export default function LlegadasPage() {
   const [messageText, setMessageText] = useState("");
   const [discountOpen, setDiscountOpen] = useState(false);
   const [discountPercent, setDiscountPercent] = useState("5");
+  const [configuredDiscountPercent, setConfiguredDiscountPercent] = useState("5");
+  const [configuredDiscountTime, setConfiguredDiscountTime] = useState("08:30");
+  const [automaticDiscountDays, setAutomaticDiscountDays] = useState<ScheduleDay[]>([
+    "lunes", "martes", "miercoles", "jueves", "viernes",
+  ]);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [attendanceEditOpen, setAttendanceEditOpen] = useState(false);
+  const [attendanceStatus, setAttendanceStatus] = useState<"a_tiempo" | "tarde" | "no_reportado">("no_reportado");
+  const [attendanceTime, setAttendanceTime] = useState("");
+  const [attendanceReason, setAttendanceReason] = useState("");
+  const [attendanceSaving, setAttendanceSaving] = useState(false);
+  const [processingAutomatic, setProcessingAutomatic] = useState(false);
   const [arrivalDetailRecord, setArrivalDetailRecord] = useState<ArrivalRecord | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
@@ -92,11 +136,21 @@ export default function LlegadasPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [r, u, s] = await Promise.all([getLlegadas(), getUsuarios(), getConfiguracion()]);
+      const [u, s] = await Promise.all([getUsuarios(), getConfiguracion()]);
+      await ensureNoRegistradosForToday(
+        u,
+        s.porcentajeDescuentoTardanza,
+        s.diasDescuentoAutomatico,
+        s.horaDescuentoAutomatico,
+      );
+      const r = await getLlegadas();
       setRecords(r);
       setUsers(u);
       setCompanySettings(s);
       setDiscountPercent(String(s.porcentajeDescuentoTardanza));
+      setConfiguredDiscountPercent(String(s.porcentajeDescuentoTardanza));
+      setConfiguredDiscountTime(s.horaDescuentoAutomatico || "08:30");
+      setAutomaticDiscountDays(s.diasDescuentoAutomatico || []);
     } catch (err) {
       console.error("Error cargando llegadas:", err);
     } finally {
@@ -107,8 +161,28 @@ export default function LlegadasPage() {
   useEffect(() => { loadData(); }, [loadData]);
 
   useEffect(() => {
+    if (users.length === 0 || !companySettings) return;
+
+    const timer = window.setInterval(async () => {
+      try {
+        const changed = await ensureNoRegistradosForToday(
+          users,
+          companySettings.porcentajeDescuentoTardanza,
+          companySettings.diasDescuentoAutomatico,
+          companySettings.horaDescuentoAutomatico,
+        );
+        if (changed > 0) setRecords(await getLlegadas());
+      } catch (err) {
+        console.error("Error en el corte automático de asistencia:", err);
+      }
+    }, 60_000);
+
+    return () => window.clearInterval(timer);
+  }, [users, companySettings]);
+
+  useEffect(() => {
     setCurrentPage(1);
-  }, [search, dateFilter, statusFilter]);
+  }, [search, dateFilter, dayFilter, statusFilter]);
 
   if (loading) {
     return (
@@ -130,11 +204,13 @@ export default function LlegadasPage() {
       user?.nombre.toLowerCase().includes(search.toLowerCase()) ||
       user?.apellido.toLowerCase().includes(search.toLowerCase());
     const matchesDate = !dateFilter || r.fecha === dateFilter;
+    const matchesDay = dayFilter === "todos" || getWeekdayForDate(r.fecha) === dayFilter;
     const matchesStatus =
       statusFilter === "todos" ||
-      (statusFilter === "tarde" && r.tarde) ||
-      (statusFilter === "puntual" && !r.tarde);
-    return matchesSearch && matchesDate && matchesStatus;
+      (statusFilter === "tarde" && r.tarde && r.estadoEntrada !== "no_reportado") ||
+      (statusFilter === "puntual" && r.estadoEntrada === "a_tiempo") ||
+      (statusFilter === "no_registrado" && r.estadoEntrada === "no_reportado");
+    return matchesSearch && matchesDate && matchesDay && matchesStatus;
   });
 
   const totalPages = Math.ceil(filtered.length / itemsPerPage);
@@ -143,11 +219,90 @@ export default function LlegadasPage() {
   const currentRecords = filtered.slice(startIndex, endIndex);
 
   const todayRecords = records.filter(
-    (r) => r.fecha === new Date().toISOString().split("T")[0]
+    (r) => r.fecha === getBogotaDate()
   );
-  const tardanzasHoy = todayRecords.filter((r) => r.tarde).length;
-  const puntualesHoy = todayRecords.filter((r) => !r.tarde).length;
-  const totalTarde = records.filter((r) => r.tarde).length;
+  const tardanzasHoy = todayRecords.filter((r) => r.tarde && r.estadoEntrada !== "no_reportado").length;
+  const puntualesHoy = todayRecords.filter((r) => r.estadoEntrada === "a_tiempo").length;
+  const noRegistradosHoy = todayRecords.filter((r) => r.estadoEntrada === "no_reportado").length;
+  const totalTarde = records.filter((r) => r.tarde && r.estadoEntrada !== "no_reportado").length;
+
+  const handleSaveConfiguredDiscount = async () => {
+    const value = Math.max(0, Math.min(100, Number(configuredDiscountPercent) || 0));
+    setSettingsSaving(true);
+    try {
+      const updated = await updateConfiguracion({
+        porcentajeDescuentoTardanza: value,
+        diasDescuentoAutomatico: automaticDiscountDays,
+        horaDescuentoAutomatico: configuredDiscountTime,
+      });
+      setCompanySettings(updated);
+      setConfiguredDiscountPercent(String(updated.porcentajeDescuentoTardanza));
+      setDiscountPercent(String(updated.porcentajeDescuentoTardanza));
+      setAutomaticDiscountDays(updated.diasDescuentoAutomatico || []);
+      setConfiguredDiscountTime(updated.horaDescuentoAutomatico || "08:30");
+    } catch (err) {
+      console.error("Error actualizando descuento configurado:", err);
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const handleProcessAutomatic = async () => {
+    setProcessingAutomatic(true);
+    try {
+      await ensureNoRegistradosForToday(
+        users,
+        companySettings?.porcentajeDescuentoTardanza || 0,
+        companySettings?.diasDescuentoAutomatico,
+        companySettings?.horaDescuentoAutomatico,
+      );
+      await loadData();
+    } catch (err) {
+      console.error("Error procesando asistencia automática:", err);
+    } finally {
+      setProcessingAutomatic(false);
+    }
+  };
+
+  const toggleAutomaticDiscountDay = (day: ScheduleDay) => {
+    setAutomaticDiscountDays((current) =>
+      current.includes(day) ? current.filter((item) => item !== day) : [...current, day]
+    );
+  };
+
+  const handleOpenAttendanceEdit = (record: ArrivalRecord) => {
+    setSelectedRecord(record);
+    setAttendanceStatus(record.estadoEntrada || "no_reportado");
+    setAttendanceTime(record.horaLlegada || "");
+    setAttendanceReason(record.razonTardanza || "");
+    setAttendanceEditOpen(true);
+  };
+
+  const handleSaveAttendanceEdit = async () => {
+    if (!selectedRecord) return;
+    const isUnregistered = attendanceStatus === "no_reportado";
+    const realTime = isUnregistered ? null : attendanceTime || selectedRecord.horaLlegada || null;
+    const appliesDiscount = isUnregistered || attendanceStatus === "tarde";
+    setAttendanceSaving(true);
+    try {
+      await updateLlegada(selectedRecord.id, {
+        estadoEntrada: attendanceStatus,
+        horaLlegada: realTime,
+        tarde: appliesDiscount,
+        minutosRetraso: attendanceStatus === "tarde" ? calculateDelay(selectedRecord.horaEsperada, realTime || undefined) : 0,
+        razonTardanza: attendanceReason.trim() || (isUnregistered ? "No registró la entrada." : null),
+        descuentoAplicado: appliesDiscount && Number(selectedRecord.porcentajeDescuento || companySettings?.porcentajeDescuentoTardanza || 0) > 0,
+        porcentajeDescuento: appliesDiscount ? Number(selectedRecord.porcentajeDescuento || companySettings?.porcentajeDescuentoTardanza || 0) : 0,
+      });
+      setAttendanceEditOpen(false);
+      setSelectedRecord(null);
+      await loadData();
+    } catch (err) {
+      console.error("Error actualizando estado de asistencia:", err);
+    } finally {
+      setAttendanceSaving(false);
+    }
+  };
 
   const handleSendMessage = async () => {
     if (!selectedRecord) return;
@@ -200,8 +355,8 @@ export default function LlegadasPage() {
   return (
     <div>
       <AdminHeader title="Registro de Asistencia" />
-      <div className="p-6 space-y-6">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="min-w-0 space-y-5 p-4 sm:p-6">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           <Card className="border-border/50 bg-card/80">
             <CardContent className="p-4 flex items-center gap-3">
               <div className="rounded-lg bg-emerald-500/10 p-2.5">
@@ -248,11 +403,22 @@ export default function LlegadasPage() {
               </div>
             </CardContent>
           </Card>
+          <Card className="border-border/50 bg-card/80">
+            <CardContent className="flex items-center gap-3 p-4">
+              <div className="rounded-lg bg-sky-500/10 p-2.5">
+                <Ban className="h-5 w-5 text-sky-400" />
+              </div>
+              <div>
+                <p className="text-xl font-bold text-sky-400">{noRegistradosHoy}</p>
+                <p className="text-xs text-muted-foreground">No registrados hoy</p>
+              </div>
+            </CardContent>
+          </Card>
         </div>
 
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-3 flex-1">
-            <div className="relative flex-1 max-w-sm">
+        <div className="space-y-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl border border-border/50 bg-card/60 p-3">
+            <div className="relative min-w-[220px] flex-1">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 placeholder="Buscar por nombre..."
@@ -265,24 +431,117 @@ export default function LlegadasPage() {
               type="date"
               value={dateFilter}
               onChange={(e) => setDateFilter(e.target.value)}
-              className="w-44 bg-secondary/50 border-border/50"
+              className="w-full sm:w-44 bg-secondary/50 border-border/50"
             />
+            <Select value={dayFilter} onValueChange={(value: "todos" | ScheduleDay) => setDayFilter(value)}>
+              <SelectTrigger className="w-full sm:w-44 bg-secondary/50 border-border/50">
+                <SelectValue placeholder="Día de la semana" />
+              </SelectTrigger>
+              <SelectContent className="bg-card border-border">
+                <SelectItem value="todos">Todos los días</SelectItem>
+                {WEEKDAY_OPTIONS.map((day) => (
+                  <SelectItem key={day.value} value={day.value}>{day.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-40 bg-secondary/50 border-border/50">
+              <SelectTrigger className="w-full sm:w-44 bg-secondary/50 border-border/50">
                 <SelectValue placeholder="Estado" />
               </SelectTrigger>
               <SelectContent className="bg-card border-border">
                 <SelectItem value="todos">Todos</SelectItem>
                 <SelectItem value="puntual">Puntuales</SelectItem>
                 <SelectItem value="tarde">Tardanzas</SelectItem>
+                <SelectItem value="no_registrado">No registrados</SelectItem>
               </SelectContent>
             </Select>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleProcessAutomatic}
+              disabled={processingAutomatic}
+              className="gap-2 border-border/50 bg-secondary/30"
+              title={`Procesar el corte automático de las ${configuredDiscountTime}`}
+            >
+              <RefreshCw className={cn("h-4 w-4", processingAutomatic && "animate-spin")} />
+              <span className="hidden sm:inline">Actualizar corte</span>
+            </Button>
+          </div>
+
+          <div className="rounded-2xl border border-gold/20 bg-gradient-to-br from-gold/10 via-card/80 to-card/60 p-4 shadow-sm">
+            <div className="min-w-0 flex-1 space-y-3">
+              <div className="grid gap-4 sm:grid-cols-[minmax(0,140px)_minmax(0,140px)_minmax(0,1fr)] sm:items-end">
+                <div className="space-y-1.5">
+                  <Label className="flex items-center gap-2 text-xs text-foreground/80">
+                    <Settings2 className="h-3.5 w-3.5 text-gold" />
+                    Descuento (%)
+                  </Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={configuredDiscountPercent}
+                    onChange={(event) => setConfiguredDiscountPercent(event.target.value)}
+                    className="bg-secondary/50 border-border/50"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-foreground/80">Hora de corte</Label>
+                  <Input
+                    type="time"
+                    value={configuredDiscountTime}
+                    onChange={(event) => setConfiguredDiscountTime(event.target.value)}
+                    className="bg-secondary/50 border-border/50"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-xs text-foreground/80">Días con descuento automático</Label>
+                    <span className="text-[11px] text-muted-foreground">{automaticDiscountDays.length}/7 activos</span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {WEEKDAY_OPTIONS.map((day) => {
+                      const active = automaticDiscountDays.includes(day.value);
+                      return (
+                        <button
+                          key={day.value}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => toggleAutomaticDiscountDay(day.value)}
+                          className={cn(
+                            "rounded-full border px-2.5 py-1 text-xs transition-colors",
+                            active
+                              ? "border-gold/50 bg-gold text-background"
+                              : "border-border/60 bg-secondary/40 text-muted-foreground hover:text-foreground"
+                          )}
+                        >
+                          {day.label.slice(0, 3)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  El descuento se aplica solo en los días seleccionados y cuando llega la hora configurada.
+                </p>
+                <Button
+                  type="button"
+                  onClick={handleSaveConfiguredDiscount}
+                  disabled={settingsSaving}
+                  className="shrink-0 bg-gold text-background hover:bg-gold-dark"
+                >
+                  {settingsSaving ? "Guardando..." : "Guardar configuración"}
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
 
         <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
           <CardContent className="p-0">
-            <Table>
+            <Table className="min-w-[1180px]">
               <TableHeader>
                 <TableRow className="border-border/50 hover:bg-transparent">
                   <TableHead className="text-muted-foreground">Empleado</TableHead>
@@ -290,13 +549,21 @@ export default function LlegadasPage() {
                   <TableHead className="text-muted-foreground">Entrada</TableHead>
                   <TableHead className="text-muted-foreground">Salida</TableHead>
                   <TableHead className="text-muted-foreground">Retraso</TableHead>
-                  <TableHead className="text-muted-foreground">Llegada</TableHead>
+                  <TableHead className="text-muted-foreground">Evidencia</TableHead>
+                  <TableHead className="text-muted-foreground">Estado</TableHead>
                   <TableHead className="text-muted-foreground">Mensaje</TableHead>
                   <TableHead className="text-muted-foreground">Descuento</TableHead>
                   <TableHead className="text-muted-foreground w-28">Acciones</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
+                {currentRecords.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={10} className="h-28 text-center text-sm text-muted-foreground">
+                      No hay registros que coincidan con los filtros seleccionados.
+                    </TableCell>
+                  </TableRow>
+                )}
                 {currentRecords.map((record) => {
                   const user = users.find((u) => u.id === record.usuarioId);
                   const hasArrivalDetail = Boolean(
@@ -311,7 +578,8 @@ export default function LlegadasPage() {
                       key={record.id}
                       className={cn(
                         "border-border/50 hover:bg-secondary/30",
-                        record.tarde && "bg-red-500/3"
+                        record.tarde && "bg-red-500/3",
+                        record.estadoEntrada === "no_reportado" && "bg-sky-500/5"
                       )}
                     >
                       <TableCell>
@@ -352,7 +620,14 @@ export default function LlegadasPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        {record.tarde ? (
+                        {record.estadoEntrada === "no_reportado" ? (
+                          <Badge
+                            variant="outline"
+                            className="bg-sky-500/10 text-sky-300 border-sky-500/20 text-xs"
+                          >
+                            No registrado
+                          </Badge>
+                        ) : record.tarde ? (
                           <Badge
                             variant="outline"
                             className="bg-red-500/10 text-red-400 border-red-500/20 text-xs"
@@ -429,12 +704,16 @@ export default function LlegadasPage() {
                           variant="outline"
                           className={cn(
                             "text-xs",
-                            record.tarde
+                            record.estadoEntrada === "no_reportado"
+                              ? "bg-sky-500/10 text-sky-300 border-sky-500/20"
+                              : record.tarde
                               ? "bg-red-500/10 text-red-400 border-red-500/20"
                               : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
                           )}
                         >
-                          {record.tarde ? "Tarde" : "Puntual"}
+                          {record.estadoEntrada === "no_reportado"
+                            ? "No registrado"
+                            : record.tarde ? "Tarde" : "Puntual"}
                         </Badge>
                       </TableCell>
                       <TableCell>
@@ -469,8 +748,18 @@ export default function LlegadasPage() {
                         )}
                       </TableCell>
                       <TableCell>
-                        {record.tarde && (
-                          <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 text-sky-300 hover:text-sky-200 hover:bg-sky-500/10"
+                              title="Editar estado de asistencia"
+                              onClick={() => handleOpenAttendanceEdit(record)}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                          {record.tarde && (
+                            <>
                             <Button
                               variant="ghost"
                               size="icon"
@@ -500,8 +789,9 @@ export default function LlegadasPage() {
                             >
                               <Percent className="h-3.5 w-3.5" />
                             </Button>
+                            </>
+                          )}
                           </div>
-                        )}
                       </TableCell>
                     </TableRow>
                   );
@@ -510,26 +800,37 @@ export default function LlegadasPage() {
             </Table>
 
             {totalPages > 1 && (
-              <div className="p-4 border-t border-border/50 flex justify-end">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/50 p-3">
+                <p className="text-xs text-muted-foreground">
+                  Mostrando {startIndex + 1}-{Math.min(endIndex, filtered.length)} de {filtered.length}
+                </p>
                 <Pagination>
-                  <PaginationContent>
+                  <PaginationContent className="flex-wrap justify-center">
                     <PaginationItem>
                       <PaginationPrevious
                         onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                         className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
                       />
                     </PaginationItem>
-                    {Array.from({ length: totalPages }).map((_, i) => (
-                      <PaginationItem key={i + 1}>
+                    {Array.from({ length: totalPages }).map((_, i) => {
+                      const page = i + 1;
+                      const visible = page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1;
+                      const previousVisible = page > 1 && (page - 1 === 1 || page - 1 === totalPages || Math.abs(page - 1 - currentPage) <= 1);
+                      if (!visible) return previousVisible ? (
+                        <PaginationItem key={`ellipsis-${page}`}><PaginationEllipsis /></PaginationItem>
+                      ) : null;
+                      return (
+                      <PaginationItem key={page}>
                         <PaginationLink
-                          onClick={() => setCurrentPage(i + 1)}
-                          isActive={currentPage === i + 1}
+                          onClick={() => setCurrentPage(page)}
+                          isActive={currentPage === page}
                           className="cursor-pointer"
                         >
-                          {i + 1}
+                          {page}
                         </PaginationLink>
                       </PaginationItem>
-                    ))}
+                      );
+                    })}
                     <PaginationItem>
                       <PaginationNext
                         onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
@@ -543,6 +844,80 @@ export default function LlegadasPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={attendanceEditOpen} onOpenChange={setAttendanceEditOpen}>
+        <DialogContent className="bg-card border-border sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Editar estado de asistencia</DialogTitle>
+          </DialogHeader>
+          {selectedRecord && (() => {
+            const user = users.find((u) => u.id === selectedRecord.usuarioId);
+            return (
+              <div className="space-y-4">
+                <div className="rounded-lg border border-border/50 bg-secondary/30 p-3">
+                  <p className="text-sm text-foreground">
+                    <span className="font-medium">{user?.nombre} {user?.apellido}</span>
+                    <span className="text-muted-foreground"> · {selectedRecord.fecha}</span>
+                  </p>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Estado de entrada</Label>
+                    <Select
+                      value={attendanceStatus}
+                      onValueChange={(value: "a_tiempo" | "tarde" | "no_reportado") => setAttendanceStatus(value)}
+                    >
+                      <SelectTrigger className="bg-secondary/50 border-border/50">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-card border-border">
+                        <SelectItem value="a_tiempo">A tiempo</SelectItem>
+                        <SelectItem value="tarde">Tarde</SelectItem>
+                        <SelectItem value="no_reportado">No registrado</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-foreground/80">Hora real</Label>
+                    <Input
+                      type="time"
+                      value={attendanceTime}
+                      disabled={attendanceStatus === "no_reportado"}
+                      onChange={(event) => setAttendanceTime(event.target.value)}
+                      className="bg-secondary/50 border-border/50"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-foreground/80">Observación</Label>
+                  <Textarea
+                    value={attendanceReason}
+                    onChange={(event) => setAttendanceReason(event.target.value)}
+                    placeholder={`Ej. No reportó la entrada antes del corte de las ${configuredDiscountTime}`}
+                    className="min-h-24 bg-secondary/50 border-border/50"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Al guardar como no registrado se elimina la hora de entrada y se conserva/aplica el descuento configurado.
+                </p>
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setAttendanceEditOpen(false)} className="text-muted-foreground">
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleSaveAttendanceEdit}
+              disabled={attendanceSaving}
+              className="gap-2 bg-gold text-background hover:bg-gold-dark"
+            >
+              <Pencil className="h-4 w-4" />
+              {attendanceSaving ? "Guardando..." : "Guardar cambios"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={messageOpen} onOpenChange={setMessageOpen}>
         <DialogContent className="bg-card border-border sm:max-w-lg">

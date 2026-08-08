@@ -176,6 +176,7 @@ interface RegistroBaseRow {
 
 interface LegacyRegistroCandidateRow {
   id: string;
+  codigo_registro?: string | null;
   actividad_id?: string | null;
   lider_id?: string | null;
   grupo_id?: string | null;
@@ -189,6 +190,7 @@ interface LegacyRegistroCandidateRow {
 
 interface GroupActivitySourceRow {
   id: string;
+  codigo_registro?: string | null;
   fecha: string;
   grupo_id: string;
   cliente_id?: string | null;
@@ -225,12 +227,15 @@ interface VisitMirrorRow {
 }
 
 interface VisitMirrorMaps {
+  byId: Map<string, VisitMirrorRow>;
+  byCode: Map<string, VisitMirrorRow>;
   strict: Map<string, VisitMirrorRow>;
   fallback: Map<string, VisitMirrorRow>;
 }
 
 interface VisitLiquidationRow {
   id: string;
+  codigo_registro?: string | null;
   tecnico_id: string;
   fecha: string;
   periodo_id?: string | null;
@@ -242,6 +247,7 @@ interface VisitLiquidationRow {
 
 interface VisitLiquidationMaps {
   byReferenceId: Map<string, VisitLiquidationRow[]>;
+  byCode: Map<string, VisitLiquidationRow[]>;
   byFallback: Map<string, VisitLiquidationRow[]>;
 }
 
@@ -258,6 +264,8 @@ interface RecorridoMirrorRow {
 }
 
 interface RecorridoMirrorMaps {
+  byId: Map<string, RecorridoMirrorRow>;
+  byCode: Map<string, RecorridoMirrorRow>;
   strict: Map<string, RecorridoMirrorRow>;
   fallback: Map<string, RecorridoMirrorRow>;
 }
@@ -289,6 +297,7 @@ function mapReport(row: ReporteActividadRow, fotosAntes: string[], fotosDespues:
     mantenimientoId: row.mantenimiento_id || undefined,
     mantenimientoParticipanteId: row.mantenimiento_participante_id || undefined,
     visitaTecnicaId: row.visita_tecnica_id || undefined,
+    recorridoId: row.recorrido_id || undefined,
     tipoVisita: row.tipo_visita || undefined,
     tecnicoId: row.tecnico_id,
     liderGrupoId: row.lider_grupo_id,
@@ -558,7 +567,9 @@ function dedupePreventiveMaintenanceParticipantReports(reports: ActivityReport[]
       return;
     }
 
-    const key = report.mantenimientoParticipanteId
+    const key = report.codigoRegistro
+      ? `code:${report.codigoRegistro}:tech:${report.tecnicoId}`
+      : report.mantenimientoParticipanteId
       ? `participant:${report.mantenimientoParticipanteId}`
       : report.mantenimientoId
         ? `maintenance:${report.mantenimientoId}:tech:${report.tecnicoId}`
@@ -635,8 +646,12 @@ function dedupeSharedParticipantOverrides(overrides: SharedParticipantOverride[]
   return Array.from(overridesByTechnician.values());
 }
 
-function buildMaintenanceSharedIdentity(report: Pick<ActivityReport, "tipo" | "mantenimientoId" | "fecha" | "periodoId" | "grupoId" | "clienteId" | "descripcion">) {
+function buildMaintenanceSharedIdentity(report: Pick<ActivityReport, "tipo" | "codigoRegistro" | "mantenimientoId" | "fecha" | "periodoId" | "grupoId" | "clienteId" | "descripcion">) {
   if (report.tipo !== "mantenimiento_preventivo") return report.mantenimientoId || report.fecha;
+
+  if (report.codigoRegistro) {
+    return `shared-maintenance-code:${report.codigoRegistro.trim().toUpperCase()}`;
+  }
 
   if (report.mantenimientoId) {
     return `shared-maintenance:${report.mantenimientoId}`;
@@ -787,7 +802,13 @@ function buildLegacyActivityMirrorKey(params: {
   clienteId?: string | null;
   descripcion?: string | null;
   especificacion?: string | null;
+  codigoRegistro?: string | null;
 }) {
+  const codigoRegistro = normalizeActivityMatchText(params.codigoRegistro);
+  if (codigoRegistro) {
+    return ["code", codigoRegistro, params.tecnicoId].join("|");
+  }
+
   return [
     params.tecnicoId,
     params.fecha,
@@ -807,7 +828,11 @@ function buildCanonicalLegacyGroupActivityIdentity(params: {
   description?: string | null;
   especificacion?: string | null;
   observaciones?: string | null;
+  codigoRegistro?: string | null;
 }) {
+  const codigoRegistro = normalizeActivityMatchText(params.codigoRegistro);
+  if (codigoRegistro) return `code:${codigoRegistro}`;
+
   return [
     params.actividadId || "",
     params.leaderId || "",
@@ -830,7 +855,11 @@ function buildCanonicalLegacyGroupActivityBaseIdentity(params: {
   clienteId?: string | null;
   fecha: string;
   description?: string | null;
+  codigoRegistro?: string | null;
 }) {
+  const codigoRegistro = normalizeActivityMatchText(params.codigoRegistro);
+  if (codigoRegistro) return `code:${codigoRegistro}`;
+
   return [
     params.actividadId || "",
     params.leaderId || "",
@@ -859,6 +888,10 @@ function scoreLegacyActivityCompleteness(params: {
 function buildPreventiveMaintenanceCanonicalIdentity(report: ActivityReport) {
   if (report.tipo !== "mantenimiento_preventivo") {
     return report.id;
+  }
+
+  if (report.codigoRegistro) {
+    return `preventive-code:${report.codigoRegistro}|tech:${report.tecnicoId}`;
   }
 
   if (report.mantenimientoParticipanteId) {
@@ -1019,6 +1052,7 @@ function dedupeGroupActivityReports(reports: ActivityReport[]) {
       clienteId: report.clienteId,
       fecha: report.fecha,
       description: report.descripcion,
+      codigoRegistro: report.codigoRegistro,
     });
     const current = groupedByBaseIdentity.get(baseKey) || [];
     current.push(report);
@@ -1049,7 +1083,10 @@ function dedupeGroupActivityReports(reports: ActivityReport[]) {
     const canonicalByTechAndSpec = new Map<string, ActivityReport>();
 
     reportsToProcess.forEach((report) => {
-      const key = [
+    const codigoRegistro = normalizeActivityMatchText(report.codigoRegistro);
+    const key = codigoRegistro
+      ? ["code", codigoRegistro, report.tecnicoId].join("|")
+      : [
         getNormalizedGroupActivitySpecification({
           description: report.descripcion,
           especificacion: report.especificacion,
@@ -1090,6 +1127,7 @@ function selectCanonicalLegacyRegistroIds(reports: ActivityReport[]) {
       clienteId: reference.clienteId,
       fecha: reference.fecha,
       description: reference.descripcion,
+      codigoRegistro: reference.codigoRegistro,
     });
     const current = registrosByBaseIdentity.get(baseKey) || [];
     current.push({ registroId, reports: registroReports });
@@ -1099,6 +1137,17 @@ function selectCanonicalLegacyRegistroIds(reports: ActivityReport[]) {
   const selectedRegistroIds = new Set<string>();
 
   registrosByBaseIdentity.forEach((registroCandidates) => {
+    const codedCandidates = registroCandidates.filter((candidate) => candidate.reports.some((report) => report.codigoRegistro));
+    if (codedCandidates.length > 0) {
+      const bestCandidate = codedCandidates.reduce<{ registroId: string; reports: ActivityReport[] } | undefined>((best, candidate) => {
+        if (!best) return candidate;
+        return shouldReplaceLegacyCanonicalCandidate(best.reports[0], candidate.reports[0]) ? candidate : best;
+      }, undefined);
+
+      if (bestCandidate) selectedRegistroIds.add(bestCandidate.registroId);
+      return;
+    }
+
     const candidatesBySpec = new Map<string, Array<{ registroId: string; reports: ActivityReport[] }>>();
 
     registroCandidates.forEach((candidate) => {
@@ -1144,6 +1193,7 @@ function buildLegacyRegistroCandidateIdentity(params: {
   especificacion?: string | null;
   descripcion?: string | null;
   observaciones?: string | null;
+  codigoRegistro?: string | null;
 }) {
   return buildCanonicalLegacyGroupActivityIdentity({
     actividadId: params.actividadId,
@@ -1154,6 +1204,7 @@ function buildLegacyRegistroCandidateIdentity(params: {
     description: params.descripcion,
     especificacion: params.especificacion,
     observaciones: params.observaciones,
+    codigoRegistro: params.codigoRegistro,
   });
 }
 
@@ -1163,7 +1214,13 @@ function buildLegacyActivityFallbackKey(params: {
   grupoId?: string | null;
   clienteId?: string | null;
   descripcion?: string | null;
+  codigoRegistro?: string | null;
 }) {
+  const codigoRegistro = normalizeActivityMatchText(params.codigoRegistro);
+  if (codigoRegistro) {
+    return ["code", codigoRegistro, params.tecnicoId].join("|");
+  }
+
   return [
     params.tecnicoId,
     params.fecha,
@@ -1270,6 +1327,7 @@ function enrichLegacyActivityReport(
     clienteId: report.clienteId,
     descripcion: report.descripcion,
     especificacion: report.especificacion,
+    codigoRegistro: report.codigoRegistro,
   });
   const fallbackKey = buildLegacyActivityFallbackKey({
     tecnicoId: report.tecnicoId,
@@ -1277,12 +1335,17 @@ function enrichLegacyActivityReport(
     grupoId: report.grupoId,
     clienteId: report.clienteId,
     descripcion: report.descripcion,
+    codigoRegistro: report.codigoRegistro,
   });
 
   const mirror = resolveLegacyActivityCandidate(mirrors.strict.get(strictKey), report)
     || resolveLegacyActivityCandidate(mirrors.fallback.get(fallbackKey), report)
-    || resolveLegacyActivityByBaseIdentity(mirrors.strict.get(strictKey), report)
-    || resolveLegacyActivityByBaseIdentity(mirrors.fallback.get(fallbackKey), report);
+    || (!report.codigoRegistro
+      ? resolveLegacyActivityByBaseIdentity(mirrors.strict.get(strictKey), report)
+      : undefined)
+    || (!report.codigoRegistro
+      ? resolveLegacyActivityByBaseIdentity(mirrors.fallback.get(fallbackKey), report)
+      : undefined);
 
   if (!mirror) return report;
 
@@ -1309,6 +1372,7 @@ function mergeGroupActivityMetadata(report: ActivityReport, relatedReport: Activ
 
   return {
     ...report,
+    codigoRegistro: report.codigoRegistro || relatedReport.codigoRegistro,
     registroActividadId: relatedReport.registroActividadId || report.registroActividadId,
     porcentajeParticipacion: relatedReport.porcentajeParticipacion ?? report.porcentajeParticipacion,
     fotoEvidencia: report.fotoEvidencia || relatedReport.fotoEvidencia,
@@ -1366,14 +1430,20 @@ async function resolveLegacyRegistroForGroupActivitySource(
 ): Promise<LegacyRegistroCandidateRow | undefined> {
   let legacyRegistroQuery = supabase
     .from("registros_actividades")
-    .select("id, actividad_id, lider_id, grupo_id, cliente_id, fecha, especificacion, valor_actividad_base, fecha_creacion, foto_evidencia_url")
-    .eq("fecha", sourceReport.fecha)
-    .eq("grupo_id", sourceReport.grupo_id);
+    .select("id, codigo_registro, actividad_id, lider_id, grupo_id, cliente_id, fecha, especificacion, valor_actividad_base, fecha_creacion, foto_evidencia_url");
 
-  if (sourceReport.cliente_id) {
-    legacyRegistroQuery = legacyRegistroQuery.eq("cliente_id", sourceReport.cliente_id);
+  if (sourceReport.codigo_registro) {
+    legacyRegistroQuery = legacyRegistroQuery.eq("codigo_registro", sourceReport.codigo_registro.trim().toUpperCase());
   } else {
-    legacyRegistroQuery = legacyRegistroQuery.is("cliente_id", null);
+    legacyRegistroQuery = legacyRegistroQuery
+      .eq("fecha", sourceReport.fecha)
+      .eq("grupo_id", sourceReport.grupo_id);
+
+    if (sourceReport.cliente_id) {
+      legacyRegistroQuery = legacyRegistroQuery.eq("cliente_id", sourceReport.cliente_id);
+    } else {
+      legacyRegistroQuery = legacyRegistroQuery.is("cliente_id", null);
+    }
   }
 
   const { data: legacyRegistroCandidates, error: legacyRegistroCandidatesError } = await legacyRegistroQuery;
@@ -1386,6 +1456,7 @@ async function resolveLegacyRegistroForGroupActivitySource(
     clienteId: sourceReport.cliente_id,
     fecha: sourceReport.fecha,
     descripcion: sourceReport.descripcion,
+    codigoRegistro: sourceReport.codigo_registro,
   });
 
   if ((legacyRegistroCandidates || []).length > 1) {
@@ -1419,6 +1490,7 @@ async function resolveLegacyRegistroForGroupActivitySource(
       fecha: candidate.fecha,
       especificacion: candidate.especificacion,
       descripcion: sourceReport.descripcion,
+      codigoRegistro: candidate.codigo_registro,
     }) === canonicalIdentity);
 
     legacyRegistro = identityMatchedRegistro || participantMatchedRegistro || legacyRegistro;
@@ -1477,6 +1549,11 @@ function buildVisitLiquidationFallbackKey(params: {
   return [params.tecnicoId, params.fecha, params.periodoId || ""].join("|");
 }
 
+function buildRegistrationCodeKey(codigoRegistro?: string | null, tecnicoId?: string | null) {
+  const normalizedCode = codigoRegistro?.trim().toUpperCase();
+  return normalizedCode ? [normalizedCode, tecnicoId || ""].join("|") : "";
+}
+
 function appendVisitLiquidationCandidate(
   map: Map<string, VisitLiquidationRow[]>,
   key: string,
@@ -1489,6 +1566,7 @@ function appendVisitLiquidationCandidate(
 
 function resolveVisitLiquidationRow(params: {
   reportId: string;
+  codigoRegistro?: string | null;
   visitId?: string;
   tecnicoId: string;
   fecha: string;
@@ -1496,6 +1574,11 @@ function resolveVisitLiquidationRow(params: {
   maps?: VisitLiquidationMaps;
 }) {
   if (!params.maps) return undefined;
+
+  const codeKey = buildRegistrationCodeKey(params.codigoRegistro, params.tecnicoId);
+  const codeCandidates = codeKey ? params.maps.byCode.get(codeKey) || [] : [];
+  if (codeCandidates.length === 1) return codeCandidates[0];
+  if (codeCandidates.length > 1) return undefined;
 
   const directCandidates = [
     ...(params.maps.byReferenceId.get(params.reportId) || []),
@@ -1620,7 +1703,10 @@ function enrichVisitReport(
     clienteId: report.clienteId,
   });
 
-  const mirror = mirrors.strict.get(strictKey) || mirrors.fallback.get(fallbackKey);
+  const codeKey = buildRegistrationCodeKey(report.codigoRegistro, report.tecnicoId);
+  const mirror = (report.visitaTecnicaId ? mirrors.byId.get(report.visitaTecnicaId) : undefined)
+    || (codeKey ? mirrors.byCode.get(codeKey) : undefined)
+    || (!report.codigoRegistro ? mirrors.strict.get(strictKey) || mirrors.fallback.get(fallbackKey) : undefined);
 
   if (!mirror) return report;
 
@@ -1695,7 +1781,10 @@ function enrichRecorridoReport(
     tipoRecorrido: report.tipoRecorrido,
   });
 
-  const mirror = mirrors?.strict.get(strictKey) || mirrors?.fallback.get(fallbackKey);
+  const normalizedCode = report.codigoRegistro?.trim().toUpperCase();
+  const mirror = (report.recorridoId ? mirrors?.byId.get(report.recorridoId) : undefined)
+    || (normalizedCode ? mirrors?.byCode.get(normalizedCode) : undefined)
+    || (!normalizedCode ? mirrors?.strict.get(strictKey) || mirrors?.fallback.get(fallbackKey) : undefined);
   const configuredCost = report.tipoRecorrido === "con_herramienta"
     ? config.costoRecorridoHerramienta
     : config.costoRecorridoNormal;
@@ -1795,6 +1884,7 @@ export async function updateCostoClienteVisitaAdmin(
 
 async function syncVisitLiquidationFromReport(params: {
   reportId: string;
+  codigoRegistro?: string | null;
   tecnicoId: string;
   fecha: string;
   periodoId?: string | null;
@@ -1810,8 +1900,12 @@ async function syncVisitLiquidationFromReport(params: {
   let liquidationLookupQuery = supabase
     .from("items_liquidacion")
     .select("id, porcentaje")
-    .eq("tipo", "visita_tecnica")
-    .in("referencia_id", referenceIds);
+    .eq("tipo", "visita_tecnica");
+
+  const normalizedCode = params.codigoRegistro?.trim().toUpperCase();
+  liquidationLookupQuery = normalizedCode
+    ? liquidationLookupQuery.eq("codigo_registro", normalizedCode)
+    : liquidationLookupQuery.in("referencia_id", referenceIds);
 
   if (params.periodoId) {
     liquidationLookupQuery = liquidationLookupQuery.eq("periodo_id", params.periodoId);
@@ -1874,6 +1968,7 @@ async function syncVisitApprovalValue(params: {
 async function syncVisitLiquidationValue(params: {
   tecnicoId: string;
   fecha: string;
+  codigoRegistro?: string | null;
   valorBase: number;
   valorGanado: number;
   porcentaje?: number;
@@ -1887,7 +1982,8 @@ async function syncVisitLiquidationValue(params: {
     ...(params.porcentaje != null ? { porcentaje: params.porcentaje } : {}),
   };
 
-  if (uniqueReferenceIds.length === 0) {
+  const normalizedCode = params.codigoRegistro?.trim().toUpperCase();
+  if (!normalizedCode && uniqueReferenceIds.length === 0) {
     return;
   }
 
@@ -1895,8 +1991,11 @@ async function syncVisitLiquidationValue(params: {
     .from("items_liquidacion")
     .select("id")
     .eq("tipo", "visita_tecnica")
-    .eq("tecnico_id", params.tecnicoId)
-    .in("referencia_id", uniqueReferenceIds);
+    .eq("tecnico_id", params.tecnicoId);
+
+  lookupQuery = normalizedCode
+    ? lookupQuery.eq("codigo_registro", normalizedCode)
+    : lookupQuery.in("referencia_id", uniqueReferenceIds);
 
   if (params.periodoId) {
     lookupQuery = lookupQuery.eq("periodo_id", params.periodoId);
@@ -1919,6 +2018,7 @@ async function syncVisitLiquidationValue(params: {
 
 async function resolveSharedVisitParticipants(params: {
   reportId: string;
+  codigoRegistro?: string | null;
   fecha: string;
   grupoId: string;
   clienteId?: string | null;
@@ -1928,20 +2028,26 @@ async function resolveSharedVisitParticipants(params: {
   let relatedReportsQuery = supabase
     .from("reportes_actividad")
     .select("id, tecnico_id, periodo_id, costo_actividad, costo_actividad_default, valor_modificado")
-    .eq("tipo", "visita_tecnica")
-    .eq("fecha", params.fecha)
-    .eq("grupo_id", params.grupoId);
+    .eq("tipo", "visita_tecnica");
 
-  if (params.clienteId) {
-    relatedReportsQuery = relatedReportsQuery.eq("cliente_id", params.clienteId);
+  if (params.codigoRegistro) {
+    relatedReportsQuery = relatedReportsQuery.eq("codigo_registro", params.codigoRegistro.trim().toUpperCase());
   } else {
-    relatedReportsQuery = relatedReportsQuery.is("cliente_id", null);
-  }
+    relatedReportsQuery = relatedReportsQuery
+      .eq("fecha", params.fecha)
+      .eq("grupo_id", params.grupoId);
 
-  if (params.descripcion) {
-    relatedReportsQuery = relatedReportsQuery.eq("descripcion", params.descripcion);
-  } else {
-    relatedReportsQuery = relatedReportsQuery.is("descripcion", null);
+    if (params.clienteId) {
+      relatedReportsQuery = relatedReportsQuery.eq("cliente_id", params.clienteId);
+    } else {
+      relatedReportsQuery = relatedReportsQuery.is("cliente_id", null);
+    }
+
+    if (params.descripcion) {
+      relatedReportsQuery = relatedReportsQuery.eq("descripcion", params.descripcion);
+    } else {
+      relatedReportsQuery = relatedReportsQuery.is("descripcion", null);
+    }
   }
 
   const { data: relatedReports, error: relatedReportsError } = await relatedReportsQuery;
@@ -1959,29 +2065,41 @@ async function resolveSharedVisitParticipants(params: {
   let visitQuery = supabase
     .from("visitas_tecnicas")
     .select("id, tecnico_id, descripcion, costo_visita_tecnica_default")
-    .in("tecnico_id", technicalIds)
-    .gte("fecha_inicio", startDate)
-    .lt("fecha_inicio", endDate);
+    .in("tecnico_id", technicalIds);
 
-  if (params.clienteId) {
-    visitQuery = visitQuery.eq("cliente_id", params.clienteId);
+  if (params.codigoRegistro) {
+    visitQuery = visitQuery.eq("codigo_registro", params.codigoRegistro.trim().toUpperCase());
   } else {
-    visitQuery = visitQuery.is("cliente_id", null);
+    visitQuery = visitQuery
+      .gte("fecha_inicio", startDate)
+      .lt("fecha_inicio", endDate);
+
+    if (params.clienteId) {
+      visitQuery = visitQuery.eq("cliente_id", params.clienteId);
+    } else {
+      visitQuery = visitQuery.is("cliente_id", null);
+    }
   }
 
   const { data: visitRows, error: visitRowsError } = await visitQuery;
   if (visitRowsError) throw visitRowsError;
 
-  const { data: liquidationRows, error: liquidationRowsError } = await supabase
+  let liquidationRowsQuery = supabase
     .from("items_liquidacion")
-    .select("id, tecnico_id, fecha, periodo_id, referencia_id, porcentaje, valor_base, valor_ganado")
+    .select("id, codigo_registro, tecnico_id, fecha, periodo_id, referencia_id, porcentaje, valor_base, valor_ganado")
     .eq("tipo", "visita_tecnica")
-    .in("tecnico_id", technicalIds)
-    .eq("fecha", params.fecha);
+    .in("tecnico_id", technicalIds);
+
+  liquidationRowsQuery = params.codigoRegistro
+    ? liquidationRowsQuery.eq("codigo_registro", params.codigoRegistro.trim().toUpperCase())
+    : liquidationRowsQuery.eq("fecha", params.fecha);
+
+  const { data: liquidationRows, error: liquidationRowsError } = await liquidationRowsQuery;
   if (liquidationRowsError) throw liquidationRowsError;
 
   const liquidationMaps: VisitLiquidationMaps = {
     byReferenceId: new Map<string, VisitLiquidationRow[]>(),
+    byCode: new Map<string, VisitLiquidationRow[]>(),
     byFallback: new Map<string, VisitLiquidationRow[]>(),
   };
 
@@ -1989,6 +2107,9 @@ async function resolveSharedVisitParticipants(params: {
     if (row.referencia_id) {
       appendVisitLiquidationCandidate(liquidationMaps.byReferenceId, row.referencia_id, row);
     }
+
+    const codeKey = buildRegistrationCodeKey(row.codigo_registro, row.tecnico_id);
+    if (codeKey) appendVisitLiquidationCandidate(liquidationMaps.byCode, codeKey, row);
 
     const fallbackKey = buildVisitLiquidationFallbackKey({
       tecnicoId: row.tecnico_id,
@@ -2018,6 +2139,7 @@ async function resolveSharedVisitParticipants(params: {
 
     const liquidationRow = resolveVisitLiquidationRow({
       reportId: participant.id,
+      codigoRegistro: params.codigoRegistro,
       visitId: selectedVisit?.id,
       tecnicoId: participant.tecnico_id,
       fecha: params.fecha,
@@ -2073,6 +2195,7 @@ async function resolveSharedVisitParticipants(params: {
 
 async function updateSharedVisitCostFromReport(params: {
   reportId: string;
+  codigoRegistro?: string | null;
   fecha: string;
   grupoId: string;
   clienteId?: string | null;
@@ -2145,6 +2268,7 @@ async function updateSharedVisitCostFromReport(params: {
       await syncVisitLiquidationValue({
         tecnicoId: participant.tecnicoId,
         fecha: params.fecha,
+        codigoRegistro: params.codigoRegistro,
         valorBase: normalizedBaseValue,
         valorGanado: nextTechnicalValue,
         porcentaje: participant.percentage,
@@ -2166,18 +2290,19 @@ async function syncVisitCostFromApprovalReport(
 ): Promise<void> {
   const { data: report, error: reportError } = await supabase
     .from("reportes_actividad")
-    .select("id, tipo, tecnico_id, cliente_id, fecha, descripcion, periodo_id, costo_actividad_default")
+    .select("id, codigo_registro, tipo, tecnico_id, cliente_id, fecha, descripcion, periodo_id, costo_actividad_default, visita_tecnica_id")
     .eq("id", reportId)
     .single();
   if (reportError) throw reportError;
 
   if (report?.tipo !== "visita_tecnica") return;
 
-  if (visitId) {
+  const resolvedVisitId = visitId || report.visita_tecnica_id || undefined;
+  if (resolvedVisitId) {
     const { data: visit, error: visitLookupError } = await supabase
       .from("visitas_tecnicas")
       .select("id, costo_visita_tecnica_default")
-      .eq("id", visitId)
+      .eq("id", resolvedVisitId)
       .maybeSingle();
     if (visitLookupError) throw visitLookupError;
 
@@ -2202,6 +2327,7 @@ async function syncVisitCostFromApprovalReport(
 
       await syncVisitLiquidationFromReport({
         reportId,
+        codigoRegistro: report.codigo_registro,
         tecnicoId: report.tecnico_id,
         fecha: report.fecha,
         periodoId: report.periodo_id,
@@ -2220,14 +2346,20 @@ async function syncVisitCostFromApprovalReport(
   let visitQuery = supabase
     .from("visitas_tecnicas")
     .select("id, descripcion, costo_visita_tecnica_default")
-    .eq("tecnico_id", report.tecnico_id)
-    .gte("fecha_inicio", startDate)
-    .lt("fecha_inicio", endDate);
+    .eq("tecnico_id", report.tecnico_id);
 
-  if (report.cliente_id) {
-    visitQuery = visitQuery.eq("cliente_id", report.cliente_id);
+  if (report.codigo_registro) {
+    visitQuery = visitQuery.eq("codigo_registro", report.codigo_registro.trim().toUpperCase());
   } else {
-    visitQuery = visitQuery.is("cliente_id", null);
+    visitQuery = visitQuery
+      .gte("fecha_inicio", startDate)
+      .lt("fecha_inicio", endDate);
+
+    if (report.cliente_id) {
+      visitQuery = visitQuery.eq("cliente_id", report.cliente_id);
+    } else {
+      visitQuery = visitQuery.is("cliente_id", null);
+    }
   }
 
   const { data: candidateVisits, error: visitsLookupError } = await visitQuery;
@@ -2280,6 +2412,7 @@ async function syncVisitCostFromApprovalReport(
 
   await syncVisitLiquidationFromReport({
     reportId,
+    codigoRegistro: report.codigo_registro,
     tecnicoId: report.tecnico_id,
     fecha: report.fecha,
     periodoId: report.periodo_id,
@@ -2330,6 +2463,7 @@ async function syncGroupedActivityApprovalValue(params: {
 async function syncGroupedActivityLiquidationValue(params: {
   tecnicoId: string;
   fecha: string;
+  codigoRegistro?: string | null;
   valorBase: number;
   valorGanado: number;
   porcentaje?: number;
@@ -2342,6 +2476,33 @@ async function syncGroupedActivityLiquidationValue(params: {
     valor_ganado: params.valorGanado,
     ...(params.porcentaje != null ? { porcentaje: params.porcentaje } : {}),
   };
+
+  const normalizedCode = params.codigoRegistro?.trim().toUpperCase();
+  if (normalizedCode) {
+    let codeLookupQuery = supabase
+      .from("items_liquidacion")
+      .select("id")
+      .eq("tipo", "actividad")
+      .eq("tecnico_id", params.tecnicoId)
+      .eq("codigo_registro", normalizedCode);
+
+    if (params.periodoId) {
+      codeLookupQuery = codeLookupQuery.eq("periodo_id", params.periodoId);
+    }
+
+    const { data: codeItems, error: codeLookupError } = await codeLookupQuery;
+    if (codeLookupError) throw codeLookupError;
+
+    const codeItemIds = (codeItems || []).map((item: { id: string }) => item.id);
+    if (codeItemIds.length > 0) {
+      const { error: codeUpdateError } = await supabase
+        .from("items_liquidacion")
+        .update(updateData)
+        .in("id", codeItemIds);
+      if (codeUpdateError) throw codeUpdateError;
+      return;
+    }
+  }
 
   if (uniqueReferenceIds.length > 0) {
     let lookupQuery = supabase
@@ -2368,6 +2529,8 @@ async function syncGroupedActivityLiquidationValue(params: {
       return;
     }
   }
+
+  if (normalizedCode) return;
 
   let fallbackQuery = supabase
     .from("items_liquidacion")
@@ -2642,7 +2805,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     const { data: visitLiquidationData, error: visitLiquidationError } = uniqueVisitTechIds.length > 0 && minVisitDate && maxVisitDate
       ? await supabase
         .from("items_liquidacion")
-        .select("id, tecnico_id, fecha, periodo_id, referencia_id, porcentaje, valor_base, valor_ganado")
+        .select("id, codigo_registro, tecnico_id, fecha, periodo_id, referencia_id, porcentaje, valor_base, valor_ganado")
         .eq("tipo", "visita_tecnica")
         .in("tecnico_id", uniqueVisitTechIds)
         .gte("fecha", minVisitDate)
@@ -2684,16 +2847,21 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     const companySettings = await companySettingsPromise;
 
     const visitMirrors: VisitMirrorMaps = {
+      byId: new Map<string, VisitMirrorRow>(),
+      byCode: new Map<string, VisitMirrorRow>(),
       strict: new Map<string, VisitMirrorRow>(),
       fallback: new Map<string, VisitMirrorRow>(),
     };
 
     const visitLiquidationMaps: VisitLiquidationMaps = {
       byReferenceId: new Map<string, VisitLiquidationRow[]>(),
+      byCode: new Map<string, VisitLiquidationRow[]>(),
       byFallback: new Map<string, VisitLiquidationRow[]>(),
     };
 
     const recorridoMirrors: RecorridoMirrorMaps = {
+      byId: new Map<string, RecorridoMirrorRow>(),
+      byCode: new Map<string, RecorridoMirrorRow>(),
       strict: new Map<string, RecorridoMirrorRow>(),
       fallback: new Map<string, RecorridoMirrorRow>(),
     };
@@ -2708,6 +2876,10 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     for (const row of (visitMirrorData || []) as VisitMirrorRow[]) {
       const fecha = row.fecha_inicio?.split("T")[0] || "";
       if (!row.tecnico_id || !fecha) continue;
+
+      visitMirrors.byId.set(row.id, row);
+      const codeKey = buildRegistrationCodeKey(row.codigo_registro, row.tecnico_id);
+      if (codeKey && !visitMirrors.byCode.has(codeKey)) visitMirrors.byCode.set(codeKey, row);
 
       const strictKey = buildVisitMirrorStrictKey({
         tecnicoId: row.tecnico_id,
@@ -2735,6 +2907,9 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
         appendVisitLiquidationCandidate(visitLiquidationMaps.byReferenceId, row.referencia_id, row);
       }
 
+      const codeKey = buildRegistrationCodeKey(row.codigo_registro, row.tecnico_id);
+      if (codeKey) appendVisitLiquidationCandidate(visitLiquidationMaps.byCode, codeKey, row);
+
       if (!row.tecnico_id || !row.fecha) continue;
 
       const fallbackKey = buildVisitLiquidationFallbackKey({
@@ -2747,6 +2922,9 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
     }
 
     for (const row of (recorridoMirrorData || []) as RecorridoMirrorRow[]) {
+      recorridoMirrors.byId.set(row.id, row);
+      const normalizedCode = row.codigo_registro?.trim().toUpperCase();
+      if (normalizedCode && !recorridoMirrors.byCode.has(normalizedCode)) recorridoMirrors.byCode.set(normalizedCode, row);
       const strictKey = buildRecorridoMirrorStrictKey({
         tecnicoId: row.tecnico_id,
         fecha: row.fecha,
@@ -2894,6 +3072,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           visitEnrichedReport.tipo === "visita_tecnica"
             ? resolveVisitLiquidationRow({
               reportId: visitEnrichedReport.id,
+              codigoRegistro: visitEnrichedReport.codigoRegistro,
               visitId: visitEnrichedReport.visitaTecnicaId,
               tecnicoId: visitEnrichedReport.tecnicoId,
               fecha: visitEnrichedReport.fecha,
@@ -2917,6 +3096,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           clienteId: mappedReport.clienteId,
           descripcion: mappedReport.descripcion,
           especificacion: mappedReport.especificacion,
+          codigoRegistro: mappedReport.codigoRegistro,
         });
         const fallbackKey = buildLegacyActivityFallbackKey({
           tecnicoId: mappedReport.tecnicoId,
@@ -2924,6 +3104,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           grupoId: mappedReport.grupoId,
           clienteId: mappedReport.clienteId,
           descripcion: mappedReport.descripcion,
+          codigoRegistro: mappedReport.codigoRegistro,
         });
 
         appendLegacyActivityCandidate(legacyActivityMirrors.strict, strictKey, mappedReport);
@@ -2948,6 +3129,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           clienteId: registroReport.clienteId,
           descripcion: registroReport.descripcion,
           especificacion: registroReport.especificacion,
+          codigoRegistro: registroReport.codigoRegistro,
         });
         const fallbackKey = buildLegacyActivityFallbackKey({
           tecnicoId: registroReport.tecnicoId,
@@ -2955,6 +3137,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           grupoId: registroReport.grupoId,
           clienteId: registroReport.clienteId,
           descripcion: registroReport.descripcion,
+          codigoRegistro: registroReport.codigoRegistro,
         });
         const participantKey = buildLegacyActivityParticipantKey({
           tecnicoId: registroReport.tecnicoId,
@@ -2979,6 +3162,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           clienteId: report.clienteId,
           descripcion: report.descripcion,
           especificacion: report.especificacion,
+          codigoRegistro: report.codigoRegistro,
         });
         const fallbackKey = buildLegacyActivityFallbackKey({
           tecnicoId: report.tecnicoId,
@@ -2986,6 +3170,7 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           grupoId: report.grupoId,
           clienteId: report.clienteId,
           descripcion: report.descripcion,
+          codigoRegistro: report.codigoRegistro,
         });
         const participantKey = buildLegacyActivityParticipantKey({
           tecnicoId: report.tecnicoId,
@@ -2993,12 +3178,15 @@ export async function getReportesActividad(): Promise<ActivityReport[]> {
           grupoId: report.grupoId,
           clienteId: report.clienteId,
         });
-        const relatedReport = resolveLegacyActivityCandidate(registroReportsByStrictKey.get(strictKey), report)
-          || resolveLegacyActivityCandidate(registroReportsByFallbackKey.get(fallbackKey), report)
-          || resolveLegacyActivityCandidate(registroReportsByParticipantKey.get(participantKey), report)
-          || resolveLegacyActivityByBaseIdentity(registroReportsByStrictKey.get(strictKey), report)
-          || resolveLegacyActivityByBaseIdentity(registroReportsByFallbackKey.get(fallbackKey), report)
-          || resolveLegacyActivityByBaseIdentity(registroReportsByParticipantKey.get(participantKey), report);
+        const relatedReport = report.codigoRegistro
+          ? resolveLegacyActivityCandidate(registroReportsByStrictKey.get(strictKey), report)
+            || resolveLegacyActivityCandidate(registroReportsByFallbackKey.get(fallbackKey), report)
+          : resolveLegacyActivityCandidate(registroReportsByStrictKey.get(strictKey), report)
+            || resolveLegacyActivityCandidate(registroReportsByFallbackKey.get(fallbackKey), report)
+            || resolveLegacyActivityCandidate(registroReportsByParticipantKey.get(participantKey), report)
+            || resolveLegacyActivityByBaseIdentity(registroReportsByStrictKey.get(strictKey), report)
+            || resolveLegacyActivityByBaseIdentity(registroReportsByFallbackKey.get(fallbackKey), report)
+            || resolveLegacyActivityByBaseIdentity(registroReportsByParticipantKey.get(participantKey), report);
 
         if (relatedReport) {
           reports[index] = mergeGroupActivityMetadata(report, relatedReport);
@@ -3055,7 +3243,7 @@ export async function updateCostoActividadAdmin(
 
   const { data: report, error: reportLookupError } = await supabase
     .from("reportes_actividad")
-    .select("id, tipo, tecnico_id, grupo_id, cliente_id, descripcion, fecha, punto_partida, punto_llegada, tipo_recorrido, periodo_id, costo_actividad_default, mantenimiento_id")
+    .select("id, codigo_registro, tipo, tecnico_id, grupo_id, cliente_id, descripcion, fecha, punto_partida, punto_llegada, tipo_recorrido, periodo_id, costo_actividad_default, mantenimiento_id, visita_tecnica_id, recorrido_id")
     .eq("id", id)
     .single();
   if (reportLookupError) throw reportLookupError;
@@ -3063,6 +3251,7 @@ export async function updateCostoActividadAdmin(
   if (report?.tipo === "visita_tecnica") {
     const wasSharedVisitUpdated = await updateSharedVisitCostFromReport({
       reportId: report.id,
+      codigoRegistro: report.codigo_registro,
       fecha: report.fecha,
       grupoId: report.grupo_id,
       clienteId: report.cliente_id,
@@ -3103,6 +3292,7 @@ export async function updateCostoActividadAdmin(
   if (report?.tipo === "mantenimiento_preventivo") {
     const maintenanceIdentity = buildMaintenanceSharedIdentity({
       tipo: "mantenimiento_preventivo",
+      codigoRegistro: report.codigo_registro || undefined,
       mantenimientoId: report.mantenimiento_id || undefined,
       fecha: report.fecha,
       periodoId: report.periodo_id,
@@ -3111,22 +3301,30 @@ export async function updateCostoActividadAdmin(
       descripcion: report.descripcion,
     });
 
-    const { data: maintenanceReports, error: maintenanceReportsError } = await supabase
+    let maintenanceReportsQuery = supabase
       .from("reportes_actividad")
-      .select("id, tecnico_id, periodo_id, mantenimiento_id, mantenimiento_participante_id")
-      .eq("tipo", "mantenimiento_preventivo")
-      .eq("fecha", report.fecha)
-      .eq("grupo_id", report.grupo_id)
-      .eq("periodo_id", report.periodo_id);
+      .select("id, codigo_registro, tecnico_id, periodo_id, mantenimiento_id, mantenimiento_participante_id")
+      .eq("tipo", "mantenimiento_preventivo");
+
+    maintenanceReportsQuery = report.codigo_registro
+      ? maintenanceReportsQuery.eq("codigo_registro", report.codigo_registro.trim().toUpperCase())
+      : maintenanceReportsQuery
+        .eq("fecha", report.fecha)
+        .eq("grupo_id", report.grupo_id)
+        .eq("periodo_id", report.periodo_id);
+
+    const { data: maintenanceReports, error: maintenanceReportsError } = await maintenanceReportsQuery;
     if (maintenanceReportsError) throw maintenanceReportsError;
 
     const relatedReports = (maintenanceReports || []).filter((candidate: {
       id: string;
+      codigo_registro?: string | null;
       tecnico_id: string;
       periodo_id?: string | null;
       mantenimiento_id?: string | null;
     }) => buildMaintenanceSharedIdentity({
       tipo: "mantenimiento_preventivo",
+      codigoRegistro: candidate.codigo_registro || undefined,
       mantenimientoId: candidate.mantenimiento_id || undefined,
       fecha: report.fecha,
       periodoId: candidate.periodo_id || report.periodo_id,
@@ -3203,6 +3401,7 @@ export async function updateCostoActividadAdmin(
         await syncGroupedActivityLiquidationValue({
           tecnicoId: participant.tecnicoId,
           fecha: report.fecha,
+          codigoRegistro: report.codigo_registro,
           valorBase: costoActividad,
           valorGanado: participantValue,
           porcentaje: participant.percentage,
@@ -3234,6 +3433,7 @@ export async function updateCostoActividadAdmin(
     await syncGroupedActivityLiquidationValue({
       tecnicoId: report.tecnico_id,
       fecha: report.fecha,
+      codigoRegistro: report.codigo_registro,
       valorBase: costoActividad,
       valorGanado: costoActividad,
       porcentaje: 100,
@@ -3249,39 +3449,62 @@ export async function updateCostoActividadAdmin(
   if (report?.tipo === "recorrido") {
     let recorridoUpdate = supabase
       .from("recorridos")
-      .update({ valor: costoActividad })
-      .eq("tecnico_id", report.tecnico_id)
-      .eq("fecha", report.fecha);
+      .update({ valor: costoActividad });
 
-    if (report.punto_partida) {
-      recorridoUpdate = recorridoUpdate.eq("punto_partida", report.punto_partida);
-    }
+    if (report.recorrido_id) {
+      recorridoUpdate = recorridoUpdate.eq("id", report.recorrido_id);
+    } else if (report.codigo_registro) {
+      recorridoUpdate = recorridoUpdate.eq("codigo_registro", report.codigo_registro.trim().toUpperCase());
+    } else {
+      recorridoUpdate = recorridoUpdate
+        .eq("tecnico_id", report.tecnico_id)
+        .eq("fecha", report.fecha);
 
-    if (report.punto_llegada) {
-      recorridoUpdate = recorridoUpdate.eq("punto_llegada", report.punto_llegada);
-    }
+      if (report.punto_partida) {
+        recorridoUpdate = recorridoUpdate.eq("punto_partida", report.punto_partida);
+      }
 
-    if (report.tipo_recorrido) {
-      recorridoUpdate = recorridoUpdate.eq("tipo_recorrido", report.tipo_recorrido);
+      if (report.punto_llegada) {
+        recorridoUpdate = recorridoUpdate.eq("punto_llegada", report.punto_llegada);
+      }
+
+      if (report.tipo_recorrido) {
+        recorridoUpdate = recorridoUpdate.eq("tipo_recorrido", report.tipo_recorrido);
+      }
     }
 
     const { error: recorridoUpdateError } = await recorridoUpdate;
     if (recorridoUpdateError) throw recorridoUpdateError;
 
-    const { error: approvalUpdateError } = await supabase
+    let approvalUpdate = supabase
       .from("items_aprobacion")
       .update({ valor: costoActividad })
       .eq("tipo", "recorrido")
-      .eq("tecnico_id", report.tecnico_id)
-      .eq("fecha", report.fecha);
+      .eq("tecnico_id", report.tecnico_id);
+
+    const routeReferenceIds = Array.from(new Set([report.id, report.recorrido_id].filter(Boolean))) as string[];
+    approvalUpdate = routeReferenceIds.length > 0
+      ? approvalUpdate.in("referencia_id", routeReferenceIds)
+      : approvalUpdate.eq("fecha", report.fecha);
+
+    const { error: approvalUpdateError } = await approvalUpdate;
     if (approvalUpdateError) throw approvalUpdateError;
 
-    const { data: liquidationItems, error: liquidationLookupError } = await supabase
+    let liquidationLookup = supabase
       .from("items_liquidacion")
       .select("id, porcentaje")
       .eq("tipo", "recorrido")
-      .eq("tecnico_id", report.tecnico_id)
-      .eq("fecha", report.fecha);
+      .eq("tecnico_id", report.tecnico_id);
+
+    if (report.codigo_registro) {
+      liquidationLookup = liquidationLookup.eq("codigo_registro", report.codigo_registro.trim().toUpperCase());
+    } else if (routeReferenceIds.length > 0) {
+      liquidationLookup = liquidationLookup.in("referencia_id", routeReferenceIds);
+    } else {
+      liquidationLookup = liquidationLookup.eq("fecha", report.fecha);
+    }
+
+    const { data: liquidationItems, error: liquidationLookupError } = await liquidationLookup;
     if (liquidationLookupError) throw liquidationLookupError;
 
     await Promise.all(
@@ -3334,7 +3557,7 @@ export async function updateActividadGrupalBaseAdmin(
     }
     const { data: sourceReport, error: sourceReportError } = await supabase
       .from("reportes_actividad")
-      .select("id, fecha, grupo_id, cliente_id, descripcion, periodo_id, lider_grupo_id")
+      .select("id, codigo_registro, fecha, grupo_id, cliente_id, descripcion, periodo_id, lider_grupo_id")
       .eq("id", sourceReportLookupId)
       .maybeSingle();
     if (sourceReportError) throw sourceReportError;
@@ -3345,20 +3568,26 @@ export async function updateActividadGrupalBaseAdmin(
     let relatedReportsQuery = supabase
       .from("reportes_actividad")
       .select("id, tecnico_id, costo_actividad, periodo_id")
-      .in("tipo", ["actividad", "actividad_grupal"])
-      .eq("fecha", sourceReport.fecha)
-      .eq("grupo_id", sourceReport.grupo_id);
+      .in("tipo", ["actividad", "actividad_grupal"]);
 
-    if (sourceReport.cliente_id) {
-      relatedReportsQuery = relatedReportsQuery.eq("cliente_id", sourceReport.cliente_id);
+    if (sourceReport.codigo_registro) {
+      relatedReportsQuery = relatedReportsQuery.eq("codigo_registro", sourceReport.codigo_registro.trim().toUpperCase());
     } else {
-      relatedReportsQuery = relatedReportsQuery.is("cliente_id", null);
-    }
+      relatedReportsQuery = relatedReportsQuery
+        .eq("fecha", sourceReport.fecha)
+        .eq("grupo_id", sourceReport.grupo_id);
 
-    if (sourceReport.descripcion) {
-      relatedReportsQuery = relatedReportsQuery.eq("descripcion", sourceReport.descripcion);
-    } else {
-      relatedReportsQuery = relatedReportsQuery.is("descripcion", null);
+      if (sourceReport.cliente_id) {
+        relatedReportsQuery = relatedReportsQuery.eq("cliente_id", sourceReport.cliente_id);
+      } else {
+        relatedReportsQuery = relatedReportsQuery.is("cliente_id", null);
+      }
+
+      if (sourceReport.descripcion) {
+        relatedReportsQuery = relatedReportsQuery.eq("descripcion", sourceReport.descripcion);
+      } else {
+        relatedReportsQuery = relatedReportsQuery.is("descripcion", null);
+      }
     }
 
     const { data: relatedReports, error: relatedReportsError } = await relatedReportsQuery;
@@ -3421,6 +3650,7 @@ export async function updateActividadGrupalBaseAdmin(
         await syncGroupedActivityLiquidationValue({
           tecnicoId: participant.tecnico_id,
           fecha: sourceReport.fecha,
+          codigoRegistro: sourceReport.codigo_registro,
           valorBase: normalizedBaseValue,
           valorGanado: nextTechnicalValue,
           porcentaje: percentage,
@@ -3465,7 +3695,7 @@ export async function updateActividadGrupalBaseAdmin(
 
   const { data: registro, error: registroError } = await supabase
     .from("registros_actividades")
-    .select("id, fecha, grupo_id, cliente_id, periodo_id, valor_actividad_base")
+    .select("id, codigo_registro, fecha, grupo_id, cliente_id, periodo_id, valor_actividad_base")
     .eq("id", registroId)
     .maybeSingle();
   if (registroError || !registro) throw registroError || new Error(`No se encontró el registro de actividad grupal: ${registroId}`);
@@ -3494,21 +3724,27 @@ export async function updateActividadGrupalBaseAdmin(
   let mirroredReportsQuery = supabase
     .from("reportes_actividad")
     .select("id, tecnico_id, periodo_id")
-    .in("tipo", ["actividad", "actividad_grupal"])
-    .eq("fecha", registro.fecha)
-    .eq("grupo_id", registro.grupo_id);
+    .in("tipo", ["actividad", "actividad_grupal"]);
 
-  if (registro.cliente_id) {
-    mirroredReportsQuery = mirroredReportsQuery.eq("cliente_id", registro.cliente_id);
+  if (registro.codigo_registro) {
+    mirroredReportsQuery = mirroredReportsQuery.eq("codigo_registro", registro.codigo_registro.trim().toUpperCase());
   } else {
-    mirroredReportsQuery = mirroredReportsQuery.is("cliente_id", null);
+    mirroredReportsQuery = mirroredReportsQuery
+      .eq("fecha", registro.fecha)
+      .eq("grupo_id", registro.grupo_id);
+
+    if (registro.cliente_id) {
+      mirroredReportsQuery = mirroredReportsQuery.eq("cliente_id", registro.cliente_id);
+    } else {
+      mirroredReportsQuery = mirroredReportsQuery.is("cliente_id", null);
+    }
   }
 
   if (participantIds.length > 0) {
     mirroredReportsQuery = mirroredReportsQuery.in("tecnico_id", participantIds);
   }
 
-  if (sourceReportDescription) {
+  if (!registro.codigo_registro && sourceReportDescription) {
     mirroredReportsQuery = mirroredReportsQuery.eq("descripcion", sourceReportDescription);
   }
 
@@ -3572,6 +3808,7 @@ export async function updateActividadGrupalBaseAdmin(
       await syncGroupedActivityLiquidationValue({
         tecnicoId: participante.tecnico_id,
         fecha: registro.fecha,
+        codigoRegistro: registro.codigo_registro,
         valorBase: normalizedBaseValue,
         valorGanado: valorCalculado,
         porcentaje,
@@ -3595,7 +3832,7 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
     // Buscar fecha del registro para filtrar items_aprobacion
     const { data: registro } = await supabase
       .from("registros_actividades")
-      .select("fecha")
+      .select("codigo_registro, fecha")
       .eq("id", registroId)
       .single();
 
@@ -3635,12 +3872,17 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
 
       // También actualizar items_liquidacion
       const estadoLiq = estado === "aprobado" ? "aprobado" : "pendiente";
-      const { data: liquidationItemsByReference, error: liquidationLookupError } = await supabase
+      let liquidationLookup = supabase
         .from("items_liquidacion")
         .select("id")
         .eq("tecnico_id", tecnicoId)
-        .eq("tipo", "actividad")
-        .eq("referencia_id", registroId);
+        .eq("tipo", "actividad");
+
+      liquidationLookup = registro.codigo_registro
+        ? liquidationLookup.eq("codigo_registro", registro.codigo_registro.trim().toUpperCase())
+        : liquidationLookup.eq("referencia_id", registroId);
+
+      const { data: liquidationItemsByReference, error: liquidationLookupError } = await liquidationLookup;
       if (liquidationLookupError) throw liquidationLookupError;
 
       const liquidationItemIds = (liquidationItemsByReference || []).map((item: { id: string }) => item.id);
@@ -3649,14 +3891,16 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
           .from("items_liquidacion")
           .update({ estado: estadoLiq })
           .in("id", liquidationItemIds)
-        : supabase
+        : !registro.codigo_registro
+          ? supabase
           .from("items_liquidacion")
           .update({ estado: estadoLiq })
           .eq("tecnico_id", tecnicoId)
           .eq("fecha", registro.fecha)
-          .eq("tipo", "actividad");
+          .eq("tipo", "actividad")
+          : null;
 
-      const { error: liquidationError } = await liquidationUpdate;
+      const { error: liquidationError } = liquidationUpdate ? await liquidationUpdate : { error: null };
       if (liquidationError) throw liquidationError;
     }
     invalidateCachedValue(REPORTES_ACTIVIDAD_CACHE_KEY);
@@ -3665,7 +3909,7 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
 
   const { data: report, error: reportLookupError } = await supabase
     .from("reportes_actividad")
-    .select("id, tipo, tecnico_id, fecha, periodo_id")
+    .select("id, codigo_registro, tipo, tecnico_id, fecha, periodo_id")
     .eq("id", id)
     .maybeSingle();
   if (reportLookupError) throw reportLookupError;
@@ -3716,12 +3960,17 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
     const { error: approvalError } = await approvalUpdate;
     if (approvalError) throw approvalError;
 
-    const { data: liquidationItemsByReference, error: liquidationLookupError } = await supabase
+    let liquidationLookup = supabase
       .from("items_liquidacion")
       .select("id")
       .eq("tecnico_id", report.tecnico_id)
-      .eq("tipo", "actividad")
-      .eq("referencia_id", report.id);
+      .eq("tipo", "actividad");
+
+    liquidationLookup = report.codigo_registro
+      ? liquidationLookup.eq("codigo_registro", report.codigo_registro.trim().toUpperCase())
+      : liquidationLookup.eq("referencia_id", report.id);
+
+    const { data: liquidationItemsByReference, error: liquidationLookupError } = await liquidationLookup;
     if (liquidationLookupError) throw liquidationLookupError;
 
     const liquidationItemIds = (liquidationItemsByReference || []).map((item: { id: string }) => item.id);
@@ -3730,18 +3979,20 @@ export async function updateEstadoAprobacion(id: string, estado: "pendiente" | "
         .from("items_liquidacion")
         .update({ estado: estadoLiq })
         .in("id", liquidationItemIds)
-      : supabase
+      : !report.codigo_registro
+        ? supabase
         .from("items_liquidacion")
         .update({ estado: estadoLiq })
         .eq("tecnico_id", report.tecnico_id)
         .eq("fecha", report.fecha)
-        .eq("tipo", "actividad");
+        .eq("tipo", "actividad")
+        : null;
 
-    if (report.periodo_id) {
+    if (liquidationUpdate && report.periodo_id) {
       liquidationUpdate = liquidationUpdate.eq("periodo_id", report.periodo_id);
     }
 
-    const { error: liquidationError } = await liquidationUpdate;
+    const { error: liquidationError } = liquidationUpdate ? await liquidationUpdate : { error: null };
     if (liquidationError) throw liquidationError;
   }
 
@@ -3761,7 +4012,7 @@ export async function uploadActividadGrupalEvidenciaAdmin(
   if (sourceReportLookupId) {
     const { data: sourceReport, error: sourceReportError } = await supabase
       .from("reportes_actividad")
-      .select("id, fecha, grupo_id, cliente_id, descripcion, periodo_id, lider_grupo_id")
+      .select("id, codigo_registro, fecha, grupo_id, cliente_id, descripcion, periodo_id, lider_grupo_id")
       .eq("id", sourceReportLookupId)
       .maybeSingle();
     if (sourceReportError) throw sourceReportError;
@@ -3772,20 +4023,26 @@ export async function uploadActividadGrupalEvidenciaAdmin(
     let relatedReportsQuery = supabase
       .from("reportes_actividad")
       .select("id, tecnico_id")
-      .in("tipo", ["actividad", "actividad_grupal"])
-      .eq("fecha", sourceReport.fecha)
-      .eq("grupo_id", sourceReport.grupo_id);
+      .in("tipo", ["actividad", "actividad_grupal"]);
 
-    if (sourceReport.cliente_id) {
-      relatedReportsQuery = relatedReportsQuery.eq("cliente_id", sourceReport.cliente_id);
+    if (sourceReport.codigo_registro) {
+      relatedReportsQuery = relatedReportsQuery.eq("codigo_registro", sourceReport.codigo_registro.trim().toUpperCase());
     } else {
-      relatedReportsQuery = relatedReportsQuery.is("cliente_id", null);
-    }
+      relatedReportsQuery = relatedReportsQuery
+        .eq("fecha", sourceReport.fecha)
+        .eq("grupo_id", sourceReport.grupo_id);
 
-    if (sourceReport.descripcion) {
-      relatedReportsQuery = relatedReportsQuery.eq("descripcion", sourceReport.descripcion);
-    } else {
-      relatedReportsQuery = relatedReportsQuery.is("descripcion", null);
+      if (sourceReport.cliente_id) {
+        relatedReportsQuery = relatedReportsQuery.eq("cliente_id", sourceReport.cliente_id);
+      } else {
+        relatedReportsQuery = relatedReportsQuery.is("cliente_id", null);
+      }
+
+      if (sourceReport.descripcion) {
+        relatedReportsQuery = relatedReportsQuery.eq("descripcion", sourceReport.descripcion);
+      } else {
+        relatedReportsQuery = relatedReportsQuery.is("descripcion", null);
+      }
     }
 
     const { data: relatedReports, error: relatedReportsError } = await relatedReportsQuery;
@@ -4058,18 +4315,23 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
 
     const { data: registro } = await supabase
       .from("registros_actividades")
-      .select("id, fecha, grupo_id, cliente_id")
+      .select("id, codigo_registro, fecha, grupo_id, cliente_id")
       .eq("id", registroId)
       .single();
 
     if (registro) {
       // Eliminar items_liquidacion del técnico para esta fecha
-      await supabase
+      let liquidationDelete = supabase
         .from("items_liquidacion")
         .delete()
         .eq("tecnico_id", tecnicoId)
-        .eq("fecha", registro.fecha)
         .eq("tipo", "actividad");
+
+      liquidationDelete = registro.codigo_registro
+        ? liquidationDelete.eq("codigo_registro", registro.codigo_registro.trim().toUpperCase())
+        : liquidationDelete.eq("fecha", registro.fecha);
+      const { error: liquidationDeleteError } = await liquidationDelete;
+      if (liquidationDeleteError) throw liquidationDeleteError;
 
       // Eliminar items_aprobacion del técnico para esta fecha
       await supabase
@@ -4107,7 +4369,7 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
 
   const { data: report, error: reportError } = await supabase
     .from("reportes_actividad")
-    .select("id, tipo, tecnico_id, grupo_id, cliente_id, periodo_id, fecha, punto_partida, punto_llegada, mantenimiento_id, foto_evidencia_url")
+    .select("id, codigo_registro, tipo, tecnico_id, grupo_id, cliente_id, periodo_id, fecha, punto_partida, punto_llegada, mantenimiento_id, visita_tecnica_id, recorrido_id, foto_evidencia_url")
     .eq("id", id)
     .single();
 
@@ -4132,12 +4394,17 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
       : null;
 
   if (report) {
-    const maintenanceRelatedReports = report.tipo === "mantenimiento_preventivo" && report.mantenimiento_id
-      ? await supabase
-        .from("reportes_actividad")
-        .select("id")
-        .eq("tipo", "mantenimiento_preventivo")
-        .eq("mantenimiento_id", report.mantenimiento_id)
+    let maintenanceRelatedQuery = supabase
+      .from("reportes_actividad")
+      .select("id")
+      .eq("tipo", "mantenimiento_preventivo");
+    if (report.codigo_registro) {
+      maintenanceRelatedQuery = maintenanceRelatedQuery.eq("codigo_registro", report.codigo_registro.trim().toUpperCase());
+    } else if (report.mantenimiento_id) {
+      maintenanceRelatedQuery = maintenanceRelatedQuery.eq("mantenimiento_id", report.mantenimiento_id);
+    }
+    const maintenanceRelatedReports = report.tipo === "mantenimiento_preventivo" && (report.codigo_registro || report.mantenimiento_id)
+      ? await maintenanceRelatedQuery
       : { data: [], error: null };
     if (maintenanceRelatedReports.error) throw maintenanceRelatedReports.error;
     const maintenanceReportIds = report.tipo === "mantenimiento_preventivo"
@@ -4145,16 +4412,32 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
       : [id];
 
     // Limpieza de tabla usada por la app para liquidación individual
-    await supabase
+    let liquidationDelete = supabase
       .from("items_liquidacion")
       .delete()
-      .or(maintenanceReportIds.map((reportId) => `referencia_id.eq.${reportId}`).concat(`and(tecnico_id.eq.${report.tecnico_id},periodo_id.eq.${report.periodo_id},fecha.eq.${report.fecha},tipo.eq.${legacyTipo})`).join(","));
+      .eq("tecnico_id", report.tecnico_id)
+      .eq("periodo_id", report.periodo_id)
+      .eq("tipo", legacyTipo);
+    liquidationDelete = report.codigo_registro
+      ? liquidationDelete.eq("codigo_registro", report.codigo_registro.trim().toUpperCase())
+      : liquidationDelete.or(maintenanceReportIds.map((reportId) => `referencia_id.eq.${reportId}`).concat(`fecha.eq.${report.fecha}`).join(","));
+    const { error: liquidationDeleteError } = await liquidationDelete;
+    if (liquidationDeleteError) throw liquidationDeleteError;
 
     // Limpieza de cola/aprobación para evitar que la actividad siga apareciendo en app
+    const approvalReferenceIds = Array.from(new Set([
+      ...maintenanceReportIds,
+      report.visita_tecnica_id,
+      report.recorrido_id,
+    ].filter(Boolean))) as string[];
     let approvalDelete = supabase
       .from("items_aprobacion")
       .delete()
-      .or(maintenanceReportIds.map((reportId) => `referencia_id.eq.${reportId}`).concat(`and(tecnico_id.eq.${report.tecnico_id},fecha.eq.${report.fecha})`).join(","));
+      .eq("tecnico_id", report.tecnico_id);
+
+    approvalDelete = approvalReferenceIds.length > 0
+      ? approvalDelete.in("referencia_id", approvalReferenceIds)
+      : approvalDelete.eq("fecha", report.fecha);
 
     if (approvalTipo) {
       approvalDelete = approvalDelete.eq("tipo", approvalTipo);
@@ -4165,12 +4448,18 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
     // Limpieza legacy de registros_actividades y actividad_participantes
     let registrosBaseQuery = supabase
       .from("registros_actividades")
-      .select("id")
-      .eq("fecha", report.fecha)
-      .eq("grupo_id", report.grupo_id);
+      .select("id");
 
-    if (report.cliente_id) {
-      registrosBaseQuery = registrosBaseQuery.eq("cliente_id", report.cliente_id);
+    if (report.codigo_registro) {
+      registrosBaseQuery = registrosBaseQuery.eq("codigo_registro", report.codigo_registro.trim().toUpperCase());
+    } else {
+      registrosBaseQuery = registrosBaseQuery
+        .eq("fecha", report.fecha)
+        .eq("grupo_id", report.grupo_id);
+
+      if (report.cliente_id) {
+        registrosBaseQuery = registrosBaseQuery.eq("cliente_id", report.cliente_id);
+      }
     }
 
     const { data: registrosByDateGroup } = await registrosBaseQuery;
@@ -4213,11 +4502,19 @@ export async function deleteReporteActividadAdmin(id: string): Promise<void> {
   }
 
   if (report?.tipo === "recorrido") {
-    const recorridoDelete = supabase
+    let recorridoDelete = supabase
       .from("recorridos")
-      .delete()
-      .eq("tecnico_id", report.tecnico_id)
-      .eq("fecha", report.fecha);
+      .delete();
+
+    if (report.recorrido_id) {
+      recorridoDelete = recorridoDelete.eq("id", report.recorrido_id);
+    } else if (report.codigo_registro) {
+      recorridoDelete = recorridoDelete.eq("codigo_registro", report.codigo_registro.trim().toUpperCase());
+    } else {
+      recorridoDelete = recorridoDelete
+        .eq("tecnico_id", report.tecnico_id)
+        .eq("fecha", report.fecha);
+    }
 
     await recorridoDelete;
   }

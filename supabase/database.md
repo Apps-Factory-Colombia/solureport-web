@@ -79,6 +79,8 @@ CREATE TABLE public.configuracion_empresa (
   correo_empresa character varying DEFAULT 'info@solureport.com'::character varying,
   plantilla_reporte_pdf character varying DEFAULT 'default'::character varying,
   porcentaje_descuento_tardanza numeric DEFAULT 5.00,
+  dias_descuento_automatico text[] NOT NULL DEFAULT ARRAY['lunes'::text, 'martes'::text, 'miercoles'::text, 'jueves'::text, 'viernes'::text],
+  hora_descuento_automatico time without time zone NOT NULL DEFAULT '08:30:00'::time without time zone,
   porcentaje_extra_lider numeric DEFAULT 10.00,
   extra_lider_activo boolean DEFAULT true,
   excluir_recorridos_extra_lider boolean DEFAULT true,

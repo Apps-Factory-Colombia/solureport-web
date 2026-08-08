@@ -17,6 +17,7 @@ interface LiquidationPeriodRow {
 
 interface LiquidationEntryRow {
   id: string;
+  codigo_registro?: string | null;
   actividad_id: string;
   grupo_id: string;
   lugar?: string | null;
@@ -143,6 +144,7 @@ export async function deletePeriodo(id: string): Promise<void> {
 function mapEntry(row: LiquidationEntryRow, participantes: LiquidationParticipant[]): LiquidationEntry {
   return {
     id: row.id,
+    codigoRegistro: row.codigo_registro || undefined,
     actividadId: row.actividad_id,
     grupoId: row.grupo_id,
     lugar: row.lugar || row.edificio || "",
