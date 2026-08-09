@@ -59,6 +59,7 @@ import {
   uploadActividadGrupalEvidenciaAdmin,
   updateActividadGrupalBaseAdmin,
   updateCostoActividadAdmin,
+  updateCostoClienteVisitaAdmin,
   updateEstadoAprobacion,
 } from "@/lib/supabase/services/reportes-actividad";
 import { getUsuarios } from "@/lib/supabase/services/usuarios";
@@ -101,6 +102,73 @@ function formatCurrencyDelta(value: number) {
 
 function formatRoundedPercentage(value: number) {
   return `${Math.round(value)}%`;
+}
+
+function parseClientCostInput(value: string): number {
+  if (!value.trim()) return 0;
+
+  const parsed = Number(value);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    throw new Error("El costo cliente debe ser un número igual o mayor a cero.");
+  }
+
+  return parsed;
+}
+
+function getMaintenanceContractForReport(report: ActivityReport, contracts: MaintenanceContract[]) {
+  if (report.tipo !== "mantenimiento_preventivo" || !report.clienteId) return undefined;
+
+  const reportYear = report.fecha ? new Date(`${report.fecha}T00:00:00`).getFullYear() : undefined;
+  const candidates = contracts.filter((contract) => (
+    contract.clienteId === report.clienteId
+    && (reportYear == null || contract.anio === reportYear)
+  ));
+
+  return candidates
+    .sort((left, right) => {
+      const leftMatchesDate = left.mantenimientosRealizados.some((maintenance) => maintenance.fechaProgramada === report.fecha);
+      const rightMatchesDate = right.mantenimientosRealizados.some((maintenance) => maintenance.fechaProgramada === report.fecha);
+      if (leftMatchesDate !== rightMatchesDate) return leftMatchesDate ? -1 : 1;
+      if (left.estado !== right.estado) return left.estado === "activo" ? -1 : 1;
+      return right.fechaCreacion.localeCompare(left.fechaCreacion);
+    })[0];
+}
+
+function getMaintenanceClientPricing(
+  report: ActivityReport,
+  client: Client | null | undefined,
+  contracts: MaintenanceContract[]
+) {
+  const contract = getMaintenanceContractForReport(report, contracts);
+  const maintenance = contract?.mantenimientosRealizados.find((item) => item.fechaProgramada === report.fecha);
+  const puertasPeatonales = contract?.puertasPeatonales ?? client?.puertasPeatonales ?? 0;
+  const puertasVehiculares = contract?.puertasVehiculares ?? client?.puertasVehiculares ?? 0;
+  const valorPuertaPeatonal = contract?.valorPuertaPeatonal ?? 0;
+  const valorPuertaVehicular = contract?.valorPuertaVehicular ?? 0;
+  const subtotalPeatonales = puertasPeatonales * valorPuertaPeatonal;
+  const subtotalVehiculares = puertasVehiculares * valorPuertaVehicular;
+  const totalPorPuertas = subtotalPeatonales + subtotalVehiculares;
+  const total = maintenance && maintenance.valorRecaudado > 0
+    ? maintenance.valorRecaudado
+    : contract?.costoPorMantenimiento || totalPorPuertas;
+  const cantidadMantenimientos = contract?.cantidadMantenimientos || 0;
+  const totalAnual = contract?.costoTotalAnual
+    || ((contract?.costoPorMantenimiento || totalPorPuertas) * cantidadMantenimientos);
+
+  return {
+    contract,
+    maintenance,
+    puertasPeatonales,
+    puertasVehiculares,
+    valorPuertaPeatonal,
+    valorPuertaVehicular,
+    subtotalPeatonales,
+    subtotalVehiculares,
+    totalPorPuertas,
+    total,
+    cantidadMantenimientos,
+    totalAnual,
+  };
 }
 
 function formatPeriodLabel(period?: LiquidationPeriod) {
@@ -664,6 +732,8 @@ export default function AprobacionesPage() {
   const [sharedParticipantDrafts, setSharedParticipantDrafts] = useState<SharedParticipantDraft[]>([]);
   const [savingCost, setSavingCost] = useState(false);
   const [savingParticipantSplit, setSavingParticipantSplit] = useState(false);
+  const [editableClientCost, setEditableClientCost] = useState("");
+  const [savingClientCost, setSavingClientCost] = useState(false);
   const [defaultVisitCost, setDefaultVisitCost] = useState("");
   const [savingDefaultVisitCost, setSavingDefaultVisitCost] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
@@ -1002,6 +1072,7 @@ export default function AprobacionesPage() {
     if (!selectedReport) {
       setEditableCost("");
       setSharedParticipantDrafts([]);
+      setEditableClientCost("");
       setSaveSuccessMessage(null);
       setEvidenceUploadMessage(null);
       activeReportIdRef.current = null;
@@ -1015,6 +1086,7 @@ export default function AprobacionesPage() {
     
     activeReportIdRef.current = selectedReport.id;
     setEditableCost(String(getEditableValueForReport(selectedReport)));
+    setEditableClientCost(selectedReport.tipo === "visita_tecnica" ? String(selectedReport.costoCliente ?? 0) : "");
     setSharedParticipantDrafts(usesSharedBasePricing(selectedReport)
       ? syncParticipantDraftAmounts(buildSharedParticipantDrafts(selectedReport))
       : []);
@@ -1366,6 +1438,51 @@ export default function AprobacionesPage() {
       }
       : prev);
   }, [applySharedGroupBaseToReport, getDefaultCostForReport]);
+
+  const persistClientCost = useCallback(async (report: ActivityReport, nextCost: number) => {
+    if (report.tipo !== "visita_tecnica") {
+      throw new Error("El costo cliente solo aplica a visitas técnicas.");
+    }
+
+    await updateCostoClienteVisitaAdmin(report.id, nextCost, report.visitaTecnicaId);
+    setReports((prev) => prev.map((item) => {
+      const isSameVisit = item.id === report.id
+        || (!!report.visitaTecnicaId && item.visitaTecnicaId === report.visitaTecnicaId);
+      return isSameVisit ? { ...item, costoCliente: nextCost } : item;
+    }));
+    setSelectedReport((prev) => {
+      if (!prev) return prev;
+      const isSameVisit = prev.id === report.id
+        || (!!report.visitaTecnicaId && prev.visitaTecnicaId === report.visitaTecnicaId);
+      return isSameVisit ? { ...prev, costoCliente: nextCost } : prev;
+    });
+    setEditableClientCost(String(nextCost));
+  }, []);
+
+  const handleSaveClientCost = async () => {
+    if (!selectedReport || selectedReport.tipo !== "visita_tecnica") return;
+
+    let nextCost: number;
+    try {
+      nextCost = parseClientCostInput(editableClientCost);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "No se pudo interpretar el costo cliente.");
+      return;
+    }
+
+    if (nextCost === (selectedReport.costoCliente ?? 0)) return;
+
+    setSavingClientCost(true);
+    try {
+      await persistClientCost(selectedReport, nextCost);
+      setSaveSuccessMessage("Costo cliente sincronizado correctamente.");
+    } catch (error) {
+      console.error("Error actualizando costo cliente desde aprobaciones:", error);
+      alert("No se pudo guardar el costo cliente de la visita.");
+    } finally {
+      setSavingClientCost(false);
+    }
+  };
 
   const updateReportStatusInState = useCallback((reportId: string, estado: ActivityReport["estadoAprobacionLider"]) => {
     const nextApprovalDate = estado === "aprobado" ? new Date().toISOString().split("T")[0] : undefined;
@@ -1864,13 +1981,16 @@ export default function AprobacionesPage() {
               <TableHead>Cliente / Proyecto</TableHead>
               <TableHead>Estado</TableHead>
               <TableHead className="text-right">Valor real</TableHead>
+              {(activeTab === "preventivos" || activeTab === "visitas") && (
+                <TableHead className="text-right">Costo cliente</TableHead>
+              )}
               <TableHead className="text-right">Acciones</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {currentRows.length === 0 ? (
               <TableRow className="border-border/50">
-                <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={activeTab === "preventivos" || activeTab === "visitas" ? 9 : 8} className="py-10 text-center text-sm text-muted-foreground">
                   No hay registros para esta sección con los filtros actuales.
                 </TableCell>
               </TableRow>
@@ -1883,6 +2003,14 @@ export default function AprobacionesPage() {
               const estado = estadoAprobacionConfig[row.estadoAprobacionLider];
               const TipoIcon = tipo.icon;
               const isDeleting = deletingReportId === report.id;
+              const maintenancePricing = report.tipo === "mantenimiento_preventivo"
+                ? getMaintenanceClientPricing(report, client, contracts)
+                : null;
+              const clientCost = report.tipo === "mantenimiento_preventivo"
+                ? maintenancePricing?.total || 0
+                : report.tipo === "visita_tecnica"
+                  ? report.costoCliente ?? 0
+                  : null;
 
               return (
                 <TableRow
@@ -1950,6 +2078,21 @@ export default function AprobacionesPage() {
                       <p className="text-xs text-muted-foreground">Reparto editable en el modal</p>
                     )}
                   </TableCell>
+                  {(activeTab === "preventivos" || activeTab === "visitas") && (
+                    <TableCell className="text-right">
+                      {clientCost != null ? (
+                        <p className="text-sm font-semibold text-cyan-neon">{formatCurrency(clientCost)}</p>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">No aplica</span>
+                      )}
+                      {report.tipo === "mantenimiento_preventivo" && maintenancePricing && (
+                        <p className="text-[11px] text-muted-foreground">
+                          {maintenancePricing.puertasPeatonales} peatonal{maintenancePricing.puertasPeatonales === 1 ? "" : "es"}
+                          {maintenancePricing.puertasVehiculares > 0 ? ` · ${maintenancePricing.puertasVehiculares} vehicular${maintenancePricing.puertasVehiculares === 1 ? "" : "es"}` : ""}
+                        </p>
+                      )}
+                    </TableCell>
+                  )}
                   <TableCell>
                     <div className="flex items-center justify-end gap-1">
                       <Button
@@ -2316,6 +2459,9 @@ export default function AprobacionesPage() {
             const client = selectedReport.clienteId
               ? clientsById.get(selectedReport.clienteId)
               : null;
+            const maintenancePricing = selectedReport.tipo === "mantenimiento_preventivo"
+              ? getMaintenanceClientPricing(selectedReport, client, contracts)
+              : null;
             const tipo = getTipoConfig(String(selectedReport.tipo));
             const normalizedModalStatus: ActivityReport["estadoAprobacionLider"] = (new Set(modalReports.map((item) => item.estadoAprobacionLider))).size > 1
               ? "pendiente"
@@ -2411,6 +2557,83 @@ export default function AprobacionesPage() {
                     </div>
                   )}
                 </div>
+
+                {(selectedReport.tipo === "mantenimiento_preventivo" || selectedReport.tipo === "visita_tecnica") && (
+                  <div className="rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-4 space-y-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-cyan-neon">Costo cliente</p>
+                      <p className="text-xs text-muted-foreground">
+                        {selectedReport.tipo === "mantenimiento_preventivo"
+                          ? "Valor que se cobra al cliente según el contrato y las puertas registradas. Los valores por puerta y el total anual se configuran en Contratos; no son tarifas fijas del sistema."
+                          : "Valor que se cobrará al cliente por esta visita técnica."}
+                      </p>
+                    </div>
+
+                    {selectedReport.tipo === "mantenimiento_preventivo" && maintenancePricing ? (
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div className="rounded-lg border border-border/50 bg-background/40 p-3">
+                          <p className="text-xs text-muted-foreground">Puertas del mantenimiento</p>
+                          <p className="text-sm font-medium text-foreground">
+                            {maintenancePricing.puertasPeatonales} puerta{maintenancePricing.puertasPeatonales === 1 ? "" : "s"} peatonal{maintenancePricing.puertasPeatonales === 1 ? "" : "es"}
+                            {maintenancePricing.puertasVehiculares > 0
+                              ? ` y ${maintenancePricing.puertasVehiculares} puerta${maintenancePricing.puertasVehiculares === 1 ? "" : "s"} vehicular${maintenancePricing.puertasVehiculares === 1 ? "" : "es"}`
+                              : ""}
+                          </p>
+                          <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                            {maintenancePricing.puertasPeatonales > 0 && (
+                              <p>{maintenancePricing.puertasPeatonales} peatonal{maintenancePricing.puertasPeatonales === 1 ? "" : "es"} × {formatCurrency(maintenancePricing.valorPuertaPeatonal)} = {formatCurrency(maintenancePricing.subtotalPeatonales)}</p>
+                            )}
+                            {maintenancePricing.puertasVehiculares > 0 && (
+                              <p>{maintenancePricing.puertasVehiculares} vehicular{maintenancePricing.puertasVehiculares === 1 ? "" : "es"} × {formatCurrency(maintenancePricing.valorPuertaVehicular)} = {formatCurrency(maintenancePricing.subtotalVehiculares)}</p>
+                            )}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-cyan-neon/20 bg-background/40 p-3">
+                          <p className="text-xs text-muted-foreground">Total a cobrar por este mantenimiento</p>
+                          <p className="text-xl font-bold text-cyan-neon">{formatCurrency(maintenancePricing.total)}</p>
+                          {maintenancePricing.contract && (
+                            <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                              <p>Contrato {maintenancePricing.contract.anio}</p>
+                              <p>{formatCurrency(maintenancePricing.total)} por mantenimiento · {maintenancePricing.cantidadMantenimientos} mantenimiento{maintenancePricing.cantidadMantenimientos === 1 ? "" : "s"} al año</p>
+                              <p className="font-semibold text-cyan-neon">Total anual del contrato: {formatCurrency(maintenancePricing.totalAnual)}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : selectedReport.tipo === "visita_tecnica" ? (
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                        <div className="relative">
+                          <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-cyan-neon" />
+                          <Input
+                            data-testid="approval-client-cost-input"
+                            type="number"
+                            min="0"
+                            value={editableClientCost}
+                            onChange={(event) => setEditableClientCost(event.target.value)}
+                            className={cn(
+                              "pl-9 bg-background/70 border-cyan-neon/30 text-cyan-neon font-semibold",
+                              (editableClientCost.trim() ? Number(editableClientCost) : 0) !== (selectedReport.costoCliente ?? 0)
+                                && "border-cyan-neon shadow-[0_0_0_1px_rgba(34,211,238,0.25)]"
+                            )}
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          data-testid="approval-save-client-cost"
+                          className="gap-2 border-cyan-neon/30 text-cyan-neon hover:bg-cyan-neon/10 hover:text-cyan-neon"
+                          onClick={handleSaveClientCost}
+                          disabled={savingClientCost || (editableClientCost.trim() ? Number(editableClientCost) : 0) === (selectedReport.costoCliente ?? 0)}
+                        >
+                          {savingClientCost ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                          {savingClientCost ? "Guardando..." : "Guardar costo cliente"}
+                        </Button>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">No hay contrato asociado para calcular el costo cliente.</p>
+                    )}
+                  </div>
+                )}
 
                 <div className="space-y-2">
                   <p className="text-xs text-muted-foreground">Descripción</p>

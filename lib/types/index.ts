@@ -300,6 +300,7 @@ export interface ActivityReport {
   fechaUltimoEnvioCorreo?: string;
   periodoId: string;
   fechaCreacion: string;
+  esHistoricoContrato?: boolean;
   valorActividadBaseGlobal?: number;
   valorActividadAplicadoGlobal?: number;
 }
