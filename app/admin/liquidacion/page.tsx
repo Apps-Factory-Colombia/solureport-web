@@ -390,14 +390,18 @@ export default function LiquidacionPage() {
   const liquidablePeriodReports = periodReports.filter(
     (report) => report.estadoAprobacionLider === "aprobado"
   );
+  const periodRouteReports = periodReports.filter((report) => report.tipo === "recorrido");
 
   const discountRecordsByUser = arrivalRecords.reduce<Map<string, number>>((acc, record) => {
-    if (!record.descuentoAplicado || !record.porcentajeDescuento || !isDateWithinSelectedPeriod(record.fecha)) {
+    if (!record.descuentoAplicado || !isDateWithinSelectedPeriod(record.fecha)) {
       return acc;
     }
 
+    const percentage = Number(record.porcentajeDescuento || companySettings?.porcentajeDescuentoTardanza || 0) || 0;
+    if (percentage <= 0) return acc;
+
     const current = acc.get(record.usuarioId) || 0;
-    acc.set(record.usuarioId, clampPercentage(current + record.porcentajeDescuento));
+    acc.set(record.usuarioId, clampPercentage(current + percentage));
     return acc;
   }, new Map());
 
@@ -1002,7 +1006,7 @@ export default function LiquidacionPage() {
 
         {hasSelectedPeriod ? (
           <>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-5">
               <Card className="border-border/50 bg-card/80">
                 <CardContent className="p-4 flex items-center gap-3">
                   <div className="rounded-lg bg-gold/10 p-2.5">
@@ -1014,6 +1018,17 @@ export default function LiquidacionPage() {
                     {totalExtraLeaderPeriod > 0 && (
                       <p className="text-[10px] text-violet-400">Incluye extra líder: {formatCurrency(totalExtraLeaderPeriod)}</p>
                     )}
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="border-border/50 bg-card/80">
+                <CardContent className="p-4 flex items-center gap-3">
+                  <div className="rounded-lg bg-emerald-500/10 p-2.5">
+                    <Bike className="h-5 w-5 text-emerald-400" />
+                  </div>
+                  <div>
+                    <p className="text-xl font-bold text-foreground">{periodRouteReports.length}</p>
+                    <p className="text-xs text-muted-foreground">Recorridos Registrados</p>
                   </div>
                 </CardContent>
               </Card>
@@ -1062,7 +1077,7 @@ export default function LiquidacionPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-5">
                   {(() => {
                     const approvedReports = actReports.filter(
                       (r) => r.periodoId === selectedPeriodId && r.estadoAprobacionLider === "aprobado"
@@ -1075,7 +1090,7 @@ export default function LiquidacionPage() {
                     const recorridos = actReports.filter(
                       (r) => r.periodoId === selectedPeriodId && r.tipo === "recorrido" && r.estadoAprobacionLider !== "rechazado"
                     );
-                    const totalRecorridos = recorridos.reduce((s, r) => s + r.costoActividad, 0);
+                    const totalRecorridos = recorridos.reduce((s, r) => s + getReportLiquidationEarnedValue(r), 0);
 
                     return (
                       <>
@@ -1846,8 +1861,8 @@ export default function LiquidacionPage() {
       </Dialog>
 
       <Dialog open={comprobanteOpen} onOpenChange={setComprobanteOpen}>
-        <DialogContent data-testid="liquidation-comprobante-dialog" className="bg-card border-border sm:max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
+        <DialogContent data-testid="liquidation-comprobante-dialog" className="flex max-h-[92vh] w-[calc(100%-1rem)] flex-col overflow-hidden bg-card border-border sm:max-w-6xl">
+          <DialogHeader className="shrink-0">
             <DialogTitle className="text-foreground">Comprobante de Liquidación</DialogTitle>
           </DialogHeader>
           {selectedTechId && (() => {
@@ -1869,7 +1884,8 @@ export default function LiquidacionPage() {
             const grandTotal = auxilioNeto + rodamientoTotal + extraLider;
 
             return (
-              <div className="space-y-6">
+              <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1">
+                <div className="space-y-6">
                 <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-4">
                   <div className="text-center border-b border-border/50 pb-3">
                     <p className="text-sm font-bold text-gold">SOLUCIONES & AUTOMATIZACIONES S.A.S.</p>
@@ -1891,19 +1907,20 @@ export default function LiquidacionPage() {
                     </div>
                   </div>
 
+                  <div className="max-h-[48vh] overflow-y-auto overflow-x-hidden rounded-lg border border-border/30 pr-1">
                   <div className="space-y-2">
                     <p className="text-xs font-semibold text-cyan-neon uppercase tracking-wide">
                       AUXILIO EXTRALEGAL POR PRODUCTIVIDAD Y RESPALDO DIGITAL
                     </p>
-                    <Table>
+                      <Table className="w-full table-fixed">
                       <TableHeader>
                         <TableRow className="border-border/30 hover:bg-transparent">
-                          <TableHead className="text-muted-foreground text-xs">Tipo</TableHead>
-                          <TableHead className="text-muted-foreground text-xs">Código</TableHead>
-                          <TableHead className="text-muted-foreground text-xs">Descripción</TableHead>
-                          <TableHead className="text-muted-foreground text-xs">Fecha</TableHead>
-                          <TableHead className="text-muted-foreground text-xs">Estado</TableHead>
-                          <TableHead className="text-muted-foreground text-xs text-right">Valor</TableHead>
+                            <TableHead className="w-[16%] text-muted-foreground text-xs">Tipo</TableHead>
+                            <TableHead className="w-[22%] text-muted-foreground text-xs">Código</TableHead>
+                            <TableHead className="w-[30%] text-muted-foreground text-xs">Descripción</TableHead>
+                            <TableHead className="w-[14%] text-muted-foreground text-xs">Fecha</TableHead>
+                            <TableHead className="w-[9%] text-muted-foreground text-xs">Estado</TableHead>
+                            <TableHead className="w-[14%] text-muted-foreground text-xs text-right">Valor</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -1912,9 +1929,9 @@ export default function LiquidacionPage() {
                             <TableCell className="text-xs text-foreground/80">
                               {r.tipo === "mantenimiento_preventivo" ? "Mant." : r.tipo === "visita_tecnica" ? "Visita" : r.tipo}
                             </TableCell>
-                            <TableCell className="text-xs font-mono text-cyan-neon">{r.codigoRegistro || "Histórico sin código"}</TableCell>
-                            <TableCell className="text-xs text-foreground/80 max-w-40 truncate">{r.descripcion || "—"}</TableCell>
-                            <TableCell className="text-xs text-foreground/80">{r.fecha}</TableCell>
+                            <TableCell className="break-all text-xs font-mono text-cyan-neon">{r.codigoRegistro || "Histórico sin código"}</TableCell>
+                            <TableCell className="break-words whitespace-normal text-xs text-foreground/80">{r.descripcion || "—"}</TableCell>
+                            <TableCell className="whitespace-normal text-xs text-foreground/80">{r.fecha}</TableCell>
                             <TableCell className="text-xs text-foreground/80">
                               {r.estadoAprobacionLider === "aprobado" ? "✓" : "Pend."}
                             </TableCell>
@@ -1953,13 +1970,13 @@ export default function LiquidacionPage() {
                     </Table>
                   </div>
 
-                  {rodamientoTotal > 0 && (
+                  {recorridoReports.length > 0 && (
                     <div className="space-y-2">
                       <p className="text-xs font-semibold text-emerald-400 uppercase tracking-wide">
                         RECORRIDOS Y DESPLAZAMIENTOS
                       </p>
                       <div className="rounded-lg border border-border/30 bg-secondary/20 p-3">
-                        <div className="grid grid-cols-3 gap-2 text-xs">
+                        <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-3">
                           <div>
                             <p className="text-muted-foreground">Medio</p>
                             <p className="text-foreground">{tech.tieneMoto ? "Motocicleta" : "Otro"}</p>
@@ -1973,9 +1990,36 @@ export default function LiquidacionPage() {
                             <p className="font-bold text-emerald-400">{formatCurrency(rodamientoTotal)}</p>
                           </div>
                         </div>
+                        <Table className="mt-4 w-full table-fixed">
+                          <TableHeader>
+                            <TableRow className="border-border/30 hover:bg-transparent">
+                              <TableHead className="w-[18%] text-muted-foreground text-xs">Código</TableHead>
+                              <TableHead className="w-[42%] text-muted-foreground text-xs">Recorrido</TableHead>
+                              <TableHead className="w-[18%] text-muted-foreground text-xs">Fecha</TableHead>
+                              <TableHead className="w-[10%] text-muted-foreground text-xs">Estado</TableHead>
+                              <TableHead className="w-[12%] text-right text-muted-foreground text-xs">Valor</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {recorridoReports.map((report) => (
+                              <TableRow key={`recorrido-${report.id}`} className="border-border/30 hover:bg-secondary/20">
+                                <TableCell className="break-all text-xs font-mono text-cyan-neon">{report.codigoRegistro || "Sin código"}</TableCell>
+                                <TableCell className="break-words whitespace-normal text-xs text-foreground/80">
+                                  {report.puntoPartida && report.puntoLlegada
+                                    ? `${report.puntoPartida} → ${report.puntoLlegada}`
+                                    : report.descripcion || "Recorrido"}
+                                </TableCell>
+                                <TableCell className="whitespace-normal text-xs text-foreground/80">{report.fecha}</TableCell>
+                                <TableCell className="text-xs text-foreground/80">{report.estadoAprobacionLider === "aprobado" ? "✓" : "Pend."}</TableCell>
+                                <TableCell className="text-right text-xs font-medium text-emerald-400">{formatCurrency(getReportLiquidationEarnedValue(report))}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
                       </div>
                     </div>
                   )}
+                  </div>
 
                   <div className="border-t border-border/50 pt-3 space-y-2">
                     <div className="flex justify-between text-sm">
@@ -1992,7 +2036,7 @@ export default function LiquidacionPage() {
                       <span className="text-muted-foreground">Auxilio Extralegal Neto</span>
                       <span className="font-medium text-foreground">{formatCurrency(auxilioNeto)}</span>
                     </div>
-                    {rodamientoTotal > 0 && (
+                    {recorridoReports.length > 0 && (
                       <div className="flex justify-between text-sm">
                         <span className="text-muted-foreground">Recorridos y Desplazamientos</span>
                         <span className="font-medium text-foreground">{formatCurrency(rodamientoTotal)}</span>
@@ -2063,6 +2107,7 @@ export default function LiquidacionPage() {
                     )}
                     {exportingComprobante ? "Exportando..." : "Descargar PDF"}
                   </Button>
+                </div>
                 </div>
               </div>
             );

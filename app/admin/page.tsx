@@ -48,7 +48,7 @@ export default function DashboardPage() {
       const r = await getReportesActividad();
       setReports(r);
     } catch (err) {
-      console.error("Error cargando reportes del dashboard:", err);
+      console.error("Error cargando reportes del dashboard:", err instanceof Error ? err.message : JSON.stringify(err));
     }
   }, []);
 

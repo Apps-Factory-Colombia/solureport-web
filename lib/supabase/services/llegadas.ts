@@ -173,13 +173,33 @@ export async function ensureNoRegistradosForToday(
   }
 
   let changed = 0;
+  const normalizedDiscountPercentage = Math.max(0, Math.min(100, Number(discountPercentage) || 0));
   for (const { user, schedule } of scheduledUsers) {
     const existing = rowsByUser.get(user.id);
     if (existing?.hora_entrada_real) continue;
 
+    const isAutomaticRow = existing?.razon_tardanza?.startsWith(AUTO_NO_REGISTRADO_REASON_PREFIX) || false;
+    if (isAutomaticRow) {
+      const automaticDiscountApplied = normalizedDiscountPercentage > 0;
+      const needsDiscountRefresh = Boolean(existing?.descuento_aplicado) !== automaticDiscountApplied
+        || Number(existing?.porcentaje_descuento ?? 0) !== normalizedDiscountPercentage;
+
+      if (!needsDiscountRefresh) continue;
+
+      const { error: refreshError } = await supabase
+        .from("registros_asistencia")
+        .update({
+          descuento_aplicado: automaticDiscountApplied,
+          porcentaje_descuento: normalizedDiscountPercentage,
+        })
+        .eq("id", existing?.id);
+      if (refreshError) throw refreshError;
+      changed += 1;
+      continue;
+    }
+
     // Preserve a row already processed or manually adjusted by the administrator.
-    if (existing?.razon_tardanza?.startsWith(AUTO_NO_REGISTRADO_REASON_PREFIX) ||
-      (existing?.estado_entrada === "no_reportado" && existing.descuento_aplicado)) continue;
+    if (existing?.estado_entrada === "no_reportado" && existing.descuento_aplicado) continue;
 
     const payload = {
       hora_entrada_programada: schedule.horaEntrada,
@@ -189,8 +209,8 @@ export async function ensureNoRegistradosForToday(
       minutos_retraso: 0,
       tarde: true,
       razon_tardanza: `[AUTO ${automaticTime}] No registró la entrada antes del corte configurado.`,
-      descuento_aplicado: Number(discountPercentage) > 0,
-      porcentaje_descuento: Math.max(0, Math.min(100, Number(discountPercentage) || 0)),
+      descuento_aplicado: normalizedDiscountPercentage > 0,
+      porcentaje_descuento: normalizedDiscountPercentage,
     };
 
     if (existing) {

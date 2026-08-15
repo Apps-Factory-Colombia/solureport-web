@@ -282,7 +282,9 @@ export default function LlegadasPage() {
     if (!selectedRecord) return;
     const isUnregistered = attendanceStatus === "no_reportado";
     const realTime = isUnregistered ? null : attendanceTime || selectedRecord.horaLlegada || null;
-    const appliesDiscount = isUnregistered || attendanceStatus === "tarde";
+    const discountCutoff = (companySettings?.horaDescuentoAutomatico || "08:30").slice(0, 5);
+    const isAtOrAfterDiscountCutoff = Boolean(realTime && realTime.slice(0, 5) >= discountCutoff);
+    const appliesDiscount = isUnregistered || (attendanceStatus === "tarde" && isAtOrAfterDiscountCutoff);
     setAttendanceSaving(true);
     try {
       await updateLlegada(selectedRecord.id, {

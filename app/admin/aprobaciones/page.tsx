@@ -185,84 +185,17 @@ function normalizeSearchValue(value?: string | null) {
     .toLowerCase();
 }
 
-function getGroupActivityBaseTitle(report: ActivityReport) {
-  const normalized = (report.descripcion || "").trim();
-  if (!normalized) return "";
-
-  const emDashParts = normalized.split(" — ").map((part) => part.trim()).filter(Boolean);
-  if (emDashParts.length >= 2) {
-    return emDashParts.slice(1).join(" — ");
-  }
-
-  const dashParts = normalized.split(" - ").map((part) => part.trim()).filter(Boolean);
-  return dashParts[0] || normalized;
-}
-
-function getGroupActivitySpecification(report: ActivityReport) {
-  if (report.especificacion?.trim()) return report.especificacion.trim();
-
-  const observationMatch = report.observaciones?.match(/Especificaci[oó]n:\s*(.+?)(?:$|\n)/i);
-  if (observationMatch?.[1]?.trim()) return observationMatch[1].trim();
-
-  const description = (report.descripcion || "").trim();
-  if (!description || description.includes(" — ")) return "";
-
-  const dashParts = description.split(" - ").map((part) => part.trim()).filter(Boolean);
-  if (dashParts.length < 3) return "";
-
-  return dashParts.slice(1, -1).join(" - ").trim();
-}
-
 function getGroupActivityUiIdentity(report: ActivityReport) {
   return [
-    "group-ui",
-    report.fecha,
-    report.grupoId,
-    report.clienteId || "sin-cliente",
-    normalizeSearchValue(getGroupActivityBaseTitle(report)),
+    "group-ui-id",
+    report.id,
   ].join("|");
 }
 
-function getGroupActivityUiSpecificity(report: ActivityReport) {
-  let score = 0;
-  if (report.registroActividadId) score += 4;
-  if (getGroupActivitySpecification(report)) score += 6;
-  if ((report.descripcion || "").includes(" - ")) score += 2;
-  if (report.observaciones?.includes("Especificación:")) score += 1;
-  return score;
-}
-
-function shouldPreferGroupActivityUiCandidate(current: ActivityReport | undefined, next: ActivityReport) {
-  if (!current) return true;
-
-  const currentScore = getGroupActivityUiSpecificity(current);
-  const nextScore = getGroupActivityUiSpecificity(next);
-  if (nextScore !== currentScore) return nextScore > currentScore;
-
-  const currentCreatedAt = current.fechaCreacion || "";
-  const nextCreatedAt = next.fechaCreacion || "";
-  if (nextCreatedAt !== currentCreatedAt) return nextCreatedAt > currentCreatedAt;
-
-  return next.id > current.id;
-}
-
 function dedupeGroupActivityRowsForUi(reports: ActivityReport[]) {
-  const canonicalByTech = new Map<string, ActivityReport>();
-
-  reports.forEach((report) => {
-    if (!isGroupActivity(report)) {
-      canonicalByTech.set(`direct:${report.id}`, report);
-      return;
-    }
-
-    const key = `${getGroupActivityUiIdentity(report)}|${report.tecnicoId}`;
-    const current = canonicalByTech.get(key);
-    if (shouldPreferGroupActivityUiCandidate(current, report)) {
-      canonicalByTech.set(key, report);
-    }
-  });
-
-  return Array.from(canonicalByTech.values());
+  const reportsById = new Map<string, ActivityReport>();
+  reports.forEach((report) => reportsById.set(report.id, report));
+  return Array.from(reportsById.values());
 }
 
 function isGroupActivity(report: ActivityReport) {
@@ -376,19 +309,7 @@ function usesSharedBasePricing(report: ActivityReport) {
 
 function getGroupActivityIdentity(report: ActivityReport) {
   if (!isGroupActivity(report)) return report.id;
-
-  if (report.registroActividadId) {
-    return `group:${report.registroActividadId}`;
-  }
-
-  return [
-    "legacy-group",
-    report.fecha,
-    report.grupoId,
-    report.clienteId || "sin-cliente",
-    normalizeSearchValue(report.descripcion),
-    normalizeSearchValue(report.especificacion),
-  ].join("|");
+  return `group:${report.id}`;
 }
 
 function getReportRegistrationCode(report: ActivityReport) {
@@ -769,7 +690,7 @@ export default function AprobacionesPage() {
       const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
 
       if (periodResult.status === "rejected") console.error("Error cargando períodos en aprobaciones:", periodResult.reason);
-      if (reportsResult.status === "rejected") console.error("Error cargando reportes en aprobaciones:", reportsResult.reason);
+      if (reportsResult.status === "rejected") console.error("Error cargando reportes en aprobaciones:", reportsResult.reason instanceof Error ? reportsResult.reason.message : JSON.stringify(reportsResult.reason));
       if (usersResult.status === "rejected") console.error("Error cargando usuarios en aprobaciones:", usersResult.reason);
       if (clientsResult.status === "rejected") console.error("Error cargando clientes en aprobaciones:", clientsResult.reason);
       if (contractsResult.status === "rejected") console.error("Error cargando contratos en aprobaciones:", contractsResult.reason);
