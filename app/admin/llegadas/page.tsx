@@ -57,10 +57,10 @@ import {
   Settings2,
 } from "lucide-react";
 import { ArrivalRecord, ScheduleDay, User, CompanySettings } from "@/lib/types";
-import { ensureNoRegistradosForToday, getLlegadas, updateLlegada } from "@/lib/supabase/services/llegadas";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
-import { getConfiguracion, updateConfiguracion } from "@/lib/supabase/services/configuracion";
-import { createNotificacion } from "@/lib/supabase/services/notificaciones";
+import { ensureNoRegistradosForToday, getLlegadas, updateLlegada } from "@/lib/data/services/llegadas";
+import { getUsuarios } from "@/lib/data/services/usuarios";
+import { getConfiguracion, updateConfiguracion } from "@/lib/data/services/configuracion";
+import { createNotificacion } from "@/lib/data/services/notificaciones";
 import { cn } from "@/lib/utils";
 
 function formatLocationTimestamp(value?: string) {
@@ -118,7 +118,7 @@ export default function LlegadasPage() {
   const [discountOpen, setDiscountOpen] = useState(false);
   const [discountPercent, setDiscountPercent] = useState("5");
   const [configuredDiscountPercent, setConfiguredDiscountPercent] = useState("5");
-  const [configuredDiscountTime, setConfiguredDiscountTime] = useState("08:30");
+  const [configuredDiscountTime, setConfiguredDiscountTime] = useState("");
   const [automaticDiscountDays, setAutomaticDiscountDays] = useState<ScheduleDay[]>([
     "lunes", "martes", "miercoles", "jueves", "viernes",
   ]);
@@ -149,7 +149,7 @@ export default function LlegadasPage() {
       setCompanySettings(s);
       setDiscountPercent(String(s.porcentajeDescuentoTardanza));
       setConfiguredDiscountPercent(String(s.porcentajeDescuentoTardanza));
-      setConfiguredDiscountTime(s.horaDescuentoAutomatico || "08:30");
+      setConfiguredDiscountTime(s.horaDescuentoAutomatico || "");
       setAutomaticDiscountDays(s.diasDescuentoAutomatico || []);
     } catch (err) {
       console.error("Error cargando llegadas:", err);
@@ -227,6 +227,10 @@ export default function LlegadasPage() {
   const totalTarde = records.filter((r) => r.tarde && r.estadoEntrada !== "no_reportado").length;
 
   const handleSaveConfiguredDiscount = async () => {
+    if (!configuredDiscountTime.trim()) {
+      alert("Debes configurar una hora de corte para activar el descuento automático.");
+      return;
+    }
     const value = Math.max(0, Math.min(100, Number(configuredDiscountPercent) || 0));
     setSettingsSaving(true);
     try {
@@ -239,7 +243,7 @@ export default function LlegadasPage() {
       setConfiguredDiscountPercent(String(updated.porcentajeDescuentoTardanza));
       setDiscountPercent(String(updated.porcentajeDescuentoTardanza));
       setAutomaticDiscountDays(updated.diasDescuentoAutomatico || []);
-      setConfiguredDiscountTime(updated.horaDescuentoAutomatico || "08:30");
+      setConfiguredDiscountTime(updated.horaDescuentoAutomatico || "");
     } catch (err) {
       console.error("Error actualizando descuento configurado:", err);
     } finally {
@@ -282,19 +286,13 @@ export default function LlegadasPage() {
     if (!selectedRecord) return;
     const isUnregistered = attendanceStatus === "no_reportado";
     const realTime = isUnregistered ? null : attendanceTime || selectedRecord.horaLlegada || null;
-    const discountCutoff = (companySettings?.horaDescuentoAutomatico || "08:30").slice(0, 5);
-    const isAtOrAfterDiscountCutoff = Boolean(realTime && realTime.slice(0, 5) >= discountCutoff);
-    const appliesDiscount = isUnregistered || (attendanceStatus === "tarde" && isAtOrAfterDiscountCutoff);
     setAttendanceSaving(true);
     try {
       await updateLlegada(selectedRecord.id, {
         estadoEntrada: attendanceStatus,
         horaLlegada: realTime,
-        tarde: appliesDiscount,
         minutosRetraso: attendanceStatus === "tarde" ? calculateDelay(selectedRecord.horaEsperada, realTime || undefined) : 0,
         razonTardanza: attendanceReason.trim() || (isUnregistered ? "No registró la entrada." : null),
-        descuentoAplicado: appliesDiscount && Number(selectedRecord.porcentajeDescuento || companySettings?.porcentajeDescuentoTardanza || 0) > 0,
-        porcentajeDescuento: appliesDiscount ? Number(selectedRecord.porcentajeDescuento || companySettings?.porcentajeDescuentoTardanza || 0) : 0,
       });
       setAttendanceEditOpen(false);
       setSelectedRecord(null);
@@ -399,7 +397,7 @@ export default function LlegadasPage() {
               </div>
               <div>
                 <p className="text-xl font-bold text-gold">
-                  {companySettings?.porcentajeDescuentoTardanza || 5}%
+                  {companySettings?.porcentajeDescuentoTardanza || 0}%
                 </p>
                 <p className="text-xs text-muted-foreground">Descuento Configurado</p>
               </div>
@@ -775,21 +773,6 @@ export default function LlegadasPage() {
                               }}
                             >
                               <Send className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-red-400 hover:text-red-300 hover:bg-red-500/10"
-                              title="Aplicar descuento"
-                              onClick={() => {
-                                setSelectedRecord(record);
-                                setDiscountPercent(
-                                  String(record.porcentajeDescuento || companySettings?.porcentajeDescuentoTardanza || 5)
-                                );
-                                setDiscountOpen(true);
-                              }}
-                            >
-                              <Percent className="h-3.5 w-3.5" />
                             </Button>
                             </>
                           )}

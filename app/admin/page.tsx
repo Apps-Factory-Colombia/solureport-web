@@ -13,10 +13,10 @@ import {
   Clock,
   AlertTriangle,
 } from "lucide-react";
-import { getMantenimientos } from "@/lib/supabase/services/mantenimientos";
-import { getClientes } from "@/lib/supabase/services/clientes";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
-import { getReportesActividad } from "@/lib/supabase/services/reportes-actividad";
+import { getMantenimientos } from "@/lib/data/services/mantenimientos";
+import { getClientes } from "@/lib/data/services/clientes";
+import { getUsuarios } from "@/lib/data/services/usuarios";
+import { getReportesActividad } from "@/lib/data/services/reportes-actividad";
 import { Maintenance, User, ActivityReport, Client } from "@/lib/types";
 
 export default function DashboardPage() {

@@ -59,14 +59,15 @@ import {
   Loader2,
 } from "lucide-react";
 import { User, UserScheduleDraft, WorkGroup } from "@/lib/types";
-import { getUsuarios, createUsuario, updateUsuario, deleteUsuario } from "@/lib/supabase/services/usuarios";
-import { getGrupos, createGrupo, updateGrupo, deleteGrupo } from "@/lib/supabase/services/grupos";
+import { getUsuarios, createUsuario, updateUsuario, deleteUsuario } from "@/lib/data/services/usuarios";
+import { getGrupos, createGrupo, updateGrupo, deleteGrupo } from "@/lib/data/services/grupos";
 import { cn } from "@/lib/utils";
 
 const rolLabels = {
   admin: { label: "Administrador", color: "bg-gold/10 text-gold border-gold/20" },
   tecnico: { label: "Técnico", color: "bg-cyan-neon/10 text-cyan-neon border-cyan-neon/20" },
   lider: { label: "Líder", color: "bg-purple-500/10 text-purple-400 border-purple-500/20" },
+  supervisor: { label: "Supervisor", color: "bg-purple-500/10 text-purple-400 border-purple-500/20" },
 };
 
 export default function UsuariosPage() {
@@ -117,17 +118,13 @@ export default function UsuariosPage() {
   }, [search]);
 
   const handleSaveUser = async (userData: Partial<User> & { password?: string; horarios?: UserScheduleDraft[] }) => {
-    try {
-      if (editingUser) {
-        await updateUsuario(editingUser.id, userData);
-      } else {
-        await createUsuario(userData);
-      }
-      setEditingUser(null);
-      await loadData();
-    } catch (err) {
-      console.error("Error guardando usuario:", err);
+    if (editingUser) {
+      await updateUsuario(editingUser.id, userData);
+    } else {
+      await createUsuario(userData);
     }
+    await loadData();
+    setEditingUser(null);
   };
 
   const handleDeleteGroup = async (id: string) => {

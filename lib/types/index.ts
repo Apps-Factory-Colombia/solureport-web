@@ -1,4 +1,4 @@
-export type UserRole = "admin" | "tecnico" | "lider";
+export type UserRole = "admin" | "tecnico" | "lider" | "supervisor";
 
 export type UserStatus = "activo" | "inactivo";
 
@@ -106,6 +106,7 @@ export interface MaintenanceReport {
   enviado: boolean;
   fechaEnvio?: string;
   firmaReceptor?: string;
+  firmado?: boolean;
   datosReceptor?: { nombre: string; cedula: string; cargo: string };
   fotoBitacora?: string;
   tipoPendiente?: string;
@@ -278,6 +279,7 @@ export interface ActivityReport {
   fotosAntes?: string[];
   fotosDespues?: string[];
   firmaReceptor?: string;
+  firmado?: boolean;
   datosReceptor?: { nombre: string; cedula: string; cargo: string };
   bitacora?: boolean;
   fotoBitacora?: string;
@@ -303,6 +305,13 @@ export interface ActivityReport {
   esHistoricoContrato?: boolean;
   valorActividadBaseGlobal?: number;
   valorActividadAplicadoGlobal?: number;
+  liquidacionId?: string;
+  liquidacionEstado?: "pendiente" | "aprobado" | "pagado" | "anulado";
+  liquidacionValorBase?: number;
+  liquidacionValorGanado?: number;
+  liquidacionValorGanadoOriginal?: number;
+  liquidacionDescuentoTardanza?: number;
+  liquidacionPorcentajeDescuentoTardanza?: number;
 }
 
 export interface LeaderApprovalBatch {

@@ -52,12 +52,12 @@ import {
   Percent,
 } from "lucide-react";
 import { LiquidationPeriod, User, WorkGroup, LeaderAccumulation, ActivityReport, ArrivalRecord } from "@/lib/types";
-import { getPeriodos, closePeriodo } from "@/lib/supabase/services/liquidacion";
-import { getConfiguracion } from "@/lib/supabase/services/configuracion";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
-import { getGrupos } from "@/lib/supabase/services/grupos";
-import { deleteReporteActividadAdmin, getAcumulacionesLider, getReportesActividad } from "@/lib/supabase/services/reportes-actividad";
-import { getLlegadas } from "@/lib/supabase/services/llegadas";
+import { getPeriodos, closePeriodo } from "@/lib/data/services/liquidacion";
+import { getConfiguracion } from "@/lib/data/services/configuracion";
+import { getUsuarios } from "@/lib/data/services/usuarios";
+import { getGrupos } from "@/lib/data/services/grupos";
+import { deleteReporteActividadAdmin, getAcumulacionesLider, getReportesActividad } from "@/lib/data/services/reportes-actividad";
+import { getLlegadas } from "@/lib/data/services/llegadas";
 import { cn } from "@/lib/utils";
 import { generateTablePDF, generateComprobantePDF } from "@/lib/utils/pdf-generator";
 import {
@@ -166,6 +166,10 @@ function waitForNextPaint() {
 }
 
 function getReportLiquidationBaseValue(report: ActivityReport) {
+  if (report.liquidacionValorBase != null) {
+    return Number(report.liquidacionValorBase) || 0;
+  }
+
   if (report.tipo === "visita_tecnica" || report.tipo === "mantenimiento_preventivo") {
     const sharedBaseValue = Number(report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal ?? 0) || 0;
     if (sharedBaseValue > 0) return sharedBaseValue;
@@ -188,6 +192,10 @@ function getReportLiquidationPercentage(report: ActivityReport) {
 }
 
 function getReportLiquidationEarnedValue(report: ActivityReport) {
+  if (report.liquidacionValorGanado != null) {
+    return Number(report.liquidacionValorGanado) || 0;
+  }
+
   if (report.tipo === "visita_tecnica") {
     const currentValue = Number(report.costoActividad ?? 0) || 0;
     const defaultValue = Number(report.costoActividadDefault ?? 0) || 0;
@@ -211,6 +219,20 @@ function getReportLiquidationEarnedValue(report: ActivityReport) {
   }
 
   return Number(report.costoActividad ?? 0) || 0;
+}
+
+function getReportLiquidationGrossValue(report: ActivityReport) {
+  if (report.liquidacionValorGanadoOriginal != null) {
+    return Number(report.liquidacionValorGanadoOriginal) || 0;
+  }
+
+  return getReportLiquidationEarnedValue(report);
+}
+
+function getReportLiquidationDiscount(report: ActivityReport) {
+  return report.liquidacionDescuentoTardanza == null
+    ? null
+    : Number(report.liquidacionDescuentoTardanza) || 0;
 }
 
 export default function LiquidacionPage() {
@@ -400,8 +422,10 @@ export default function LiquidacionPage() {
     const percentage = Number(record.porcentajeDescuento || companySettings?.porcentajeDescuentoTardanza || 0) || 0;
     if (percentage <= 0) return acc;
 
+    // El porcentaje es una configuración por período, no una suma por cada
+    // llegada. Varias tardanzas no pueden convertir un 30% configurado en 90%.
     const current = acc.get(record.usuarioId) || 0;
-    acc.set(record.usuarioId, clampPercentage(current + percentage));
+    acc.set(record.usuarioId, clampPercentage(Math.max(current, percentage)));
     return acc;
   }, new Map());
 
@@ -420,8 +444,13 @@ export default function LiquidacionPage() {
     if (!liderId) return acc;
 
     const persisted = periodAccumulationSettings.get(liderId);
-    const porcentajeExtraLiderAplicado = persisted?.porcentajeExtraLiderAplicado ?? defaultExtraPct;
-    const extraLiderActivo = persisted?.extraLiderActivo ?? defaultExtraActivo;
+    if (persisted) {
+      acc.set(liderId, Number(persisted.extraLider || 0));
+      return acc;
+    }
+
+    const porcentajeExtraLiderAplicado = defaultExtraPct;
+    const extraLiderActivo = defaultExtraActivo;
 
     if (!extraLiderActivo || porcentajeExtraLiderAplicado <= 0) {
       acc.set(liderId, 0);
@@ -429,9 +458,7 @@ export default function LiquidacionPage() {
     }
 
     const groupMembers = users.filter((user) => group.miembros.includes(user.id) && user.id !== liderId);
-    const excludedTechnicianIds = persisted?.tecnicosExcluidosExtraIds?.length
-      ? persisted.tecnicosExcluidosExtraIds
-      : [];
+    const excludedTechnicianIds: string[] = [];
 
     let extraBase = 0;
 
@@ -488,13 +515,14 @@ export default function LiquidacionPage() {
         total: 0,
       };
 
+      const grossValue = getReportLiquidationGrossValue(report);
       const payableValue = getReportLiquidationEarnedValue(report);
       existing.actividades += 1;
-      existing.totalBruto += payableValue;
+      existing.totalBruto += grossValue;
       if (report.tipo === "recorrido") {
         existing.totalRecorridos += payableValue;
       } else {
-        existing.totalNoRecorridos += payableValue;
+        existing.totalNoRecorridos += grossValue;
       }
 
       summary.set(report.tecnicoId, existing);
@@ -524,8 +552,16 @@ export default function LiquidacionPage() {
     }
 
     summary.forEach((item, techId) => {
-      item.descuentoPorcentaje = discountRecordsByUser.get(techId) || 0;
-      item.descuentoValor = calculateDiscountValue(item.totalNoRecorridos, item.descuentoPorcentaje);
+      const techReports = reports.filter((report) => report.tecnicoId === techId);
+      const nonRouteReports = techReports.filter((report) => report.tipo !== "recorrido");
+      const canonicalDiscounts = nonRouteReports.reduce((sum, report) => sum + (getReportLiquidationDiscount(report) ?? 0), 0);
+      const hasCanonicalDiscount = nonRouteReports.some((report) => getReportLiquidationDiscount(report) !== null);
+      item.descuentoPorcentaje = hasCanonicalDiscount
+        ? nonRouteReports.reduce((max, report) => Math.max(max, Number(report.liquidacionPorcentajeDescuentoTardanza || 0)), 0)
+        : discountRecordsByUser.get(techId) || 0;
+      item.descuentoValor = hasCanonicalDiscount
+        ? canonicalDiscounts
+        : calculateDiscountValue(item.totalNoRecorridos, item.descuentoPorcentaje);
       item.extraLider = includeLeaderExtra ? (leaderExtraByTech.get(techId) || 0) : 0;
       item.total = item.totalBruto - item.descuentoValor + item.extraLider;
     });
@@ -577,6 +613,8 @@ export default function LiquidacionPage() {
   const buildGroupSummary = (reports: ActivityReport[], includeLeaderExtra: boolean = false) => {
     const summary = new Map<string, GroupLiquidationSummary>();
     const nonRecSubtotalByGroupAndUser = new Map<string, number>();
+    const canonicalDiscountByGroup = new Map<string, number>();
+    const groupsWithCanonicalDiscount = new Set<string>();
 
     reports.forEach((report) => {
       const group = groups.find((g) => g.id === report.grupoId);
@@ -593,15 +631,21 @@ export default function LiquidacionPage() {
         total: 0,
       };
 
+      const grossValue = getReportLiquidationGrossValue(report);
       const payableValue = getReportLiquidationEarnedValue(report);
       existing.actividades += 1;
-      existing.totalBruto += payableValue;
+      existing.totalBruto += grossValue;
       if (report.tipo === "recorrido") {
         existing.totalRecorridos += payableValue;
       } else {
-        existing.totalNoRecorridos += payableValue;
+        existing.totalNoRecorridos += grossValue;
         const subtotalKey = `${report.grupoId}|${report.tecnicoId}`;
-        nonRecSubtotalByGroupAndUser.set(subtotalKey, (nonRecSubtotalByGroupAndUser.get(subtotalKey) || 0) + payableValue);
+        nonRecSubtotalByGroupAndUser.set(subtotalKey, (nonRecSubtotalByGroupAndUser.get(subtotalKey) || 0) + grossValue);
+        const discount = getReportLiquidationDiscount(report);
+        if (discount !== null) {
+          groupsWithCanonicalDiscount.add(report.grupoId);
+          canonicalDiscountByGroup.set(report.grupoId, (canonicalDiscountByGroup.get(report.grupoId) || 0) + discount);
+        }
       }
 
       summary.set(report.grupoId, existing);
@@ -610,8 +654,13 @@ export default function LiquidacionPage() {
     nonRecSubtotalByGroupAndUser.forEach((base, key) => {
       const [groupId, techId] = key.split("|");
       const groupItem = summary.get(groupId);
-      if (!groupItem) return;
+      if (!groupItem || groupsWithCanonicalDiscount.has(groupId)) return;
       groupItem.descuentoValor += calculateDiscountValue(base, discountRecordsByUser.get(techId) || 0);
+    });
+
+    canonicalDiscountByGroup.forEach((discount, groupId) => {
+      const groupItem = summary.get(groupId);
+      if (groupItem) groupItem.descuentoValor = discount;
     });
 
     if (includeLeaderExtra) {
@@ -674,7 +723,8 @@ export default function LiquidacionPage() {
   };
 
   // Resumen por técnico basado en reportes_actividad
-  const techSummary = buildTechSummary(liquidablePeriodReports, true);
+  const liquidationUsers = users.filter((user) => user.rol !== "admin");
+  const techSummary = buildTechDisplaySummary(liquidationUsers, periodReports, liquidablePeriodReports, true);
 
   const totalPeriod = Array.from(techSummary.values()).reduce(
     (sum, t) => sum + t.total,
@@ -752,14 +802,12 @@ export default function LiquidacionPage() {
     return matchTechnician && matchGroup;
   });
 
-  const filteredTechUsers = users.filter((user) => {
+  const filteredTechUsers = liquidationUsers.filter((user) => {
     const techFullName = normalizeSearchValue(`${user.nombre} ${user.apellido}`);
     const matchTechnician = !normalizedTechnicianTabSearch || techFullName.includes(normalizedTechnicianTabSearch);
     const userGroupId = groupIdByUser.get(user.id);
     const matchGroup = technicianTabGroupId === "todos" || userGroupId === technicianTabGroupId;
-    const hasVisibleReports = filteredTechTabReports.some((report) => report.tecnicoId === user.id);
-    const hasLeaderExtra = (leaderExtraByTech.get(user.id) || 0) > 0;
-    return matchTechnician && matchGroup && (hasVisibleReports || hasLeaderExtra);
+    return matchTechnician && matchGroup;
   });
 
   const filteredTechPayableReports = filteredTechTabReports.filter(
@@ -801,14 +849,12 @@ export default function LiquidacionPage() {
     return matchTechnician && matchGroup;
   });
 
-  const filteredComprobanteUsers = users.filter((user) => {
+  const filteredComprobanteUsers = liquidationUsers.filter((user) => {
     const techFullName = normalizeSearchValue(`${user.nombre} ${user.apellido}`);
     const matchTechnician = !normalizedComprobanteSearch || techFullName.includes(normalizedComprobanteSearch);
     const userGroupId = groupIdByUser.get(user.id);
     const matchGroup = comprobanteGroupId === "todos" || userGroupId === comprobanteGroupId;
-    const hasVisibleReports = filteredComprobanteReports.some((report) => report.tecnicoId === user.id);
-    const hasLeaderExtra = (leaderExtraByTech.get(user.id) || 0) > 0;
-    return matchTechnician && matchGroup && (hasVisibleReports || hasLeaderExtra);
+    return matchTechnician && matchGroup;
   });
 
   const filteredComprobantePayableReports = filteredComprobanteReports.filter(
@@ -879,8 +925,8 @@ export default function LiquidacionPage() {
       );
       const pdfNonRecorrido = pdfReports.filter((r) => r.tipo !== "recorrido");
       const pdfRecorrido = pdfReports.filter((r) => r.tipo === "recorrido");
-      const pdfAuxilio = pdfNonRecorrido.reduce((sum, report) => sum + getReportLiquidationEarnedValue(report), 0);
-      const pdfRodamiento = pdfRecorrido.reduce((sum, report) => sum + getReportLiquidationEarnedValue(report), 0);
+      const pdfAuxilio = pdfNonRecorrido.reduce((sum, report) => sum + getReportLiquidationGrossValue(report), 0);
+      const pdfRodamiento = pdfRecorrido.reduce((sum, report) => sum + getReportLiquidationGrossValue(report), 0);
       const pdfDescuentoTardanza = techData.descuentoValor;
       const pdfExtraLider = leaderExtraByTech.get(selectedTechId) || 0;
 
@@ -893,12 +939,12 @@ export default function LiquidacionPage() {
           fecha: report.fecha,
           valorBase: getReportLiquidationBaseValue(report),
           porcentaje: getReportLiquidationPercentage(report),
-          valorLiquidado: getReportLiquidationEarnedValue(report),
+          valorLiquidado: getReportLiquidationGrossValue(report),
         })),
         desplazamientos: pdfRecorrido.map((report) => ({
           descripcion: [report.puntoPartida, report.puntoLlegada].filter(Boolean).join(" -> ") || getTipoLabel(report.tipo),
           fecha: report.fecha,
-          valor: getReportLiquidationEarnedValue(report),
+          valor: getReportLiquidationGrossValue(report),
         })),
         totalAuxilio: pdfAuxilio,
         totalDescuentoTardanza: pdfDescuentoTardanza,
@@ -1876,8 +1922,8 @@ export default function LiquidacionPage() {
             const nonRecorridoReports = techReportsForComprobante.filter((r) => r.tipo !== "recorrido");
             const recorridoReports = techReportsForComprobante.filter((r) => r.tipo === "recorrido");
 
-            const auxilioTotal = nonRecorridoReports.reduce((s, r) => s + getReportLiquidationEarnedValue(r), 0);
-            const rodamientoTotal = recorridoReports.reduce((s, r) => s + getReportLiquidationEarnedValue(r), 0);
+            const auxilioTotal = nonRecorridoReports.reduce((s, r) => s + getReportLiquidationGrossValue(r), 0);
+            const rodamientoTotal = recorridoReports.reduce((s, r) => s + getReportLiquidationGrossValue(r), 0);
             const descuentoTardanza = techData.descuentoValor;
             const auxilioNeto = auxilioTotal - descuentoTardanza;
             const extraLider = leaderExtraByTech.get(selectedTechId) || 0;
@@ -1936,7 +1982,7 @@ export default function LiquidacionPage() {
                               {r.estadoAprobacionLider === "aprobado" ? "✓" : "Pend."}
                             </TableCell>
                             <TableCell className="text-xs text-right font-medium text-gold">
-                              {formatCurrency(getReportLiquidationEarnedValue(r))}
+                              {formatCurrency(getReportLiquidationGrossValue(r))}
                             </TableCell>
                           </TableRow>
                         ))}
@@ -2011,7 +2057,7 @@ export default function LiquidacionPage() {
                                 </TableCell>
                                 <TableCell className="whitespace-normal text-xs text-foreground/80">{report.fecha}</TableCell>
                                 <TableCell className="text-xs text-foreground/80">{report.estadoAprobacionLider === "aprobado" ? "✓" : "Pend."}</TableCell>
-                                <TableCell className="text-right text-xs font-medium text-emerald-400">{formatCurrency(getReportLiquidationEarnedValue(report))}</TableCell>
+                                <TableCell className="text-right text-xs font-medium text-emerald-400">{formatCurrency(getReportLiquidationGrossValue(report))}</TableCell>
                               </TableRow>
                             ))}
                           </TableBody>

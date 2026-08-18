@@ -29,8 +29,8 @@ import {
   Route,
 } from "lucide-react";
 import { CompanySettings, LiquidationPeriod } from "@/lib/types";
-import { getConfiguracion, updateConfiguracion } from "@/lib/supabase/services/configuracion";
-import { createPeriodo, deletePeriodo, getPeriodos, updatePeriodo } from "@/lib/supabase/services/liquidacion";
+import { getConfiguracion, updateConfiguracion } from "@/lib/data/services/configuracion";
+import { createPeriodo, deletePeriodo, getPeriodos, updatePeriodo } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
 
 export default function ConfiguracionPage() {

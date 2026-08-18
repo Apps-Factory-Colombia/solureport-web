@@ -18,14 +18,14 @@ import {
     SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { getPeriodos } from "@/lib/supabase/services/liquidacion";
+import { getPeriodos } from "@/lib/data/services/liquidacion";
 import {
     CleanupMode,
     CleanupModule,
     CleanupPreview,
     executeManualCleanup,
     previewManualCleanup,
-} from "@/lib/supabase/services/depuracion";
+} from "@/lib/data/services/depuracion";
 import { LiquidationPeriod } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {

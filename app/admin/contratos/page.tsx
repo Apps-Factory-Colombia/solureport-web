@@ -36,10 +36,10 @@ import {
 } from "@/components/ui/select";
 import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, ChevronDown, ArrowLeft, X, } from "lucide-react";
 import { MaintenanceContract, Client, MaintenanceParticipant, MaintenanceStatus, User } from "@/lib/types";
-import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/supabase/services/contratos";
-import { getClientes } from "@/lib/supabase/services/clientes";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
-import { updateMantenimiento } from "@/lib/supabase/services/mantenimientos";
+import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/data/services/contratos";
+import { getClientes } from "@/lib/data/services/clientes";
+import { getUsuarios } from "@/lib/data/services/usuarios";
+import { updateMantenimiento } from "@/lib/data/services/mantenimientos";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 

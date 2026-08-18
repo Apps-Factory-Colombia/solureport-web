@@ -61,13 +61,13 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 import { Maintenance, MaintenanceStatus, Client, User, CompanySettings, LiquidationPeriod } from "@/lib/types";
-import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/supabase/services/mantenimientos";
-import { getContratos, createContrato } from "@/lib/supabase/services/contratos";
-import { getClientes } from "@/lib/supabase/services/clientes";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
-import { createNotificacion } from "@/lib/supabase/services/notificaciones";
-import { getConfiguracion } from "@/lib/supabase/services/configuracion";
-import { getPeriodos } from "@/lib/supabase/services/liquidacion";
+import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/data/services/mantenimientos";
+import { getContratos, createContrato } from "@/lib/data/services/contratos";
+import { getClientes } from "@/lib/data/services/clientes";
+import { getUsuarios } from "@/lib/data/services/usuarios";
+import { createNotificacion } from "@/lib/data/services/notificaciones";
+import { getConfiguracion } from "@/lib/data/services/configuracion";
+import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 import { formatClientDoorBreakdown } from "@/lib/utils/report-content";
@@ -276,6 +276,8 @@ export default function MantenimientosPage() {
   const [reactivateStartDay, setReactivateStartDay] = useState(String(new Date().getDate()));
   const [reactivateStartYear, setReactivateStartYear] = useState(String(new Date().getFullYear()));
   const [reactivateLoading, setReactivateLoading] = useState(false);
+  // El panel de programados abre en el mes calendario actual; "Todos" sigue
+  // disponible para consultar histórico completo de forma explícita.
   const [programadosMonthFilter, setProgramadosMonthFilter] = useState<string>(() => getMonthInputValue(new Date()));
   const [vencidosMonthFilter, setVencidosMonthFilter] = useState<string>(() => getMonthInputValue(new Date()));
   const [completedPeriodFilter, setCompletedPeriodFilter] = useState<string>("");
@@ -1141,7 +1143,7 @@ export default function MantenimientosPage() {
                       Mantenimientos Programados
                     </CardTitle>
                     <p className="mt-2 text-sm text-muted-foreground">
-                      Muestra todos los mantenimientos con estado programado, en ejecucion o en progreso. Puedes filtrarlos por mes.
+                      Muestra los mantenimientos programados del mes actual. Puedes cambiar el mes o consultar todos.
                     </p>
                   </div>
                   <div className="flex flex-col gap-3 sm:items-end">

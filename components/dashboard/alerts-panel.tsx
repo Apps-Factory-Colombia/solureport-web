@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AlertTriangle, Clock, XCircle } from "lucide-react";
-import { getMantenimientos } from "@/lib/supabase/services/mantenimientos";
-import { getClientes } from "@/lib/supabase/services/clientes";
+import { getMantenimientos } from "@/lib/data/services/mantenimientos";
+import { getClientes } from "@/lib/data/services/clientes";
 import { Client, Maintenance } from "@/lib/types";
 import { cn } from "@/lib/utils";
 

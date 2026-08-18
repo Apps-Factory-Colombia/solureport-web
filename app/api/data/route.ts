@@ -1,0 +1,1415 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { NextRequest, NextResponse } from "next/server";
+import { getAuthenticatedUser, hashPassword } from "@/lib/db/auth";
+import { dbQuery, withTransaction } from "@/lib/db/postgres";
+
+export const runtime = "nodejs";
+
+type UserContext = NonNullable<Awaited<ReturnType<typeof getAuthenticatedUser>>>;
+type Payload = Record<string, any>;
+
+const dayToNumber: Record<string, number> = {
+  lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado: 6, domingo: 7,
+};
+const numberToDay = ["", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"];
+
+function number(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function dateOnly(value: unknown): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  const raw = String(value);
+  const isoDate = raw.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+  if (isoDate) return isoDate;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? raw.split("T")[0] || null : parsed.toISOString().slice(0, 10);
+}
+
+function jsonArray(value: unknown): any[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function timeMinutes(value: unknown): number | null {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+function bogotaClock() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`,
+    minutes: Number(get("hour")) * 60 + Number(get("minute")),
+  };
+}
+
+function roundCurrency(value: number) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function mapUser(row: any): any {
+  const schedules = jsonArray(row.horarios).map((item) => ({
+    id: item.id,
+    usuarioId: item.usuarioId || item.usuario_id,
+    diaSemana: item.diaSemana || numberToDay[number(item.dia_semana)],
+    activo: item.activo ?? true,
+    horaEntrada: item.horaEntrada || item.hora_entrada || undefined,
+    horaSalida: item.horaSalida || item.hora_salida || undefined,
+  }));
+  return {
+    id: row.id,
+    username: row.username,
+    nombre: row.nombre,
+    apellido: row.apellido,
+    email: row.email,
+    telefono: row.telefono || "",
+    rol: row.rol,
+    estado: row.estado === "bloqueado" ? "inactivo" : row.estado,
+    grupoId: row.grupo_id || undefined,
+    liderId: row.lider_id || undefined,
+    esLider: Boolean(row.es_lider),
+    tieneRecorrido: Boolean(row.tiene_recorrido),
+    tieneMoto: Boolean(row.tiene_moto),
+    esSupervisor: row.rol === "supervisor",
+    horaEntrada: row.hora_entrada ? String(row.hora_entrada).slice(0, 5) : undefined,
+    horaSalida: row.hora_salida ? String(row.hora_salida).slice(0, 5) : undefined,
+    horarios: schedules,
+    fechaCreacion: dateOnly(row.created_at) || "",
+    avatar: row.avatar_url || undefined,
+  };
+}
+
+function mapClient(row: any): any {
+  return {
+    id: row.id,
+    nombre: row.nombre,
+    nitCedula: row.identificador_fiscal || "",
+    edificio: row.sede_nombre || "",
+    direccion: row.sede_direccion || "",
+    ciudad: row.sede_ciudad || "Bogotá",
+    contacto: row.contacto_nombre || "",
+    correo: row.correo || "",
+    correoAliado: row.correo_aliado || undefined,
+    telefono: row.telefono || "",
+    frecuenciaMantenimiento: number(row.frecuencia_mantenimiento, 4),
+    puertasPeatonales: number(row.puertas_peatonales),
+    puertasVehiculares: number(row.puertas_vehiculares),
+    estado: row.estado,
+    fechaCreacion: dateOnly(row.created_at) || "",
+    sedeId: row.sede_id || undefined,
+  };
+}
+
+function mapGroup(row: any): any {
+  return {
+    id: row.id,
+    nombre: row.nombre,
+    liderId: row.lider_id || "",
+    miembros: jsonArray(row.miembros),
+    reporterosIds: jsonArray(row.reportadores),
+    estado: row.estado,
+    fechaCreacion: dateOnly(row.created_at) || "",
+  };
+}
+
+function mapPeriod(row: any): any {
+  return {
+    id: row.id,
+    fechaInicio: dateOnly(row.fecha_inicio) || "",
+    fechaFin: dateOnly(row.fecha_fin) || "",
+    estado: row.estado,
+    fechaCierre: row.fecha_cierre ? dateOnly(row.fecha_cierre) : undefined,
+  };
+}
+
+function mapMaintenance(row: any): any {
+  const state = row.estado === "ejecutado" ? "realizado" : row.estado === "asignado" ? "programado" : row.estado;
+  return {
+    id: row.id,
+    codigoRegistro: row.codigo || undefined,
+    clienteId: row.cliente_id,
+    tecnicoId: row.tecnico_principal_id || "",
+    origen: row.contrato_id ? "contrato" : "mantenimiento",
+    contratoId: row.contrato_id || undefined,
+    contratoMantenimientoId: row.id,
+    sedeId: row.sede_id || undefined,
+    grupoId: row.grupo_id || undefined,
+    liderId: row.lider_id || undefined,
+    tecnicoPrincipalId: row.tecnico_principal_id || undefined,
+    titulo: row.titulo || undefined,
+    fechaProgramada: dateOnly(row.fecha_programada) || "",
+    horaProgramada: row.hora_programada ? String(row.hora_programada).slice(0, 5) : undefined,
+    proximaFecha: dateOnly(row.proxima_fecha) || undefined,
+    estado: state,
+    observaciones: row.observaciones || undefined,
+    tipoPendiente: row.tipo_pendiente || undefined,
+    descripcionPendiente: row.descripcion_pendiente || undefined,
+    valorRecaudado: number(row.valor_recaudado),
+    costoTecnicoTotal: number(row.costo_tecnico_presupuestado),
+    participantes: [],
+    fechaCreacion: dateOnly(row.created_at) || "",
+    fechaCierre: dateOnly(row.fecha_realizado) || undefined,
+    clienteNombre: row.cliente_nombre || undefined,
+    edificio: row.sede_nombre || undefined,
+  };
+}
+
+function mapContract(row: any, maintenanceRows: any[] = []): any {
+  return {
+    id: row.id,
+    clienteId: row.cliente_id,
+    anio: number(row.anio),
+    mesInicio: number(row.mes_inicio, 1),
+    diaInicio: number(row.dia_inicio, 1),
+    puertasPeatonales: number(row.puertas_peatonales),
+    puertasVehiculares: number(row.puertas_vehiculares),
+    valorPuertaPeatonal: number(row.valor_puerta_peatonal),
+    valorPuertaVehicular: number(row.valor_puerta_vehicular),
+    costoTotalAnual: number(row.costo_total_anual),
+    cantidadMantenimientos: number(row.cantidad_mantenimientos),
+    costoPorMantenimiento: number(row.costo_por_mantenimiento),
+    mantenimientosRealizados: maintenanceRows.map((item) => ({
+      id: item.id,
+      mes: number(item.numero),
+      fechaProgramada: dateOnly(item.fecha_programada) || "",
+      fechaRealizado: dateOnly(item.fecha_realizado) || undefined,
+      tecnicoId: item.tecnico_principal_id || undefined,
+      estado: item.estado === "ejecutado" ? "realizado" : item.estado === "asignado" ? "programado" : item.estado,
+      valorRecaudado: number(item.valor_recaudado),
+    })),
+    estado: row.estado === "cancelado" ? "cerrado" : row.estado,
+    fechaCreacion: dateOnly(row.created_at) || "",
+  };
+}
+
+async function userRows(where = "", values: unknown[] = []) {
+  const { rows } = await dbQuery(
+    `SELECT u.*,
+            COALESCE((SELECT json_agg(json_build_object(
+              'id', ah.id, 'usuarioId', ah.usuario_id, 'diaSemana',
+              CASE ah.dia_semana WHEN 1 THEN 'lunes' WHEN 2 THEN 'martes' WHEN 3 THEN 'miercoles'
+                WHEN 4 THEN 'jueves' WHEN 5 THEN 'viernes' WHEN 6 THEN 'sabado' ELSE 'domingo' END,
+              'activo', ah.activo, 'horaEntrada', left(ah.hora_entrada::text, 5),
+              'horaSalida', left(ah.hora_salida::text, 5)
+            ) ORDER BY ah.dia_semana) FROM public.asistencia_horarios ah WHERE ah.usuario_id = u.id), '[]'::json) AS horarios,
+            (SELECT gm.grupo_id FROM public.grupo_miembros gm
+              WHERE gm.usuario_id = u.id AND gm.fecha_inicio <= current_date
+                AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= current_date) LIMIT 1) AS grupo_id,
+            EXISTS (SELECT 1 FROM public.grupos_trabajo g WHERE g.lider_id = u.id) AS es_lider
+       FROM public.usuarios u ${where}
+      ORDER BY u.created_at DESC`, values,
+  );
+  return rows;
+}
+
+async function groupRows(where = "", values: unknown[] = []) {
+  const { rows } = await dbQuery(
+    `SELECT g.*,
+            COALESCE((SELECT json_agg(gm.usuario_id ORDER BY gm.usuario_id)
+              FROM public.grupo_miembros gm WHERE gm.grupo_id = g.id
+                AND gm.fecha_inicio <= current_date AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= current_date)), '[]'::json) AS miembros,
+            COALESCE((SELECT json_agg(gr.usuario_id ORDER BY gr.usuario_id)
+              FROM public.grupo_reportadores_actividad gr WHERE gr.grupo_id = g.id
+                AND gr.fecha_inicio <= current_date AND (gr.fecha_fin IS NULL OR gr.fecha_fin >= current_date)), '[]'::json) AS reportadores
+       FROM public.grupos_trabajo g ${where}
+      ORDER BY g.created_at DESC`, values,
+  );
+  return rows;
+}
+
+async function clientRows(where = "", values: unknown[] = []) {
+  const { rows } = await dbQuery(
+    `SELECT c.*, s.id AS sede_id, s.nombre AS sede_nombre, s.direccion AS sede_direccion,
+            s.puertas_peatonales, s.puertas_vehiculares
+       FROM public.clientes c
+       LEFT JOIN LATERAL (
+         SELECT cs.* FROM public.cliente_sedes cs WHERE cs.cliente_id = c.id
+         ORDER BY (cs.estado = 'activo') DESC, cs.created_at ASC LIMIT 1
+       ) s ON true
+       ${where}
+      ORDER BY c.created_at DESC`, values,
+  );
+  return rows;
+}
+
+async function periodRows() {
+  const { rows } = await dbQuery("SELECT * FROM public.periodos_liquidacion ORDER BY fecha_inicio DESC");
+  return rows;
+}
+
+function canonicalActivityId(id: unknown): string {
+  const value = String(id || "");
+  return value.includes(":") ? value.split(":")[0] : value;
+}
+
+function canonicalParticipantId(id: unknown): string | null {
+  const value = String(id || "");
+  return value.includes(":") ? value.split(":")[1] || null : null;
+}
+
+async function activityRows(payload: Payload = {}) {
+  const values: unknown[] = [];
+  const filters: string[] = [];
+  if (payload.startDate) { values.push(payload.startDate); filters.push(`a.fecha_operacion >= $${values.length}`); }
+  if (payload.endDate) { values.push(payload.endDate); filters.push(`a.fecha_operacion <= $${values.length}`); }
+  if (payload.periodoId) {
+    values.push(payload.periodoId);
+    filters.push(`EXISTS (SELECT 1 FROM public.periodos_liquidacion pp WHERE pp.id = $${values.length} AND a.fecha_operacion BETWEEN pp.fecha_inicio AND pp.fecha_fin)`);
+  }
+  if (payload.activityId) { values.push(payload.activityId); filters.push(`a.id = $${values.length}`); }
+  if (payload.tecnicoId) { values.push(payload.tecnicoId); filters.push(`EXISTS (SELECT 1 FROM public.actividades_operativas_participantes fp WHERE fp.actividad_id = a.id AND fp.tecnico_id = $${values.length})`); }
+  if (payload.grupoId) { values.push(payload.grupoId); filters.push(`a.grupo_id = $${values.length}`); }
+  if (payload.tipo) { values.push(payload.tipo === "actividad_grupal" ? "actividad" : payload.tipo === "mantenimiento_preventivo" ? "mantenimiento" : payload.tipo); filters.push(`a.tipo = $${values.length}`); }
+  const { rows } = await dbQuery(
+    `SELECT a.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, s.direccion AS sede_direccion,
+            g.nombre AS grupo_nombre, g.lider_id AS grupo_lider_id,
+            ca.codigo AS catalogo_codigo, ca.nombre AS catalogo_nombre, ac.especificacion,
+            am.mantenimiento_programado_id, am.titulo AS mantenimiento_titulo,
+            am.prioridad AS mantenimiento_prioridad, am.tipo_pendiente, am.descripcion_pendiente,
+            am.receptor_nombre AS mantenimiento_receptor, am.firmado AS mantenimiento_firmado,
+            av.tipo_visita, av.receptor_nombre AS visita_receptor, av.receptor_cedula, av.receptor_cargo,
+            av.firmado AS visita_firmado, ar.punto_partida, ar.punto_llegada, ar.tipo_recorrido,
+            ar.inicio_recorrido, ar.fin_recorrido,
+            COALESCE((SELECT json_agg(json_build_object(
+              'id', p.id, 'tecnicoId', p.tecnico_id, 'rol', p.rol_participacion,
+              'porcentaje', p.porcentaje, 'valorBase', p.valor_base, 'valorGanado', p.valor_ganado
+            ) ORDER BY p.created_at) FROM public.actividades_operativas_participantes p WHERE p.actividad_id = a.id), '[]'::json) AS participantes,
+            COALESCE((SELECT json_agg(json_build_object(
+              'id', ap.id, 'participanteId', ap.participante_id, 'revisorId', ap.revisor_id,
+              'estado', ap.estado, 'comentario', ap.comentario, 'revisadoEn', ap.revisado_en
+            ) ORDER BY ap.created_at) FROM public.actividades_operativas_aprobaciones ap WHERE ap.actividad_id = a.id), '[]'::json) AS aprobaciones,
+            COALESCE((SELECT json_agg(json_build_object(
+              'id', e.id, 'tipo', e.tipo, 'bucket', e.storage_bucket, 'key', e.storage_key, 'url', e.url, 'orden', e.orden
+            ) ORDER BY e.tipo, e.orden) FROM public.actividades_operativas_evidencias e WHERE e.actividad_id = a.id), '[]'::json) AS evidencias,
+            COALESCE((SELECT json_agg(json_build_object(
+              'id', li.id, 'participanteId', li.participante_id, 'tecnicoId', li.tecnico_id,
+              'estado', li.estado, 'valorBase', li.valor_base, 'valorGanado', li.valor_ganado,
+              'valorGanadoOriginal', li.valor_ganado_original, 'descuentoTardanza', li.descuento_tardanza,
+              'porcentajeDescuentoTardanza', li.porcentaje_descuento_tardanza
+            ) ORDER BY li.created_at) FROM public.liquidacion_items li WHERE li.actividad_id = a.id), '[]'::json) AS liquidaciones,
+            (SELECT p.id FROM public.periodos_liquidacion p WHERE a.fecha_operacion BETWEEN p.fecha_inicio AND p.fecha_fin ORDER BY p.fecha_inicio DESC LIMIT 1) AS periodo_id
+       FROM public.actividades_operativas a
+       LEFT JOIN public.clientes c ON c.id = a.cliente_id
+       LEFT JOIN public.cliente_sedes s ON s.id = a.sede_id
+       LEFT JOIN public.grupos_trabajo g ON g.id = a.grupo_id
+       LEFT JOIN public.actividades_operativas_catalogo ac ON ac.actividad_id = a.id
+       LEFT JOIN public.catalogo_actividades ca ON ca.id = ac.catalogo_actividad_id
+       LEFT JOIN public.actividades_operativas_mantenimientos am ON am.actividad_id = a.id
+       LEFT JOIN public.actividades_operativas_visitas av ON av.actividad_id = a.id
+       LEFT JOIN public.actividades_operativas_recorridos ar ON ar.actividad_id = a.id
+       ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
+      ORDER BY a.fecha_operacion DESC, a.created_at DESC`, values,
+  );
+  return rows;
+}
+
+function mapReport(row: any, participant: any, index: number): any {
+  const type = row.tipo === "actividad" ? "actividad_grupal" : row.tipo === "mantenimiento" ? "mantenimiento_preventivo" : row.tipo;
+  const evidence = jsonArray(row.evidencias);
+  const ofType = (kind: string) => evidence.filter((item) => item.tipo === kind).sort((a, b) => number(a.orden) - number(b.orden)).map((item) => item.url || item.key).filter(Boolean);
+  const liquidation = jsonArray(row.liquidaciones).find((item) => item.participanteId === participant?.id || item.tecnicoId === participant?.tecnicoId);
+  const approval = jsonArray(row.aprobaciones).find((item) => item.participanteId === participant?.id) || jsonArray(row.aprobaciones)[0];
+  const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
+  const reportId = participant?.id ? `${row.id}:${participant.id}` : `${row.id}:${index}`;
+  return {
+    id: reportId,
+    actividadOperativaId: row.id,
+    participanteId: participant?.id,
+    aprobacionId: approval?.id,
+    codigoRegistro: row.codigo,
+    tipo: type,
+    mantenimientoId: row.tipo === "mantenimiento" ? row.mantenimiento_programado_id || undefined : undefined,
+    visitaTecnicaId: row.tipo === "visita_tecnica" ? row.id : undefined,
+    recorridoId: row.tipo === "recorrido" ? row.id : undefined,
+    tipoVisita: row.tipo_visita || undefined,
+    registroActividadId: row.tipo === "actividad" ? row.id : undefined,
+    tecnicoId: participant?.tecnicoId || row.creado_por_id,
+    liderGrupoId: row.grupo_lider_id,
+    grupoId: row.grupo_id,
+    porcentajeParticipacion: number(participant?.porcentaje, 100),
+    fecha: dateOnly(row.fecha_operacion) || "",
+    clienteId: row.cliente_id,
+    descripcion: row.descripcion || row.catalogo_nombre || "",
+    actividadesRealizadas: metadata.actividadesRealizadas || row.catalogo_nombre || undefined,
+    especificacion: row.especificacion || metadata.especificacion || undefined,
+    observaciones: row.observaciones || undefined,
+    fotoEvidencia: ofType("general")[0],
+    fotosAntes: ofType("antes"),
+    fotosDespues: ofType("despues"),
+    firmaReceptor: ofType("firma")[0],
+    datosReceptor: metadata.datosReceptor || (row.visita_receptor ? { nombre: row.visita_receptor, cedula: row.receptor_cedula || "", cargo: row.receptor_cargo || "" } : undefined),
+    bitacora: ofType("bitacora").length > 0,
+    fotoBitacora: ofType("bitacora")[0],
+    puntoPartida: row.punto_partida,
+    puntoLlegada: row.punto_llegada,
+    tipoRecorrido: row.tipo_recorrido === "con_herramienta" ? "con_herramienta" : row.tipo_recorrido === "normal" ? "normal" : undefined,
+    fotoHerramienta: ofType("herramienta")[0],
+    estadoAprobacionLider: approval?.estado === "aprobada" ? "aprobado" : approval?.estado === "rechazada" ? "rechazado" : "pendiente",
+    fechaAprobacionLider: approval?.revisadoEn ? dateOnly(approval.revisadoEn) : undefined,
+    costoCliente: row.valor_cliente == null ? undefined : number(row.valor_cliente),
+    costoActividadDefault: number(row.valor_base),
+    valorSugerido: row.valor_sugerido == null ? undefined : number(row.valor_sugerido),
+    valorSugeridoGlobal: row.valor_sugerido == null ? undefined : number(row.valor_sugerido),
+    motivoSugerenciaValor: row.motivo_modificacion_valor || undefined,
+    valorModificado: row.valor_sugerido != null && number(row.valor_sugerido) !== number(row.valor_base),
+    motivoModificacionValor: row.motivo_modificacion_valor || undefined,
+    costoActividad: number(participant?.valorGanado, number(row.valor_aplicado)),
+    liquidacionId: liquidation?.id,
+    liquidacionEstado: liquidation?.estado,
+    liquidacionValorBase: liquidation ? number(liquidation.valorBase) : undefined,
+    liquidacionValorGanado: liquidation ? number(liquidation.valorGanado) : undefined,
+    liquidacionValorGanadoOriginal: liquidation ? number(liquidation.valorGanadoOriginal) : undefined,
+    liquidacionDescuentoTardanza: liquidation ? number(liquidation.descuentoTardanza) : undefined,
+    liquidacionPorcentajeDescuentoTardanza: liquidation ? number(liquidation.porcentajeDescuentoTardanza) : undefined,
+    costoAdministrable: Boolean(row.costo_administrable),
+    firmado: row.tipo === "visita_tecnica" ? Boolean(row.visita_firmado) : row.tipo === "mantenimiento" ? Boolean(row.mantenimiento_firmado) : false,
+    correoEnviado: Boolean(metadata.correoEnviado),
+    fechaUltimoEnvioCorreo: metadata.fechaUltimoEnvioCorreo || undefined,
+    periodoId: row.periodo_id || metadata.periodoId || "",
+    fechaCreacion: dateOnly(row.created_at) || "",
+    esHistoricoContrato: Boolean(metadata.esHistoricoContrato),
+    valorActividadBaseGlobal: number(row.valor_base),
+    valorActividadAplicadoGlobal: number(row.valor_aplicado),
+    clienteNombre: row.cliente_nombre,
+    sedeNombre: row.sede_nombre,
+  };
+}
+
+async function reportRows(payload: Payload = {}) {
+  const rows = await activityRows(payload);
+  return rows.flatMap((row) => {
+    const participants = jsonArray(row.participantes);
+    return (participants.length ? participants : [null]).map((participant, index) => mapReport(row, participant, index));
+  });
+}
+
+async function applyUserSchedules(client: any, userId: string, schedules: any[] = []) {
+  await client.query("DELETE FROM public.asistencia_horarios WHERE usuario_id = $1", [userId]);
+  for (const schedule of schedules) {
+    const day = dayToNumber[String(schedule.diaSemana || "")];
+    if (!day) continue;
+    await client.query(
+      `INSERT INTO public.asistencia_horarios (usuario_id, dia_semana, activo, hora_entrada, hora_salida)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [userId, day, schedule.activo !== false, schedule.horaEntrada || null, schedule.horaSalida || null],
+    );
+  }
+}
+
+async function requireAdmin(user: UserContext) {
+  if (!["admin", "supervisor"].includes(user.rol)) throw new Error("No tienes permisos para esta operación.");
+}
+
+function requestedUserRole(payload: Payload): string | undefined {
+  if (payload.esSupervisor === true) return "supervisor";
+  if (payload.esSupervisor === false && (payload.rol === undefined || payload.rol === "supervisor")) return "tecnico";
+  return payload.rol === undefined ? undefined : String(payload.rol);
+}
+
+async function execute(action: string, payload: Payload, user: UserContext): Promise<unknown> {
+  switch (action) {
+    case "users.list": {
+      return (await userRows()).map(mapUser);
+    }
+    case "users.get": {
+      const rows = await userRows("WHERE u.id = $1", [payload.id]);
+      return rows[0] ? mapUser(rows[0]) : null;
+    }
+    case "users.create": {
+      await requireAdmin(user);
+      const password = String(payload.password || "");
+      if (password.length < 8) throw new Error("La contraseña debe tener al menos 8 caracteres.");
+      const passwordHash = await hashPassword(password);
+      const role = requestedUserRole(payload) || "tecnico";
+      const result = await withTransaction(async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO public.usuarios (username, nombre, apellido, email, telefono, rol, estado, password_hash, avatar_url, tiene_recorrido, tiene_moto, routes_enabled)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+          [payload.username || String(payload.email || "").split("@")[0], payload.nombre, payload.apellido, String(payload.email).toLowerCase(), payload.telefono || null, role, payload.estado || "activo", passwordHash, payload.avatar || null, Boolean(payload.tieneRecorrido), Boolean(payload.tieneMoto), Boolean(payload.tieneRecorrido)],
+        );
+        await applyUserSchedules(client, rows[0].id, payload.horarios || []);
+        return rows[0].id;
+      });
+      const rows = await userRows("WHERE u.id = $1", [result]);
+      return mapUser(rows[0]);
+    }
+    case "users.update": {
+      await requireAdmin(user);
+      const id = payload.id;
+      const fields: string[] = [];
+      const values: unknown[] = [];
+      const set = (column: string, value: unknown) => { values.push(value); fields.push(`${column} = $${values.length}`); };
+      let role = requestedUserRole(payload);
+      // "Líder de Grupo" del modal debe tener un efecto persistente. En V2
+      // el liderazgo se refleja en el grupo; si aún no existe grupo, al menos
+      // conservamos el rol de líder para que pueda ser asignado desde Grupos.
+      if (payload.esLider === true && role === "tecnico") role = "lider";
+      for (const [key, column] of [["nombre", "nombre"], ["apellido", "apellido"], ["email", "email"], ["telefono", "telefono"], ["estado", "estado"], ["avatar", "avatar_url"], ["tieneRecorrido", "tiene_recorrido"], ["tieneMoto", "tiene_moto"]] as const) {
+        if (payload[key] !== undefined) set(column, key === "email" ? String(payload[key]).toLowerCase() : payload[key]);
+      }
+      if (role !== undefined) set("rol", role);
+      if (payload.password) {
+        const password = String(payload.password);
+        if (password.length < 8) throw new Error("La contraseña debe tener al menos 8 caracteres.");
+        set("password_hash", await hashPassword(password));
+      }
+      // El perfil y sus horarios se guardan en una sola transacción. Así el
+      // modal nunca puede mostrar un usuario actualizado con horarios viejos
+      // (o dejar el perfil a medias si falla la segunda operación).
+      await withTransaction(async (client) => {
+        if (fields.length > 0) {
+          values.push(id);
+          await client.query(`UPDATE public.usuarios SET ${fields.join(", ")}, updated_at = clock_timestamp() WHERE id = $${values.length}`, values);
+        }
+        if (payload.horarios !== undefined) {
+          await applyUserSchedules(client, id, payload.horarios);
+        }
+        if (payload.esLider === true) {
+          const { rows: memberships } = await client.query(
+            `SELECT gm.grupo_id
+               FROM public.grupo_miembros gm
+              WHERE gm.usuario_id = $1
+                AND gm.fecha_inicio <= current_date
+                AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= current_date)
+              ORDER BY gm.fecha_inicio DESC
+              LIMIT 1`,
+            [id],
+          );
+          if (memberships[0]?.grupo_id) {
+            await client.query(
+              "UPDATE public.grupos_trabajo SET lider_id = $1, updated_at = clock_timestamp() WHERE id = $2",
+              [id, memberships[0].grupo_id],
+            );
+          }
+        }
+      });
+      const rows = await userRows("WHERE u.id = $1", [id]);
+      if (!rows[0]) throw new Error("No se encontró el usuario después de actualizarlo.");
+      return mapUser(rows[0]);
+    }
+    case "users.delete": {
+      await requireAdmin(user);
+      await dbQuery("UPDATE public.usuarios SET estado = 'inactivo', updated_at = clock_timestamp() WHERE id = $1", [payload.id]);
+      return true;
+    }
+
+    case "groups.list": return (await groupRows()).map(mapGroup);
+    case "groups.get": { const rows = await groupRows("WHERE g.id = $1", [payload.id]); return rows[0] ? mapGroup(rows[0]) : null; }
+    case "groups.create": {
+      await requireAdmin(user);
+      const id = await withTransaction(async (client) => {
+        const { rows } = await client.query("INSERT INTO public.grupos_trabajo (nombre, lider_id, estado) VALUES ($1,$2,$3) RETURNING id", [payload.nombre, payload.liderId || null, payload.estado || "activo"]);
+        await replaceGroupMembers(client, rows[0].id, payload.miembros || [], payload.reporterosIds || []);
+        return rows[0].id;
+      });
+      const rows = await groupRows("WHERE g.id = $1", [id]); return mapGroup(rows[0]);
+    }
+    case "groups.update": {
+      await requireAdmin(user);
+      await withTransaction(async (client) => {
+        await client.query("UPDATE public.grupos_trabajo SET nombre = COALESCE($2,nombre), lider_id = $3, estado = COALESCE($4,estado), updated_at = clock_timestamp() WHERE id = $1", [payload.id, payload.nombre, payload.liderId || null, payload.estado]);
+        await replaceGroupMembers(client, payload.id, payload.miembros || [], payload.reporterosIds || []);
+      });
+      const rows = await groupRows("WHERE g.id = $1", [payload.id]); return mapGroup(rows[0]);
+    }
+    case "groups.delete": { await requireAdmin(user); await dbQuery("UPDATE public.grupos_trabajo SET estado = 'inactivo', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
+
+    case "clients.list": return (await clientRows()).map(mapClient);
+    case "clients.get": { const rows = await clientRows("WHERE c.id = $1", [payload.id]); return rows[0] ? mapClient(rows[0]) : null; }
+    case "clients.create": {
+      await requireAdmin(user);
+      const id = await withTransaction(async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO public.clientes (nombre, identificador_fiscal, correo, correo_aliado, telefono, contacto_nombre, frecuencia_mantenimiento, estado)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+          [payload.nombre, payload.nitCedula || null, payload.correo || null, payload.correoAliado || null, payload.telefono || null, payload.contacto || null, number(payload.frecuenciaMantenimiento, 4), payload.estado || "activo"],
+        );
+        await client.query("INSERT INTO public.cliente_sedes (cliente_id, nombre, direccion, puertas_peatonales, puertas_vehiculares, estado) VALUES ($1,$2,$3,$4,$5,'activo')", [rows[0].id, payload.edificio || "Sede principal", payload.direccion || "Pendiente", number(payload.puertasPeatonales), number(payload.puertasVehiculares)]);
+        return rows[0].id;
+      });
+      const rows = await clientRows("WHERE c.id = $1", [id]); return mapClient(rows[0]);
+    }
+    case "clients.update": {
+      await requireAdmin(user);
+      await withTransaction(async (client) => {
+        await client.query(
+          `UPDATE public.clientes SET nombre = COALESCE($2,nombre), identificador_fiscal = $3, correo = $4, correo_aliado = $5,
+             telefono = $6, contacto_nombre = $7, frecuencia_mantenimiento = COALESCE($8,frecuencia_mantenimiento), estado = COALESCE($9,estado), updated_at = clock_timestamp()
+           WHERE id = $1`,
+          [payload.id, payload.nombre, payload.nitCedula || null, payload.correo || null, payload.correoAliado || null, payload.telefono || null, payload.contacto || null, payload.frecuenciaMantenimiento, payload.estado],
+        );
+        const { rows } = await client.query("SELECT id FROM public.cliente_sedes WHERE cliente_id = $1 ORDER BY created_at ASC LIMIT 1", [payload.id]);
+        if (rows[0]) await client.query("UPDATE public.cliente_sedes SET nombre = COALESCE($2,nombre), direccion = COALESCE($3,direccion), puertas_peatonales = COALESCE($4,puertas_peatonales), puertas_vehiculares = COALESCE($5,puertas_vehiculares), updated_at = clock_timestamp() WHERE id = $1", [rows[0].id, payload.edificio, payload.direccion, payload.puertasPeatonales, payload.puertasVehiculares]);
+        else await client.query("INSERT INTO public.cliente_sedes (cliente_id, nombre, direccion, puertas_peatonales, puertas_vehiculares) VALUES ($1,$2,$3,$4,$5)", [payload.id, payload.edificio || "Sede principal", payload.direccion || "Pendiente", number(payload.puertasPeatonales), number(payload.puertasVehiculares)]);
+      });
+      const rows = await clientRows("WHERE c.id = $1", [payload.id]); return mapClient(rows[0]);
+    }
+    case "clients.delete": { await requireAdmin(user); await dbQuery("UPDATE public.clientes SET estado = 'inactivo', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
+
+    case "catalog.list": {
+      const { rows } = await dbQuery(`SELECT a.*, p.valor FROM public.catalogo_actividades a LEFT JOIN LATERAL (SELECT valor FROM public.catalogo_actividad_precios WHERE actividad_id = a.id ORDER BY fecha_inicio DESC LIMIT 1) p ON true ORDER BY a.codigo`);
+      return rows.map((row) => ({ id: row.id, codigo: row.codigo, nombre: row.nombre || row.descripcion || "", categoria: row.categoria || undefined, descripcion: row.descripcion || row.nombre || "", valorEconomico: number(row.valor), estado: row.estado, historialPrecios: [], fechaCreacion: dateOnly(row.created_at) || "" }));
+    }
+    case "catalog.create": {
+      await requireAdmin(user);
+      const id = await withTransaction(async (client) => {
+        const { rows } = await client.query("INSERT INTO public.catalogo_actividades (codigo, nombre, descripcion, estado) VALUES ($1,$2,$3,$4) RETURNING id", [payload.codigo, payload.descripcion, payload.descripcion, payload.estado || "activo"]);
+        await client.query("INSERT INTO public.catalogo_actividad_precios (actividad_id, valor, fecha_inicio) VALUES ($1,$2,current_date)", [rows[0].id, number(payload.valorEconomico)]);
+        return rows[0].id;
+      });
+      return (await execute("catalog.list", {}, user) as any[]).find((item) => item.id === id);
+    }
+    case "catalog.update": {
+      await requireAdmin(user);
+      await withTransaction(async (client) => {
+        const { rows: current } = await client.query("SELECT valor FROM public.catalogo_actividad_precios WHERE actividad_id = $1 ORDER BY fecha_inicio DESC LIMIT 1", [payload.id]);
+        await client.query("UPDATE public.catalogo_actividades SET codigo = COALESCE($2,codigo), nombre = COALESCE($3,nombre), descripcion = COALESCE($3,descripcion), estado = COALESCE($4,estado), updated_at = clock_timestamp() WHERE id = $1", [payload.id, payload.codigo, payload.descripcion, payload.estado]);
+        if (payload.valorEconomico !== undefined && number(current[0]?.valor) !== number(payload.valorEconomico)) {
+          await client.query("UPDATE public.catalogo_actividad_precios SET fecha_fin = current_date - 1 WHERE actividad_id = $1 AND fecha_fin IS NULL", [payload.id]);
+          await client.query("INSERT INTO public.catalogo_actividad_precios (actividad_id, valor, fecha_inicio) VALUES ($1,$2,current_date)", [payload.id, number(payload.valorEconomico)]);
+        }
+      });
+      return (await execute("catalog.list", {}, user) as any[]).find((item) => item.id === payload.id);
+    }
+    case "catalog.delete": { await requireAdmin(user); await dbQuery("UPDATE public.catalogo_actividades SET estado = 'inactivo', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
+
+    case "config.get": return getConfig();
+    case "config.update": { await requireAdmin(user); return updateConfig(payload); }
+
+    case "periods.list": return (await periodRows()).map(mapPeriod);
+    case "periods.create": { await requireAdmin(user); const { rows } = await dbQuery("INSERT INTO public.periodos_liquidacion (fecha_inicio, fecha_fin, estado, fecha_cierre) VALUES ($1,$2,$3,$4) RETURNING *", [payload.fechaInicio, payload.fechaFin, payload.estado || "abierto", payload.estado === "cerrado" ? new Date().toISOString() : null]); return mapPeriod(rows[0]); }
+    case "periods.update": { await requireAdmin(user); const { rows } = await dbQuery("UPDATE public.periodos_liquidacion SET fecha_inicio = COALESCE($2,fecha_inicio), fecha_fin = COALESCE($3,fecha_fin), estado = COALESCE($4,estado), fecha_cierre = CASE WHEN $4 = 'cerrado' THEN COALESCE(fecha_cierre,clock_timestamp()) WHEN $4 = 'abierto' THEN NULL ELSE fecha_cierre END, updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id, payload.fechaInicio, payload.fechaFin, payload.estado]); return mapPeriod(rows[0]); }
+    case "periods.close": { await requireAdmin(user); const { rows } = await dbQuery("UPDATE public.periodos_liquidacion SET estado = 'cerrado', fecha_cierre = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id]); return mapPeriod(rows[0]); }
+    case "periods.delete": { await requireAdmin(user); await dbQuery("DELETE FROM public.periodos_liquidacion WHERE id = $1", [payload.id]); return true; }
+
+    case "contracts.list": {
+      const { rows } = await dbQuery("SELECT * FROM public.contratos_mantenimiento ORDER BY anio DESC, created_at DESC");
+      const ids = rows.map((row) => row.id);
+      const { rows: maintenanceRows } = ids.length ? await dbQuery("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = ANY($1::uuid[]) ORDER BY numero", [ids]) : { rows: [] };
+      return rows.map((row) => mapContract(row, maintenanceRows.filter((item) => item.contrato_id === row.id)));
+    }
+    case "contracts.create": { await requireAdmin(user); return createContract(payload); }
+    case "contracts.update": { await requireAdmin(user); return updateContract(payload); }
+    case "contracts.updateMaintenance": { await requireAdmin(user); const { rows } = await dbQuery("UPDATE public.mantenimientos_programados SET estado = COALESCE($2,estado), fecha_programada = COALESCE($3,fecha_programada), fecha_realizado = COALESCE($4,fecha_realizado), tecnico_principal_id = COALESCE($5,tecnico_principal_id), valor_recaudado = COALESCE($6,valor_recaudado), updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id, payload.estado === "realizado" ? "ejecutado" : payload.estado, payload.fechaProgramada, payload.fechaRealizado, payload.tecnicoId, payload.valorRecaudado]); return { id: rows[0].id, mes: number(rows[0].numero), fechaProgramada: dateOnly(rows[0].fecha_programada), fechaRealizado: dateOnly(rows[0].fecha_realizado) || undefined, tecnicoId: rows[0].tecnico_principal_id || undefined, estado: rows[0].estado === "ejecutado" ? "realizado" : rows[0].estado, valorRecaudado: number(rows[0].valor_recaudado) }; }
+    case "contracts.delete": { await requireAdmin(user); await dbQuery("UPDATE public.contratos_mantenimiento SET estado = 'cancelado', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
+
+    case "maintenances.list": {
+      // The administrator calls this action without a usuarioId and needs the
+      // complete agenda. The mobile app always sends usuarioId, so scope that
+      // response to direct assignments or maintenance assigned to the user's
+      // group leadership. An unassigned maintenance must never become visible
+      // to every employee or to all members of a group by accident.
+      const hasUserScope = Boolean(payload.usuarioId);
+      const values = hasUserScope ? [user.id] : [];
+      const scope = hasUserScope
+        ? `WHERE m.tecnico_principal_id = $1
+             OR g.lider_id = $1`
+        : "";
+      const { rows } = await dbQuery(`SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id
+        FROM public.mantenimientos_programados m
+        JOIN public.clientes c ON c.id = m.cliente_id
+        LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
+        LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+        ${scope}
+        ORDER BY m.fecha_programada DESC, m.created_at DESC`, values);
+      return rows.map(mapMaintenance);
+    }
+    case "maintenances.get": {
+      const { rows } = await dbQuery("SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id FROM public.mantenimientos_programados m JOIN public.clientes c ON c.id = m.cliente_id LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id WHERE m.id = $1", [payload.id]);
+      if (!rows[0]) return null;
+      const maintenance = mapMaintenance(rows[0]);
+      const { rows: activityRowsForMaintenance } = await dbQuery("SELECT actividad_id AS id FROM public.actividades_operativas_mantenimientos WHERE mantenimiento_programado_id = $1", [payload.id]);
+      if (activityRowsForMaintenance[0]) {
+        const activityId = activityRowsForMaintenance[0].id;
+        const { rows: participantRows } = await dbQuery("SELECT actividad_id, tecnico_id AS usuario_id, porcentaje, valor_ganado AS valor_calculado, created_at AS fecha_creacion FROM public.actividades_operativas_participantes WHERE actividad_id = $1 ORDER BY created_at", [activityId]);
+        const { rows: evidenceRows } = await dbQuery("SELECT id, actividad_id, tipo, url, orden, created_at AS fecha_subida FROM public.actividades_operativas_evidencias WHERE actividad_id = $1 ORDER BY tipo, orden", [activityId]);
+        maintenance.participantes = participantRows;
+        maintenance.fotos_antes = evidenceRows.filter((item) => item.tipo === "antes");
+        maintenance.fotos_despues = evidenceRows.filter((item) => item.tipo === "despues");
+      }
+      return maintenance;
+    }
+    case "maintenances.create": { await requireAdmin(user); return createMaintenance(payload, user); }
+    case "maintenances.update": {
+      const { rows: currentRows } = await dbQuery(
+        `SELECT m.*, g.lider_id AS mantenimiento_lider_id
+           FROM public.mantenimientos_programados m
+           LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+          WHERE m.id = $1`,
+        [payload.id],
+      );
+      const current = currentRows[0];
+      if (!current) throw new Error("No se encontró el mantenimiento que intentas actualizar.");
+
+      const isPrivileged = ["admin", "supervisor"].includes(user.rol);
+      const targetTechnicianId = payload.tecnicoId || current.tecnico_principal_id;
+      const isAssignedTechnician = current.tecnico_principal_id === user.id || targetTechnicianId === user.id;
+      const isGroupLeader = current.mantenimiento_lider_id === user.id;
+      if (!isPrivileged && !isAssignedTechnician && !isGroupLeader) {
+        throw new Error("No tienes permisos para actualizar este mantenimiento.");
+      }
+
+      const normalizedState = ["realizado", "completado"].includes(String(payload.estado)) ? "ejecutado" : payload.estado;
+      const scheduledDate = dateOnly(payload.fechaProgramada || current.fecha_programada);
+      if (normalizedState === "ejecutado" && scheduledDate !== bogotaClock().date) {
+        throw new Error(`Este mantenimiento solo se puede llenar y completar el día programado (${scheduledDate || "sin fecha"}).`);
+      }
+      const { rows } = await dbQuery("UPDATE public.mantenimientos_programados SET cliente_id = COALESCE($2,cliente_id), sede_id = COALESCE($3,sede_id), fecha_programada = COALESCE($4,fecha_programada), hora_programada = COALESCE($5,hora_programada), tecnico_principal_id = COALESCE($6,tecnico_principal_id), grupo_id = COALESCE($7,grupo_id), estado = COALESCE($8,estado), fecha_realizado = CASE WHEN $8 = 'ejecutado' THEN COALESCE(fecha_realizado,current_date) ELSE $9 END, observaciones = COALESCE($10,observaciones), tipo_pendiente = $11, descripcion_pendiente = $12, updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id, payload.clienteId, payload.sedeId, payload.fechaProgramada, payload.horaProgramada, payload.tecnicoId, payload.grupoId, normalizedState, payload.fechaCierre, payload.observaciones, payload.tipoPendiente, payload.descripcionPendiente]); return rows[0] ? mapMaintenance(rows[0]) : null;
+    }
+    case "maintenances.delete": { await requireAdmin(user); await dbQuery("UPDATE public.mantenimientos_programados SET estado = 'cancelado', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
+    case "maintenances.reports": {
+      const rows = await activityRows({});
+      return rows.filter((row) => row.tipo === "mantenimiento").map((row) => ({ id: row.id, codigoRegistro: row.codigo, mantenimientoId: row.mantenimiento_programado_id, tecnicoId: jsonArray(row.participantes)[0]?.tecnicoId || row.creado_por_id, clienteId: row.cliente_id, fotosAntes: jsonArray(row.evidencias).filter((e) => e.tipo === "antes").map((e) => e.url || e.key), fotosDespues: jsonArray(row.evidencias).filter((e) => e.tipo === "despues").map((e) => e.url || e.key), observaciones: row.observaciones || "", fechaGeneracion: row.created_at, enviado: false }));
+    }
+
+    case "activities.create": return createOperationalActivity(payload, user);
+    case "activities.addParticipant": return addOperationalParticipant(payload, user);
+    case "activities.update": return updateOperationalActivity(payload, user);
+    case "activities.finalize": return finalizeOperationalActivity(payload);
+    case "activities.byCode": {
+      const rows = await activityRows({});
+      return rows.filter((row) => row.codigo === payload.codigo).map((row) => mapReport(row, jsonArray(row.participantes)[0], 0));
+    }
+    case "reports.list": return reportRows(payload);
+    case "reports.approval": return updateApproval(payload, user);
+    case "reports.cost": return updateActivityValues(payload);
+    case "reports.clientCost": return updateActivityValues({ ...payload, clientCost: payload.value });
+    case "reports.activityBase": return updateActivityValues(payload);
+    case "reports.emailSent": return markReportEmail(payload);
+    case "reports.delete": { await requireAdmin(user); await dbQuery("UPDATE public.actividades_operativas SET estado = 'cancelada', updated_at = clock_timestamp() WHERE id = $1", [canonicalActivityId(payload.id)]); return true; }
+    case "reports.batches": {
+      const { rows } = await dbQuery("SELECT l.*, COALESCE((SELECT json_agg(lai.aprobacion_id) FROM public.lote_aprobacion_items lai WHERE lai.lote_id = l.id),'[]'::json) AS aprobaciones FROM public.lotes_aprobacion l ORDER BY l.cerrado_en DESC");
+      return rows.map((row) => ({ id: row.id, liderId: row.lider_id, grupoId: row.grupo_id, periodoId: row.periodo_id, reportesAprobados: jsonArray(row.aprobaciones), fechaCierre: dateOnly(row.cerrado_en), costoLiderPorRevision: number(row.costo_por_revision), totalRevisiones: number(row.total_revisiones), totalCostoLider: number(row.total_costo) }));
+    }
+    case "reports.accumulations": {
+      const { rows } = await dbQuery("SELECT u.id AS lider_id, p.id AS periodo_id FROM public.usuarios u CROSS JOIN public.periodos_liquidacion p WHERE u.rol = 'lider' OR EXISTS (SELECT 1 FROM public.grupos_trabajo g WHERE g.lider_id = u.id AND g.estado = 'activo') ORDER BY p.fecha_inicio DESC, u.email");
+      return Promise.all(rows.map((row) => getLeaderLiquidationSummary(row.lider_id, row.periodo_id)));
+    }
+    case "reports.leaderConfig": { await requireAdmin(user); const current = await getConfig(); await updateConfig({ ...current, porcentajeExtraLider: payload.porcentaje, extraLiderActivo: payload.activo }); return true; }
+    case "reports.saveEvidence": { await saveEvidence(payload, user); return true; }
+
+    case "arrivals.list": {
+      const values: unknown[] = [];
+      const filter = payload.usuarioId ? "WHERE r.usuario_id = $1" : "";
+      if (payload.usuarioId) values.push(payload.usuarioId);
+      const { rows } = await dbQuery(`SELECT r.*, left(r.hora_entrada_programada::text,5) AS hora_esperada, left(r.hora_entrada_real::text,5) AS hora_llegada, left(r.hora_salida_programada::text,5) AS hora_salida_programada_text, left(r.hora_salida_real::text,5) AS hora_salida_real_text FROM public.registros_asistencia r ${filter} ORDER BY r.fecha DESC, r.created_at DESC`, values);
+      return rows.map(mapArrival);
+    }
+    case "arrivals.update": {
+      await requireAdmin(user);
+      const id = payload.id;
+      // V2 derives lateness from estado_entrada; there is no legacy `tarde` column.
+      const map: Record<string, string> = {
+        mensajeEnviado: "mensaje_enviado",
+        tipoMensaje: "tipo_mensaje",
+        estadoEntrada: "estado_entrada",
+        estadoSalida: "estado_salida",
+        minutosRetraso: "minutos_retraso",
+        razonTardanza: "razon_tardanza",
+        horaLlegada: "hora_entrada_real",
+      };
+      const sets: string[] = [];
+      const values: unknown[] = [];
+      for (const [key, column] of Object.entries(map)) {
+        if (payload.updates?.[key] !== undefined) {
+          values.push(payload.updates[key]);
+          sets.push(`${column} = $${values.length}`);
+        }
+      }
+      if (sets.length) {
+        values.push(id);
+        await dbQuery(`UPDATE public.registros_asistencia SET ${sets.join(", ")}, updated_at = clock_timestamp() WHERE id = $${values.length}`, values);
+      }
+      const { rows } = await dbQuery("SELECT r.*, left(r.hora_entrada_programada::text,5) AS hora_esperada, left(r.hora_entrada_real::text,5) AS hora_llegada, left(r.hora_salida_programada::text,5) AS hora_salida_programada_text, left(r.hora_salida_real::text,5) AS hora_salida_real_text FROM public.registros_asistencia r WHERE r.id = $1", [id]);
+      let normalizedRow = rows[0];
+      if (normalizedRow) {
+        // Incluso si un administrador edita la fila, el servidor vuelve a
+        // calcular la tardanza contra el corte y no contra un valor manual.
+        const settings = await getConfig();
+        const actualMinutes = timeMinutes(String(normalizedRow.hora_entrada_real || ""));
+        const cutoffMinutes = timeMinutes(settings.horaDescuentoAutomatico);
+        if (actualMinutes != null && cutoffMinutes != null) {
+          const isLate = actualMinutes >= cutoffMinutes;
+          const percentage = isLate ? Math.max(0, Math.min(100, number(settings.porcentajeDescuentoTardanza))) : 0;
+          const refreshed = await dbQuery(
+            "UPDATE public.registros_asistencia SET estado_entrada = $2, minutos_retraso = $3, razon_tardanza = CASE WHEN $4 = true THEN razon_tardanza ELSE NULL END, descuento_aplicado = $4, porcentaje_descuento = $5, updated_at = clock_timestamp() WHERE id = $1 RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text",
+            [id, isLate ? "tarde" : "a_tiempo", isLate ? Math.max(0, actualMinutes - cutoffMinutes) : 0, isLate && percentage > 0, isLate ? percentage : 0],
+          );
+          normalizedRow = refreshed.rows[0] || normalizedRow;
+        }
+        await syncAttendanceDiscount(normalizedRow.id, normalizedRow.usuario_id, dateOnly(normalizedRow.fecha) || "", Boolean(normalizedRow.descuento_aplicado), number(normalizedRow.porcentaje_descuento));
+      }
+      return mapArrival(normalizedRow);
+    }
+    case "arrivals.ensure": return ensureArrivals(payload);
+    case "arrivals.checkin": {
+      const actual = String(payload.horaEntrada || "");
+      const scheduled = String(payload.horaEntradaProgramada || "");
+      const actualMinutes = timeMinutes(actual);
+      const fecha = payload.fecha || new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
+      const settings = await getConfig();
+      const cutoffMinutes = timeMinutes(settings.horaDescuentoAutomatico);
+      const configuredPercentage = Math.max(0, Math.min(100, number(settings.porcentajeDescuentoTardanza)));
+      // La tardanza se determina únicamente contra la hora de corte configurada.
+      // La hora programada sirve para mostrar el turno, pero no convierte una
+      // llegada a las 07:30 en tardanza si el corte está configurado a las 08:30.
+      const isLate = actualMinutes != null && cutoffMinutes != null && actualMinutes >= cutoffMinutes;
+      const delay = isLate && actualMinutes != null && cutoffMinutes != null
+        ? Math.max(0, actualMinutes - cutoffMinutes)
+        : 0;
+      const appliesDiscount = isLate && configuredPercentage > 0;
+      const discountPercentage = appliesDiscount ? configuredPercentage : 0;
+      const { rows } = await dbQuery(`INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,hora_entrada_real,estado_entrada,minutos_retraso,razon_tardanza,foto_llegada_url,ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp,ubicacion_llegada_direccion,descuento_aplicado,porcentaje_descuento) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (usuario_id,fecha) DO UPDATE SET hora_entrada_programada=EXCLUDED.hora_entrada_programada,hora_salida_programada=EXCLUDED.hora_salida_programada,hora_entrada_real=EXCLUDED.hora_entrada_real,estado_entrada=EXCLUDED.estado_entrada,minutos_retraso=EXCLUDED.minutos_retraso,razon_tardanza=EXCLUDED.razon_tardanza,foto_llegada_url=EXCLUDED.foto_llegada_url,ubicacion_llegada_precision_metros=EXCLUDED.ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp=EXCLUDED.ubicacion_llegada_timestamp,ubicacion_llegada_direccion=EXCLUDED.ubicacion_llegada_direccion,descuento_aplicado=EXCLUDED.descuento_aplicado,porcentaje_descuento=EXCLUDED.porcentaje_descuento,updated_at=clock_timestamp() RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text`, [user.id, fecha, scheduled, payload.horaSalidaProgramada || "", actual, isLate ? "tarde" : "a_tiempo", delay, isLate ? (payload.razonTardanza || null) : null, payload.fotoLlegadaUrl || null, payload.ubicacionLlegada?.accuracy || null, payload.ubicacionLlegada?.capturedAt || null, payload.ubicacionLlegada?.address || null, appliesDiscount, discountPercentage]);
+      await syncAttendanceDiscount(rows[0].id, user.id, fecha, appliesDiscount, discountPercentage);
+      return mapArrival(rows[0]);
+    }
+    case "arrivals.checkout": {
+      const fecha = payload.fecha || new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
+      const { rows } = await dbQuery("UPDATE public.registros_asistencia SET hora_salida_real = $1, estado_salida = CASE WHEN $2 = true THEN 'salida_anticipada' ELSE 'normal' END, razon_salida_anticipada = $3, updated_at = clock_timestamp() WHERE usuario_id = $4 AND fecha = $5 RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text", [payload.horaSalida, Boolean(payload.salidaAnticipada), payload.razonSalidaAnticipada || null, user.id, fecha]);
+      return rows[0] ? mapArrival(rows[0]) : null;
+    }
+
+    case "notifications.list": { const values: unknown[] = []; const filter = payload.usuarioId ? "WHERE usuario_id = $1" : ""; if (payload.usuarioId) values.push(payload.usuarioId); const { rows } = await dbQuery(`SELECT * FROM public.notificaciones ${filter} ORDER BY created_at DESC`, values); return rows.map(mapNotification); }
+    case "notifications.create": { const { rows } = await dbQuery("INSERT INTO public.notificaciones (usuario_id, titulo, mensaje, tipo, metadata) VALUES ($1,$2,$3,$4,$5) RETURNING *", [payload.usuarioId, payload.titulo, payload.mensaje, payload.tipo === "mantenimiento" ? "mantenimiento" : payload.tipo === "liquidacion" ? "liquidacion" : payload.tipo === "aprobacion" ? "aprobacion" : payload.tipo === "visit" ? "visita" : payload.tipo === "attendance" ? "asistencia" : "general", payload.datos || {}]); return mapNotification(rows[0]); }
+    case "notifications.bulk": { for (const item of jsonArray(payload.items)) await execute("notifications.create", item, user); return true; }
+    case "notifications.read": { await dbQuery("UPDATE public.notificaciones SET leida_en = COALESCE(leida_en, clock_timestamp()) WHERE id = $1", [payload.id]); return true; }
+
+    case "liquidation.periodEntries": {
+      const { rows } = await dbQuery("SELECT * FROM public.v_liquidacion_tecnico ORDER BY fecha_operacion DESC");
+      const byActivity = new Map<string, any>();
+      for (const row of rows) { const current = byActivity.get(row.actividad_id) || { id: row.actividad_id, codigoRegistro: row.codigo, actividadId: row.actividad_id, grupoId: "", lugar: row.sede_snapshot || "", fecha: dateOnly(row.fecha_operacion), fotoEvidencia: undefined, participantes: [], periodoId: row.periodo_id }; current.participantes.push({ tecnicoId: row.tecnico_id, porcentaje: number(row.porcentaje), valorCalculado: number(row.valor_ganado) }); byActivity.set(row.actividad_id, current); }
+      return [...byActivity.values()];
+    }
+    case "liquidation.items": {
+      const { rows } = await dbQuery("SELECT li.*, a.codigo, a.descripcion, a.tipo AS activity_type, a.sede_id, s.nombre AS sede_nombre FROM public.liquidacion_items li JOIN public.actividades_operativas a ON a.id = li.actividad_id LEFT JOIN public.cliente_sedes s ON s.id = a.sede_id WHERE li.tecnico_id = $1 AND li.periodo_id = $2 ORDER BY li.fecha_operacion DESC, li.created_at DESC", [payload.usuarioId || user.id, payload.periodoId]);
+      return rows.map((row) => ({ id: row.id, codigoRegistro: row.codigo, tecnicoId: row.tecnico_id, periodoId: row.periodo_id, nombreActividad: row.descripcion_snapshot, edificio: row.sede_snapshot || row.sede_nombre || "", fecha: dateOnly(row.fecha_operacion) || "", porcentaje: number(row.porcentaje), valorBase: number(row.valor_base), valorGanado: number(row.valor_ganado), valorGanadoOriginal: number(row.valor_ganado_original), descuentoTardanzaAplicado: number(row.descuento_tardanza), porcentajeDescuentoTardanzaAplicado: number(row.porcentaje_descuento_tardanza), tipo: row.tipo, estado: row.estado, referenciaId: row.actividad_id, fechaCreacion: dateOnly(row.created_at) || "" }));
+    }
+    case "liquidation.summary": {
+      const { rows } = await dbQuery(`
+        SELECT
+          COALESCE(SUM(CASE WHEN estado IN ('aprobado', 'pagado') THEN CASE WHEN tipo = 'recorrido' THEN valor_ganado_original ELSE valor_ganado END ELSE 0 END), 0) AS approved,
+          COALESCE(SUM(valor_ganado) FILTER (WHERE estado = 'pendiente' AND tipo <> 'recorrido'), 0) AS pending,
+          COALESCE(SUM(valor_ganado_original), 0) AS gross,
+          COALESCE(SUM(descuento_tardanza) FILTER (WHERE estado IN ('aprobado', 'pagado') AND tipo <> 'recorrido'), 0) AS discounts,
+          COALESCE(SUM(valor_ganado_original) FILTER (WHERE tipo = 'recorrido' AND estado <> 'anulado'), 0) AS routes
+        FROM public.liquidacion_items
+        WHERE tecnico_id = $1 AND periodo_id = $2`, [payload.usuarioId || user.id, payload.periodoId]);
+      const row = rows[0] || {};
+      const approved = number(row.approved);
+      const pending = number(row.pending);
+      const discounts = number(row.discounts);
+      const { rows: periodRows } = await dbQuery("SELECT fecha_inicio, fecha_fin FROM public.periodos_liquidacion WHERE id = $1", [payload.periodoId]);
+      const { rows: tardinessRows } = periodRows[0]
+        ? await dbQuery("SELECT fecha, porcentaje_descuento, minutos_retraso, razon_tardanza FROM public.registros_asistencia WHERE usuario_id = $1 AND fecha BETWEEN $2 AND $3 AND descuento_aplicado = true AND estado_entrada = 'tarde' ORDER BY fecha", [payload.usuarioId || user.id, periodRows[0].fecha_inicio, periodRows[0].fecha_fin])
+        : { rows: [] };
+      const tardinessPercentage = Math.min(100, tardinessRows.reduce((max, item) => Math.max(max, number(item.porcentaje_descuento)), 0));
+      return {
+        totalAprobadoGenerado: approved,
+        totalPendienteGenerado: pending,
+        totalRecorridos: number(row.routes),
+        totalAcumuladoBruto: number(row.gross),
+        totalMultasTardanza: discounts,
+        totalPorcentajeDescuentoTardanza: tardinessPercentage,
+        tardanzas: tardinessRows.map((item) => ({ fecha: dateOnly(item.fecha) || "", porcentaje: number(item.porcentaje_descuento), minutos_retraso: number(item.minutos_retraso), razon_tardanza: item.razon_tardanza || undefined })),
+        totalAcumulado: approved + pending,
+        totalAPagar: Math.max(0, approved),
+      };
+    }
+    case "liquidation.leader": {
+      return getLeaderLiquidationSummary(payload.liderId || user.id, payload.periodoId);
+    }
+    case "cleanup.preview": return cleanupPreview(payload);
+    case "cleanup.execute": return cleanupExecute(payload);
+    default: throw new Error(`Operación de datos no soportada: ${action}`);
+  }
+}
+
+async function replaceGroupMembers(client: any, groupId: string, memberIds: string[], reporterIds: string[]) {
+  await client.query("DELETE FROM public.grupo_miembros WHERE grupo_id = $1", [groupId]);
+  await client.query("DELETE FROM public.grupo_reportadores_actividad WHERE grupo_id = $1", [groupId]);
+  for (const id of [...new Set(memberIds.filter(Boolean))]) await client.query("INSERT INTO public.grupo_miembros (grupo_id, usuario_id) VALUES ($1,$2)", [groupId, id]);
+  for (const id of [...new Set(reporterIds.filter(Boolean))]) await client.query("INSERT INTO public.grupo_reportadores_actividad (grupo_id, usuario_id) VALUES ($1,$2)", [groupId, id]);
+}
+
+function configDefaults(): any {
+  return { nombre: "SOLUCIONES & AUTOMATIZACIONES S.A.S.", logo: "/logo.png", correoRemitente: "notificaciones@solucionesyautomatizaciones.com", correoEmpresa: "solucionesyautomatizaciones@hotmail.com", plantillaReportePDF: "default", porcentajeDescuentoTardanza: 0, diasDescuentoAutomatico: ["lunes", "martes", "miercoles", "jueves", "viernes"], horaDescuentoAutomatico: "", porcentajeExtraLider: 10, extraLiderActivo: true, costoRevisionLider: 0, costoVisitaTecnicaDefault: 0, costoRecorridoNormal: 0, costoRecorridoHerramienta: 0 };
+}
+
+function mapConfig(row: any): any {
+  const defaults = configDefaults();
+  const days = jsonArray(row.dias_descuento_automatico).map((day) => numberToDay[number(day)]).filter(Boolean);
+  return { ...defaults, nombre: row.nombre || defaults.nombre, logo: row.logo_url || defaults.logo, correoRemitente: row.correo_remitente || defaults.correoRemitente, correoEmpresa: row.correo_empresa || defaults.correoEmpresa, plantillaReportePDF: row.plantilla_reporte || defaults.plantillaReportePDF, porcentajeDescuentoTardanza: number(row.porcentaje_descuento_tardanza, defaults.porcentajeDescuentoTardanza), diasDescuentoAutomatico: days.length ? days : defaults.diasDescuentoAutomatico, horaDescuentoAutomatico: row.hora_descuento_automatico ? String(row.hora_descuento_automatico).slice(0, 5) : defaults.horaDescuentoAutomatico, porcentajeExtraLider: number(row.porcentaje_extra_lider, defaults.porcentajeExtraLider), extraLiderActivo: row.extra_lider_activo ?? defaults.extraLiderActivo, costoRevisionLider: number(row.costo_revision_lider), costoVisitaTecnicaDefault: number(row.costo_visita_tecnica_default), costoRecorridoNormal: number(row.costo_recorrido_normal), costoRecorridoHerramienta: number(row.costo_recorrido_herramienta) };
+}
+
+async function getConfig() { const { rows } = await dbQuery("SELECT * FROM public.configuracion_empresa WHERE id = 1"); return rows[0] ? mapConfig(rows[0]) : configDefaults(); }
+
+async function getLeaderLiquidationSummary(liderId: string, periodoId: string) {
+  const { rows: personalRows } = await dbQuery(
+    `SELECT
+       COALESCE(SUM(CASE WHEN li.estado IN ('aprobado', 'pagado') THEN CASE WHEN li.tipo = 'recorrido' THEN li.valor_ganado_original ELSE li.valor_ganado END ELSE 0 END), 0) AS total_aprobado,
+       COALESCE(SUM(li.valor_ganado) FILTER (WHERE li.estado = 'pendiente' AND li.tipo <> 'recorrido'), 0) AS total_pendiente,
+       COALESCE(SUM(li.valor_ganado_original) FILTER (WHERE li.tipo = 'recorrido' AND li.estado <> 'anulado'), 0) AS total_recorridos,
+       COALESCE(SUM(li.valor_ganado_original), 0) AS total_bruto,
+       COALESCE(SUM(li.descuento_tardanza) FILTER (WHERE li.tipo <> 'recorrido'), 0) AS total_descuentos
+       FROM public.liquidacion_items li
+      WHERE li.tecnico_id = $1 AND li.periodo_id = $2`,
+    [liderId, periodoId],
+  );
+  const { rows: groupRows } = await dbQuery("SELECT id FROM public.grupos_trabajo WHERE lider_id = $1 AND estado = 'activo' ORDER BY created_at LIMIT 1", [liderId]);
+  const settings = await getConfig();
+  let extraLider = 0;
+  if (groupRows[0] && settings.extraLiderActivo && number(settings.porcentajeExtraLider) > 0) {
+    const { rows: extraRows } = await dbQuery(
+      `SELECT COALESCE(SUM(li.valor_ganado), 0) AS base_extra
+         FROM public.liquidacion_items li
+         JOIN public.actividades_operativas a ON a.id = li.actividad_id
+        WHERE li.periodo_id = $1
+          AND a.grupo_id = $2
+          AND li.tecnico_id <> $3
+          AND li.tipo <> 'recorrido'
+          AND li.estado IN ('aprobado', 'pagado')`,
+      [periodoId, groupRows[0].id, liderId],
+    );
+    extraLider = roundCurrency(number(extraRows[0]?.base_extra) * number(settings.porcentajeExtraLider) / 100);
+  }
+  const row = personalRows[0] || {};
+  return {
+    id: `${liderId}:${periodoId}`,
+    liderId,
+    periodoId,
+    totalAprobadoPago: number(row.total_aprobado),
+    totalPendientePago: number(row.total_pendiente),
+    extraLider,
+    totalRecorridos: number(row.total_recorridos),
+    totalAcumulado: number(row.total_aprobado) + number(row.total_pendiente),
+    totalAcumuladoBruto: number(row.total_bruto),
+    totalDescuentosTardanza: number(row.total_descuentos),
+    porcentajeExtraLiderAplicado: settings.extraLiderActivo ? number(settings.porcentajeExtraLider) : 0,
+    extraLiderActivo: Boolean(settings.extraLiderActivo),
+    tecnicosExcluidosExtraIds: [],
+  };
+}
+
+async function updateConfig(payload: Payload) {
+  const current = await getConfig();
+  const settings = { ...current, ...payload };
+  const days = jsonArray(settings.diasDescuentoAutomatico).map((day) => dayToNumber[String(day)]).filter(Boolean);
+  const cutoff = String(settings.horaDescuentoAutomatico || "").slice(0, 5);
+  if (timeMinutes(cutoff) == null) throw new Error("Debes configurar una hora de corte válida para los descuentos automáticos.");
+  const values = [settings.nombre, settings.logo || null, settings.correoRemitente, settings.correoEmpresa || null, settings.plantillaReportePDF || "default", settings.porcentajeDescuentoTardanza, days.length ? days : [1, 2, 3, 4, 5], cutoff, settings.porcentajeExtraLider, settings.extraLiderActivo, settings.costoRevisionLider, settings.costoVisitaTecnicaDefault, settings.costoRecorridoNormal, settings.costoRecorridoHerramienta];
+  const { rows } = await dbQuery(`INSERT INTO public.configuracion_empresa (id,nombre,logo_url,correo_remitente,correo_empresa,plantilla_reporte,dias_descuento_automatico, hora_descuento_automatico, porcentaje_descuento_tardanza, porcentaje_extra_lider, extra_lider_activo, costo_revision_lider, costo_visita_tecnica_default, costo_recorrido_normal, costo_recorrido_herramienta) VALUES (1,$1,$2,$3,$4,$5,$7,$8,$6,$9,$10,$11,$12,$13,$14) ON CONFLICT (id) DO UPDATE SET nombre=EXCLUDED.nombre, logo_url=EXCLUDED.logo_url, correo_remitente=EXCLUDED.correo_remitente, correo_empresa=EXCLUDED.correo_empresa, plantilla_reporte=EXCLUDED.plantilla_reporte, dias_descuento_automatico=EXCLUDED.dias_descuento_automatico, hora_descuento_automatico=EXCLUDED.hora_descuento_automatico, porcentaje_descuento_tardanza=EXCLUDED.porcentaje_descuento_tardanza, porcentaje_extra_lider=EXCLUDED.porcentaje_extra_lider, extra_lider_activo=EXCLUDED.extra_lider_activo, costo_revision_lider=EXCLUDED.costo_revision_lider, costo_visita_tecnica_default=EXCLUDED.costo_visita_tecnica_default, costo_recorrido_normal=EXCLUDED.costo_recorrido_normal, costo_recorrido_herramienta=EXCLUDED.costo_recorrido_herramienta, updated_at=clock_timestamp() RETURNING *`, values);
+  return mapConfig(rows[0]);
+}
+
+async function createContract(payload: Payload) {
+  if (!payload.clienteId || !payload.anio || !payload.cantidadMantenimientos) throw new Error("El contrato requiere cliente, año y cantidad de mantenimientos.");
+  const id = await withTransaction(async (client) => {
+    const { rows } = await client.query(`INSERT INTO public.contratos_mantenimiento (cliente_id,anio,mes_inicio,dia_inicio,puertas_peatonales,puertas_vehiculares,valor_puerta_peatonal,valor_puerta_vehicular,costo_total_anual,cantidad_mantenimientos,costo_por_mantenimiento,frecuencia_meses,estado) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`, [payload.clienteId, payload.anio, payload.mesInicio || 1, payload.diaInicio || 1, number(payload.puertasPeatonales), number(payload.puertasVehiculares), number(payload.valorPuertaPeatonal), number(payload.valorPuertaVehicular), number(payload.costoTotalAnual), number(payload.cantidadMantenimientos), number(payload.costoPorMantenimiento), number(payload.frecuenciaMeses, Math.max(1, Math.floor(12 / number(payload.cantidadMantenimientos, 1)))), payload.estado || "activo"]);
+    await insertContractMaintenances(client, rows[0].id, payload);
+    return rows[0].id;
+  });
+  const { rows } = await dbQuery("SELECT * FROM public.contratos_mantenimiento WHERE id = $1", [id]);
+  const { rows: maintenanceRows } = await dbQuery("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = $1 ORDER BY numero", [id]);
+  return mapContract(rows[0], maintenanceRows);
+}
+
+async function insertContractMaintenances(client: any, contractId: string, payload: Payload) {
+  const supplied = jsonArray(payload.mantenimientosRealizados);
+  const count = number(payload.cantidadMantenimientos, supplied.length);
+  const list = supplied.length ? supplied : Array.from({ length: count }, (_, index) => {
+    const offset = index * Math.max(1, Math.floor(12 / Math.max(count, 1)));
+    const monthIndex = number(payload.mesInicio, 1) - 1 + offset;
+    const year = number(payload.anio) + Math.floor(monthIndex / 12);
+    const month = (monthIndex % 12) + 1;
+    return { mes: index + 1, fechaProgramada: `${year}-${String(month).padStart(2, "0")}-${String(Math.min(number(payload.diaInicio, 1), 28)).padStart(2, "0")}`, estado: "pendiente" };
+  });
+  for (let index = 0; index < list.length; index += 1) {
+    const item = list[index];
+    await client.query("INSERT INTO public.mantenimientos_programados (contrato_id, cliente_id, numero, fecha_programada, tecnico_principal_id, estado, valor_recaudado) VALUES ($1,$2,$3,$4,$5,$6,$7)", [contractId, payload.clienteId, number(item.mes, index + 1), item.fechaProgramada, item.tecnicoId || null, item.estado === "realizado" ? "ejecutado" : item.estado || "pendiente", number(item.valorRecaudado)]);
+  }
+}
+
+async function updateContract(payload: Payload) {
+  await withTransaction(async (client) => {
+    await client.query("UPDATE public.contratos_mantenimiento SET cliente_id=COALESCE($2,cliente_id), anio=COALESCE($3,anio), mes_inicio=COALESCE($4,mes_inicio), dia_inicio=COALESCE($5,dia_inicio), puertas_peatonales=COALESCE($6,puertas_peatonales), puertas_vehiculares=COALESCE($7,puertas_vehiculares), valor_puerta_peatonal=COALESCE($8,valor_puerta_peatonal), valor_puerta_vehicular=COALESCE($9,valor_puerta_vehicular), costo_total_anual=COALESCE($10,costo_total_anual), cantidad_mantenimientos=COALESCE($11,cantidad_mantenimientos), costo_por_mantenimiento=COALESCE($12,costo_por_mantenimiento), estado=COALESCE($13,estado), updated_at=clock_timestamp() WHERE id=$1", [payload.id,payload.clienteId,payload.anio,payload.mesInicio,payload.diaInicio,payload.puertasPeatonales,payload.puertasVehiculares,payload.valorPuertaPeatonal,payload.valorPuertaVehicular,payload.costoTotalAnual,payload.cantidadMantenimientos,payload.costoPorMantenimiento,payload.estado]);
+    if (payload.regenerarMantenimientos) { await client.query("DELETE FROM public.mantenimientos_programados WHERE contrato_id = $1 AND estado = 'pendiente'", [payload.id]); await insertContractMaintenances(client, payload.id, payload); }
+  });
+  const { rows } = await dbQuery("SELECT * FROM public.contratos_mantenimiento WHERE id = $1", [payload.id]);
+  const { rows: maintenanceRows } = await dbQuery("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = $1 ORDER BY numero", [payload.id]);
+  return mapContract(rows[0], maintenanceRows);
+}
+
+async function createMaintenance(payload: Payload, user: UserContext) {
+  const clientId = payload.clienteId;
+  if (!clientId || !payload.fechaProgramada) throw new Error("El mantenimiento requiere cliente y fecha.");
+  const { rows } = await dbQuery("INSERT INTO public.mantenimientos_programados (contrato_id, cliente_id, sede_id, numero, fecha_programada, hora_programada, grupo_id, tecnico_principal_id, costo_tecnico_presupuestado, estado, observaciones, tipo_pendiente, descripcion_pendiente, valor_recaudado) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *", [payload.contratoId || null, clientId, payload.sedeId || null, number(payload.numero, 1), payload.fechaProgramada, payload.horaProgramada || null, payload.grupoId || null, payload.tecnicoId || user.id, number(payload.costoTecnicoTotal || payload.costoActividad), payload.estado === "realizado" ? "ejecutado" : payload.estado || "pendiente", payload.observaciones || null, payload.tipoPendiente || null, payload.descripcionPendiente || null, number(payload.valorRecaudado)]);
+  return mapMaintenance(rows[0]);
+}
+
+async function updateActivityValues(payload: Payload) {
+  const id = canonicalActivityId(payload.id || payload.actividadOperativaId);
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  const set = (column: string, value: unknown) => { values.push(value); fields.push(`${column} = $${values.length}`); };
+  if (payload.value !== undefined) set(payload.clientCost !== undefined ? "valor_cliente" : "valor_aplicado", number(payload.value));
+  if (payload.costoActividad !== undefined) set("valor_aplicado", number(payload.costoActividad));
+  if (payload.valorSugerido !== undefined) set("valor_sugerido", payload.valorSugerido == null ? null : number(payload.valorSugerido));
+  if (payload.motivoModificacionValor !== undefined) set("motivo_modificacion_valor", payload.motivoModificacionValor || null);
+  if (fields.length === 0) return true;
+  values.push(id);
+  await dbQuery(`UPDATE public.actividades_operativas SET ${fields.join(", ")}, updated_at = clock_timestamp(), version = version + 1 WHERE id = $${values.length}`, values);
+  return true;
+}
+
+async function updateApproval(payload: Payload, user: UserContext) {
+  const activityId = canonicalActivityId(payload.id || payload.actividadOperativaId);
+  const participantId = payload.participanteId || canonicalParticipantId(payload.id);
+  const { rows: participantRows } = await dbQuery("SELECT id FROM public.actividades_operativas_participantes WHERE actividad_id = $1 AND ($2::uuid IS NULL OR id = $2::uuid) ORDER BY rol_participacion = 'principal' DESC LIMIT 1", [activityId, participantId || null]);
+  const participant = participantRows[0];
+  if (!participant) throw new Error("No se encontró el participante de la actividad.");
+  const state = payload.estado === "aprobado" ? "aprobada" : payload.estado === "rechazado" ? "rechazada" : "pendiente";
+  await dbQuery(
+    `INSERT INTO public.actividades_operativas_aprobaciones (actividad_id, participante_id, revisor_id, estado, comentario, revisado_en)
+     VALUES ($1,$2,$3,$4,$5,CASE WHEN $4 = 'pendiente' THEN NULL ELSE clock_timestamp() END)
+     ON CONFLICT (actividad_id, participante_id) DO UPDATE SET revisor_id=EXCLUDED.revisor_id, estado=EXCLUDED.estado, comentario=EXCLUDED.comentario, revisado_en=EXCLUDED.revisado_en, updated_at=clock_timestamp()`,
+    [activityId, participant.id, user.id, state, payload.comentario || null],
+  );
+  await dbQuery("UPDATE public.actividades_operativas SET estado = CASE WHEN $2 = 'aprobada' THEN 'aprobada' WHEN $2 = 'rechazada' THEN 'rechazada' ELSE 'pendiente_aprobacion' END, updated_at = clock_timestamp() WHERE id = $1", [activityId, state]);
+  await dbQuery("UPDATE public.liquidacion_items SET estado = CASE WHEN $2 = 'aprobada' THEN 'aprobado' WHEN $2 = 'rechazada' THEN 'anulado' ELSE 'pendiente' END, updated_at = clock_timestamp() WHERE actividad_id = $1 AND participante_id = $3", [activityId, state, participant.id]);
+  return true;
+}
+
+async function markReportEmail(payload: Payload) {
+  const id = canonicalActivityId(payload.id);
+  await dbQuery("UPDATE public.actividades_operativas SET metadata = metadata || $2::jsonb, updated_at = clock_timestamp() WHERE id = $1", [id, JSON.stringify({ correoEnviado: true, fechaUltimoEnvioCorreo: payload.sentAt || new Date().toISOString() })]);
+  return true;
+}
+
+async function createOperationalActivity(payload: Payload, user: UserContext) {
+  const type = String(payload.tipo || "actividad");
+  if (!["actividad", "mantenimiento", "visita_tecnica", "recorrido"].includes(type)) {
+    throw new Error("Tipo de actividad no válido.");
+  }
+
+  const key = String(payload.claveIdempotencia || payload.clave_idempotencia || `${type}:${payload.codigo || ""}:${payload.fechaOperacion || ""}`).trim();
+  if (!key) throw new Error("La actividad requiere una clave de idempotencia.");
+
+  const existing = await dbQuery(
+    "SELECT id, codigo FROM public.actividades_operativas WHERE clave_idempotencia = $1 LIMIT 1",
+    [key],
+  );
+  if (existing.rows[0]) return { activityId: existing.rows[0].id, codigo: existing.rows[0].codigo, reused: true };
+
+  const participants = jsonArray(payload.participantes || payload.participants);
+  if (!participants.length) throw new Error("La actividad requiere al menos un participante.");
+  const totalPercentage = participants.reduce((sum, item) => sum + number(item.porcentaje), 0);
+  if (totalPercentage > 100.01 || (!payload.deferSubmission && Math.abs(totalPercentage - 100) > 0.01)) throw new Error("La suma de porcentajes de los participantes debe ser 100%.");
+
+  const valorBase = Math.max(0, number(payload.valorBase));
+  const valorAplicado = Math.max(0, number(payload.valorAplicado ?? valorBase));
+  const rawValorSugerido = payload.valorSugerido == null ? null : Number(payload.valorSugerido);
+  if (rawValorSugerido !== null && (!Number.isFinite(rawValorSugerido) || rawValorSugerido < 0)) {
+    throw new Error("El valor sugerido debe ser un número mayor o igual a cero.");
+  }
+  const motivoModificacionValor = String(payload.motivoModificacionValor || "").trim();
+  const tieneValorSugeridoDiferente = rawValorSugerido !== null && Math.abs(rawValorSugerido - valorBase) > 0.01;
+  if (tieneValorSugeridoDiferente && !motivoModificacionValor) {
+    throw new Error("Una sugerencia de valor diferente requiere una razón.");
+  }
+  const valorSugerido = tieneValorSugeridoDiferente ? rawValorSugerido : null;
+
+  let activityId: string;
+  try {
+    activityId = await withTransaction(async (client) => {
+    let sedeId = payload.sedeId || null;
+    if (!sedeId) {
+      const { rows } = await client.query("SELECT id FROM public.cliente_sedes WHERE cliente_id = $1 AND estado = 'activo' ORDER BY created_at LIMIT 1", [payload.clienteId]);
+      sedeId = rows[0]?.id || null;
+    }
+    if (type !== "recorrido" && !sedeId) throw new Error("El cliente no tiene una sede activa.");
+
+    let grupoId = payload.grupoId || null;
+    if (!grupoId) {
+      const { rows } = await client.query(
+        `SELECT gm.grupo_id
+           FROM public.grupo_miembros gm
+          WHERE gm.usuario_id = $1 AND gm.fecha_inicio <= $2::date
+            AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= $2::date)
+          ORDER BY gm.fecha_inicio DESC LIMIT 1`,
+        [user.id, payload.fechaOperacion],
+      );
+      grupoId = rows[0]?.grupo_id || null;
+    }
+    if (!grupoId) throw new Error("La actividad requiere un grupo de trabajo.");
+
+    const { rows: groupRowsForLeader } = await client.query("SELECT lider_id FROM public.grupos_trabajo WHERE id = $1", [grupoId]);
+    const leaderId = groupRowsForLeader[0]?.lider_id || user.id;
+    const { rows: activityRowsResult } = await client.query(
+      `INSERT INTO public.actividades_operativas
+        (codigo, clave_idempotencia, origen, tipo, estado, cliente_id, sede_id, grupo_id, creado_por_id,
+         fecha_operacion, fecha_inicio, fecha_fin, descripcion, observaciones, valor_base, valor_sugerido,
+         valor_aplicado, valor_cliente, motivo_modificacion_valor, costo_administrable, metadata)
+       VALUES (COALESCE($1, public.new_activity_code()),$2,$3,$4,'borrador',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+       RETURNING id, codigo`,
+      [
+        payload.codigo || undefined,
+        key,
+        payload.origen || "app",
+        type,
+        payload.clienteId,
+        sedeId,
+        grupoId,
+        user.id,
+        payload.fechaOperacion,
+        payload.fechaInicio || null,
+        payload.fechaFin || null,
+        payload.descripcion || "Actividad operativa",
+        payload.observaciones || null,
+        valorBase,
+        valorSugerido,
+        valorAplicado,
+        payload.valorCliente == null ? null : number(payload.valorCliente),
+        valorSugerido == null ? null : motivoModificacionValor,
+        Boolean(payload.costoAdministrable),
+        payload.metadata || {},
+      ],
+    );
+    const row = activityRowsResult[0];
+
+    if (type === "actividad") {
+      if (!payload.catalogoActividadId) throw new Error("La actividad requiere un elemento del catálogo.");
+      await client.query("INSERT INTO public.actividades_operativas_catalogo (actividad_id, catalogo_actividad_id, especificacion) VALUES ($1,$2,$3)", [row.id, payload.catalogoActividadId, payload.especificacion || null]);
+    } else if (type === "mantenimiento") {
+      await client.query("INSERT INTO public.actividades_operativas_mantenimientos (actividad_id, mantenimiento_programado_id, titulo, prioridad, tipo_pendiente, descripcion_pendiente, receptor_nombre, firmado) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [row.id, payload.mantenimientoProgramadoId || null, payload.titulo || payload.descripcion || null, payload.prioridad || null, payload.tipoPendiente || null, payload.descripcionPendiente || null, payload.receptorNombre || null, Boolean(payload.firmado)]);
+    } else if (type === "visita_tecnica") {
+      await client.query("INSERT INTO public.actividades_operativas_visitas (actividad_id, tipo_visita, receptor_nombre, receptor_cedula, receptor_cargo, firmado) VALUES ($1,$2,$3,$4,$5,$6)", [row.id, payload.tipoVisita || "imprevisto", payload.receptorNombre || null, payload.receptorCedula || null, payload.receptorCargo || null, Boolean(payload.firmado)]);
+    } else {
+      await client.query("INSERT INTO public.actividades_operativas_recorridos (actividad_id, punto_partida, punto_llegada, tipo_recorrido, inicio_recorrido, fin_recorrido) VALUES ($1,$2,$3,$4,$5,$6)", [row.id, payload.puntoPartida || "", payload.puntoLlegada || "", payload.tipoRecorrido || "normal", payload.fechaInicio || null, payload.fechaFin || null]);
+    }
+
+    for (let index = 0; index < participants.length; index += 1) {
+      const item = participants[index];
+      const percentage = number(item.porcentaje);
+      const valueBase = Math.max(0, number(item.valorBase ?? valorBase));
+      const valueEarned = Math.max(0, number(item.valorGanado ?? (valorAplicado * percentage / 100)));
+      const { rows: participantRowsResult } = await client.query(
+        `INSERT INTO public.actividades_operativas_participantes (actividad_id, tecnico_id, rol_participacion, porcentaje, valor_base, valor_ganado)
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+        [row.id, item.tecnicoId || item.tecnico_id, item.rol || (index === 0 ? "principal" : "acompanante"), percentage, valueBase, valueEarned],
+      );
+      const participantId = participantRowsResult[0].id;
+      await client.query(
+        `INSERT INTO public.actividades_operativas_aprobaciones (actividad_id, participante_id, revisor_id, estado)
+         VALUES ($1,$2,$3,'pendiente')`,
+        [row.id, participantId, leaderId],
+      );
+
+      if (payload.periodoId) {
+        await client.query(
+          `INSERT INTO public.liquidacion_items
+            (periodo_id, actividad_id, participante_id, tecnico_id, fecha_operacion, tipo, porcentaje,
+             valor_base, valor_ganado, valor_ganado_original, estado, descripcion_snapshot, sede_snapshot)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,'pendiente',$10,$11)
+           ON CONFLICT (periodo_id, actividad_id, participante_id) DO NOTHING`,
+          [payload.periodoId, row.id, participantId, item.tecnicoId || item.tecnico_id, payload.fechaOperacion, type, percentage, valueBase, valueEarned, payload.descripcion || "Actividad operativa", payload.sedeNombre || null],
+        );
+      }
+    }
+
+    if (jsonArray(payload.evidencias).length) {
+      for (const evidence of jsonArray(payload.evidencias)) {
+        await client.query(
+          `INSERT INTO public.actividades_operativas_evidencias (actividad_id, tipo, storage_bucket, storage_key, url, orden, subido_por_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (storage_bucket, storage_key) DO UPDATE SET url = EXCLUDED.url, actividad_id = EXCLUDED.actividad_id`,
+          [row.id, evidence.tipo || "general", evidence.bucket || "fotos-reportes", evidence.key || evidence.url, evidence.url || null, number(evidence.orden), user.id],
+        );
+      }
+    }
+
+    if (!payload.deferSubmission) await client.query("UPDATE public.actividades_operativas SET estado = 'pendiente_aprobacion' WHERE id = $1", [row.id]);
+      return row.id;
+    });
+  } catch (error: any) {
+    // Two taps, a network retry, or a duplicated mobile request can race
+    // between the initial idempotency lookup and the INSERT. In that case
+    // the first transaction is the canonical report; reuse it instead of
+    // exposing PostgreSQL's generic duplicate-key error to the app.
+    if (error?.code !== "23505") throw error;
+    const { rows: existingAfterRace } = await dbQuery(
+      `SELECT a.id, a.codigo
+         FROM public.actividades_operativas a
+         LEFT JOIN public.actividades_operativas_mantenimientos am ON am.actividad_id = a.id
+        WHERE a.clave_idempotencia = $1
+           OR ($2::uuid IS NOT NULL AND am.mantenimiento_programado_id = $2::uuid)
+        ORDER BY a.created_at ASC
+        LIMIT 1`,
+      [key, payload.mantenimientoProgramadoId || null],
+    );
+    if (!existingAfterRace[0]) throw error;
+    await syncActivityAttendanceDiscounts(existingAfterRace[0].id);
+    return { activityId: existingAfterRace[0].id, codigo: existingAfterRace[0].codigo, reused: true };
+  }
+
+  await syncActivityAttendanceDiscounts(activityId);
+  const { rows } = await dbQuery("SELECT id, codigo FROM public.actividades_operativas WHERE id = $1", [activityId]);
+  return { activityId, codigo: rows[0]?.codigo, reused: false };
+}
+
+async function addOperationalParticipant(payload: Payload, user: UserContext) {
+  const activityId = canonicalActivityId(payload.actividadOperativaId || payload.activityId || payload.id);
+  if (!activityId || !payload.tecnicoId) throw new Error("Actividad y técnico son obligatorios.");
+  const result = await withTransaction(async (client) => {
+    const { rows: activityRowsResult } = await client.query("SELECT id, grupo_id, fecha_operacion, valor_base, valor_aplicado, descripcion, sede_id FROM public.actividades_operativas WHERE id = $1", [activityId]);
+    const activity = activityRowsResult[0];
+    if (!activity) throw new Error("No se encontró la actividad.");
+    const { rows: existsRows } = await client.query("SELECT id FROM public.actividades_operativas_participantes WHERE actividad_id = $1 AND tecnico_id = $2", [activityId, payload.tecnicoId]);
+    if (existsRows[0]) return { activityId, participantId: existsRows[0].id };
+    const { rows: leaderRows } = await client.query("SELECT lider_id FROM public.grupos_trabajo WHERE id = $1", [activity.grupo_id]);
+    const { rows: participantRows } = await client.query("INSERT INTO public.actividades_operativas_participantes (actividad_id, tecnico_id, rol_participacion, porcentaje, valor_base, valor_ganado) VALUES ($1,$2,'acompanante',$3,$4,$5) RETURNING id", [activityId, payload.tecnicoId, number(payload.porcentaje), number(payload.valorBase ?? activity.valor_base), number(payload.valorGanado ?? (number(activity.valor_aplicado) * number(payload.porcentaje) / 100))]);
+    await client.query("INSERT INTO public.actividades_operativas_aprobaciones (actividad_id, participante_id, revisor_id, estado) VALUES ($1,$2,$3,'pendiente')", [activityId, participantRows[0].id, leaderRows[0]?.lider_id || user.id]);
+    if (payload.periodoId) await client.query("INSERT INTO public.liquidacion_items (periodo_id, actividad_id, participante_id, tecnico_id, fecha_operacion, tipo, porcentaje, valor_base, valor_ganado, valor_ganado_original, estado, descripcion_snapshot) VALUES ($1,$2,$3,$4,$5,(SELECT tipo FROM public.actividades_operativas WHERE id = $2),$6,$7,$8,$8,'pendiente',$9) ON CONFLICT DO NOTHING", [payload.periodoId, activityId, participantRows[0].id, payload.tecnicoId, activity.fecha_operacion, number(payload.porcentaje), number(payload.valorBase ?? activity.valor_base), number(payload.valorGanado ?? (number(activity.valor_aplicado) * number(payload.porcentaje) / 100)), activity.descripcion]);
+    return { activityId, participantId: participantRows[0].id };
+  });
+  await syncActivityAttendanceDiscounts(result.activityId);
+  return result;
+}
+
+async function updateOperationalActivity(payload: Payload, user: UserContext) {
+  const id = canonicalActivityId(payload.id || payload.actividadOperativaId);
+  const updates: Array<[string, unknown]> = [];
+  if (payload.observaciones !== undefined) updates.push(["observaciones", payload.observaciones]);
+  if (payload.descripcion !== undefined) updates.push(["descripcion", payload.descripcion]);
+  if (payload.valorCliente !== undefined) updates.push(["valor_cliente", payload.valorCliente]);
+  if (payload.valorSugerido !== undefined) updates.push(["valor_sugerido", payload.valorSugerido]);
+  if (payload.motivoModificacionValor !== undefined) updates.push(["motivo_modificacion_valor", payload.motivoModificacionValor]);
+  if (payload.metadata !== undefined) updates.push(["metadata", JSON.stringify(payload.metadata)]);
+  if (payload.firmado !== undefined) {
+    await dbQuery("UPDATE public.actividades_operativas_visitas SET firmado = $1 WHERE actividad_id = $2", [Boolean(payload.firmado), id]);
+  }
+  if (!updates.length) return true;
+  const values: unknown[] = [];
+  const sets = updates.map(([column, value]) => { values.push(value); return column === "metadata" ? `${column} = metadata || $${values.length}::jsonb` : `${column} = $${values.length}`; });
+  values.push(id);
+  const scope = ["admin", "supervisor"].includes(user.rol) ? `id = $${values.length}` : `id = $${values.length} AND creado_por_id = $${values.length + 1}`;
+  await dbQuery(`UPDATE public.actividades_operativas SET ${sets.join(", ")}, updated_at = clock_timestamp(), version = version + 1 WHERE ${scope}`, [ ...values, ...(["admin", "supervisor"].includes(user.rol) ? [] : [user.id]) ]);
+  return true;
+}
+
+async function finalizeOperationalActivity(payload: Payload) {
+  const id = canonicalActivityId(payload.id || payload.actividadOperativaId || payload.activityId);
+  await dbQuery("UPDATE public.actividades_operativas SET estado = 'pendiente_aprobacion', updated_at = clock_timestamp(), version = version + 1 WHERE id = $1", [id]);
+  return true;
+}
+
+async function saveEvidence(payload: Payload, user: UserContext) {
+  const activityId = canonicalActivityId(payload.actividadId || payload.id);
+  await dbQuery("INSERT INTO public.actividades_operativas_evidencias (actividad_id, tipo, storage_bucket, storage_key, url, orden, subido_por_id) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (storage_bucket,storage_key) DO UPDATE SET url=EXCLUDED.url, actividad_id=EXCLUDED.actividad_id", [activityId, payload.tipo || "general", payload.bucket, payload.key, payload.url || null, number(payload.orden), user.id]);
+}
+
+function mapArrival(row: any): any {
+  return {
+    id: row.id,
+    usuarioId: row.usuario_id,
+    fecha: dateOnly(row.fecha) || "",
+    horaEsperada: row.hora_esperada || "",
+    horaLlegada: row.hora_llegada || "",
+    horaSalidaProgramada: row.hora_salida_programada_text || undefined,
+    horaSalidaReal: row.hora_salida_real_text || undefined,
+    estadoEntrada: row.estado_entrada,
+    estadoSalida: row.estado_salida,
+    // Compatibility field for the UI; derived from the canonical V2 status.
+    tarde: row.estado_entrada === "tarde",
+    minutosRetraso: number(row.minutos_retraso),
+    razonTardanza: row.razon_tardanza || undefined,
+    fotoLlegadaUrl: row.foto_llegada_url || undefined,
+    ubicacionLlegadaPrecisionMetros: row.ubicacion_llegada_precision_metros == null ? undefined : number(row.ubicacion_llegada_precision_metros),
+    ubicacionLlegadaTimestamp: row.ubicacion_llegada_timestamp || undefined,
+    ubicacionLlegadaDireccion: row.ubicacion_llegada_direccion || undefined,
+    mensajeEnviado: row.mensaje_enviado || undefined,
+    tipoMensaje: row.tipo_mensaje || undefined,
+    descuentoAplicado: Boolean(row.descuento_aplicado),
+    porcentajeDescuento: number(row.porcentaje_descuento),
+    fechaCreacion: dateOnly(row.created_at) || "",
+  };
+}
+
+async function syncAttendanceDiscount(attendanceId: string, technicianId: string, fecha: string, applies: boolean, percentage: number) {
+  const { rows: periodRows } = await dbQuery(
+    "SELECT id FROM public.periodos_liquidacion WHERE fecha_inicio <= $1::date AND fecha_fin >= $1::date ORDER BY fecha_inicio DESC LIMIT 1",
+    [fecha],
+  );
+  const periodId = periodRows[0]?.id;
+  if (!periodId) return;
+
+  const normalizedPercentage = Math.max(0, Math.min(100, number(percentage)));
+  if (!applies || normalizedPercentage <= 0) {
+    await dbQuery("DELETE FROM public.asistencia_descuentos WHERE asistencia_id = $1 AND periodo_id = $2", [attendanceId, periodId]);
+    await dbQuery(
+      "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND porcentaje_descuento_tardanza > 0",
+      [technicianId, periodId],
+    );
+    await dbQuery(
+      "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo = 'recorrido' AND (descuento_tardanza > 0 OR porcentaje_descuento_tardanza > 0)",
+      [technicianId, periodId],
+    );
+    return;
+  }
+
+  // Recalculate from the original value so repeated check-ins or admin edits
+  // never compound the same discount.
+  await dbQuery(
+    `UPDATE public.liquidacion_items
+        SET descuento_tardanza = ROUND(valor_ganado_original * $3 / 100, 2),
+            valor_ganado = ROUND(valor_ganado_original * (1 - $3 / 100), 2),
+            porcentaje_descuento_tardanza = $3,
+            updated_at = clock_timestamp()
+      WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND estado <> 'anulado'`,
+    [technicianId, periodId, normalizedPercentage],
+  );
+  await dbQuery(
+    "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo = 'recorrido' AND estado <> 'anulado'",
+    [technicianId, periodId],
+  );
+  const { rows: discountRows } = await dbQuery(
+    "SELECT COALESCE(SUM(descuento_tardanza), 0) AS value FROM public.liquidacion_items WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND estado <> 'anulado'",
+    [technicianId, periodId],
+  );
+  await dbQuery(
+    `INSERT INTO public.asistencia_descuentos (asistencia_id, periodo_id, tecnico_id, porcentaje, valor)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (asistencia_id, periodo_id) DO UPDATE SET porcentaje = EXCLUDED.porcentaje, valor = EXCLUDED.valor, aplicado_en = clock_timestamp()`,
+    [attendanceId, periodId, technicianId, normalizedPercentage, roundCurrency(number(discountRows[0]?.value))],
+  );
+}
+
+async function syncActivityAttendanceDiscounts(activityId: string) {
+  const { rows } = await dbQuery(
+    `SELECT a.fecha_operacion, p.tecnico_id, r.id AS asistencia_id,
+            r.descuento_aplicado, r.porcentaje_descuento
+       FROM public.actividades_operativas a
+       JOIN public.actividades_operativas_participantes p ON p.actividad_id = a.id
+       LEFT JOIN public.registros_asistencia r
+         ON r.usuario_id = p.tecnico_id AND r.fecha = a.fecha_operacion
+      WHERE a.id = $1`,
+    [activityId],
+  );
+  for (const row of rows) {
+    if (!row.asistencia_id) continue;
+    await syncAttendanceDiscount(
+      row.asistencia_id,
+      row.tecnico_id,
+      dateOnly(row.fecha_operacion) || "",
+      Boolean(row.descuento_aplicado),
+      number(row.porcentaje_descuento),
+    );
+  }
+}
+
+async function ensureArrivals(payload: Payload) {
+  const users = jsonArray(payload.users).filter((item) => item.estado === "activo" && item.rol !== "admin");
+  const fecha = payload.fecha || new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
+  const currentDay = new Date(`${fecha}T12:00:00-05:00`).getUTCDay() || 7;
+  const settings = await getConfig();
+  const cutoff = String(payload.horaCorte || settings.horaDescuentoAutomatico || "").slice(0, 5);
+  const cutoffMinutes = timeMinutes(cutoff);
+  if (cutoffMinutes == null) return 0;
+  const clock = bogotaClock();
+  if (fecha === clock.date && clock.minutes < cutoffMinutes) return 0;
+  const discountPercentage = number(payload.porcentajeDescuento, number(settings.porcentajeDescuentoTardanza));
+  const automaticDays = jsonArray(payload.automaticDays)
+    .map((item) => typeof item === "number" ? item : dayToNumber[String(item || "").toLowerCase()])
+    .filter((item) => item >= 1 && item <= 7);
+  if (automaticDays.length > 0 && !automaticDays.includes(currentDay)) return 0;
+  let changed = 0;
+  for (const item of users) {
+    const schedule = item.horarios?.find((entry: any) => {
+      const scheduleDay = typeof entry.diaSemana === "number"
+        ? entry.diaSemana
+        : dayToNumber[String(entry.diaSemana || "").toLowerCase()];
+      return entry.activo && scheduleDay === currentDay && entry.horaEntrada && entry.horaSalida;
+    });
+    if (!schedule) continue;
+    const result = await dbQuery("INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,estado_entrada,estado_salida,razon_tardanza,descuento_aplicado,porcentaje_descuento) VALUES ($1,$2,$3,$4,'no_reportado','no_reportado',$5,$6,$7) ON CONFLICT (usuario_id,fecha) DO NOTHING RETURNING id", [item.id, fecha, schedule.horaEntrada, schedule.horaSalida, `[AUTO ${cutoff}] No registró la entrada antes del corte configurado.`, discountPercentage > 0, discountPercentage]);
+    if (result.rows[0]) {
+      await syncAttendanceDiscount(result.rows[0].id, item.id, fecha, discountPercentage > 0, discountPercentage);
+      changed += 1;
+    }
+  }
+  return changed;
+}
+
+function mapNotification(row: any): any { return { id: row.id, usuarioId: row.usuario_id, titulo: row.titulo, mensaje: row.mensaje, tipo: row.tipo, leida: Boolean(row.leida_en), datos: row.metadata || undefined, fechaCreacion: dateOnly(row.created_at) || "" }; }
+
+async function cleanupPreview(payload: Payload) {
+  let startDate = payload.startDate || "1900-01-01";
+  let endDate = payload.endDate || "2999-12-31";
+  if (payload.mode === "period" && payload.periodId) {
+    const { rows } = await dbQuery("SELECT fecha_inicio, fecha_fin FROM public.periodos_liquidacion WHERE id = $1", [payload.periodId]);
+    if (rows[0]) { startDate = dateOnly(rows[0].fecha_inicio) || startDate; endDate = dateOnly(rows[0].fecha_fin) || endDate; }
+  }
+  const selected = jsonArray(payload.modules) as string[];
+  const queries: Array<{ module: string; label: string; sql: string }> = [
+    { module: "actividades_grupales", label: "Actividades operativas", sql: "SELECT COUNT(*)::int AS n FROM public.actividades_operativas WHERE fecha_operacion BETWEEN $1 AND $2 AND estado <> 'cancelada'" },
+    { module: "mantenimientos_preventivos", label: "Mantenimientos programados", sql: "SELECT COUNT(*)::int AS n FROM public.mantenimientos_programados WHERE fecha_programada BETWEEN $1 AND $2 AND estado <> 'cancelado'" },
+    { module: "visitas_tecnicas", label: "Visitas técnicas", sql: "SELECT COUNT(*)::int AS n FROM public.actividades_operativas WHERE tipo = 'visita_tecnica' AND fecha_operacion BETWEEN $1 AND $2 AND estado <> 'cancelada'" },
+    { module: "recorridos", label: "Recorridos", sql: "SELECT COUNT(*)::int AS n FROM public.actividades_operativas WHERE tipo = 'recorrido' AND fecha_operacion BETWEEN $1 AND $2 AND estado <> 'cancelada'" },
+    { module: "aprobaciones", label: "Aprobaciones", sql: "SELECT COUNT(*)::int AS n FROM public.actividades_operativas_aprobaciones WHERE created_at::date BETWEEN $1 AND $2" },
+    { module: "liquidacion", label: "Liquidación", sql: "SELECT COUNT(*)::int AS n FROM public.liquidacion_items WHERE fecha_operacion BETWEEN $1 AND $2" },
+    { module: "asistencia", label: "Asistencia", sql: "SELECT COUNT(*)::int AS n FROM public.registros_asistencia WHERE fecha BETWEEN $1 AND $2" },
+    { module: "notificaciones", label: "Notificaciones", sql: "SELECT COUNT(*)::int AS n FROM public.notificaciones WHERE created_at::date BETWEEN $1 AND $2" },
+  ];
+  const items = [];
+  for (const query of queries) {
+    if (!selected.includes(query.module)) continue;
+    const { rows } = await dbQuery(query.sql, [startDate, endDate]);
+    const count = number(rows[0]?.n);
+    items.push({ id: query.module, module: query.module, label: query.label, primaryCount: count, relatedCount: 0, details: [count ? `${count} registros en el rango seleccionado.` : "No hay registros en el rango seleccionado."] });
+  }
+  const { rows: matchedPeriods } = await dbQuery("SELECT id, fecha_inicio, fecha_fin, estado FROM public.periodos_liquidacion WHERE fecha_fin >= $1 AND fecha_inicio <= $2 ORDER BY fecha_inicio", [startDate, endDate]);
+  const total = items.reduce((sum, item) => sum + item.primaryCount + item.relatedCount, 0);
+  return { total, range: { startDate, endDate }, items, counts: Object.fromEntries(items.map((item) => [item.module, item.primaryCount])), matchedPeriods: matchedPeriods.map((period) => ({ id: period.id, fechaInicio: dateOnly(period.fecha_inicio) || "", fechaFin: dateOnly(period.fecha_fin) || "", estado: period.estado })), warnings: ["La depuración V2 conserva la actividad mediante estado cancelada; no elimina la entidad operativa canónica."] };
+}
+
+async function cleanupExecute(payload: Payload) {
+  const preview = await cleanupPreview(payload);
+  const deletedCounts: Record<string, number> = {};
+  if (jsonArray(payload.modules).includes("actividades_grupales")) {
+    const result = await dbQuery("UPDATE public.actividades_operativas SET estado = 'cancelada', updated_at = clock_timestamp() WHERE fecha_operacion BETWEEN $1 AND $2 AND estado <> 'cancelada'", [preview.range.startDate, preview.range.endDate]);
+    deletedCounts.actividades = result.rowCount || 0;
+  }
+  if (jsonArray(payload.modules).includes("notificaciones")) {
+    const result = await dbQuery("DELETE FROM public.notificaciones WHERE created_at::date BETWEEN $1 AND $2", [preview.range.startDate, preview.range.endDate]);
+    deletedCounts.notificaciones = result.rowCount || 0;
+  }
+  return { success: true, range: preview.range, deletedCounts: { mantenimientos_preventivos: 0, visitas_tecnicas: 0, recorridos: 0, grouped: deletedCounts.actividades || 0, approvals: 0, liquidations: 0, asistencia: 0, notificaciones: deletedCounts.notificaciones || 0 }, deletedPeriods: 0, errors: [] };
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const user = await getAuthenticatedUser(request);
+    if (!user) return NextResponse.json({ error: "Sesión no válida." }, { status: 401 });
+    const body = await request.json();
+    const data = await execute(String(body?.action || ""), (body?.payload || {}) as Payload, user);
+    return NextResponse.json({ data });
+  } catch (error: any) {
+    console.error("Error en API de datos V2:", error);
+    const message = error?.code === "23505" ? "Ya existe un registro con esos datos." : error?.code === "23503" ? "La operación referencia datos inexistentes o protegidos." : error?.code === "23P01" ? "El rango de fechas se cruza con otro registro." : error?.message || "Error interno de datos.";
+    return NextResponse.json({ error: message }, { status: 400 });
+  }
+}

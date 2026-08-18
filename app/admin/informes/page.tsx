@@ -66,13 +66,13 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { ActivityReport, User, Client, WorkGroup, CompanySettings, LiquidationPeriod, MaintenanceContract } from "@/lib/types";
-import { deleteReporteActividadAdmin, getReportesActividad, markReporteActividadEmailSent, updateCostoActividadAdmin, updateCostoClienteVisitaAdmin } from "@/lib/supabase/services/reportes-actividad";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
-import { getClientes } from "@/lib/supabase/services/clientes";
-import { getGrupos } from "@/lib/supabase/services/grupos";
-import { getConfiguracion } from "@/lib/supabase/services/configuracion";
-import { getContratos } from "@/lib/supabase/services/contratos";
-import { getPeriodos } from "@/lib/supabase/services/liquidacion";
+import { deleteReporteActividadAdmin, getReportesActividad, markReporteActividadEmailSent, updateCostoActividadAdmin, updateCostoClienteVisitaAdmin } from "@/lib/data/services/reportes-actividad";
+import { getUsuarios } from "@/lib/data/services/usuarios";
+import { getClientes } from "@/lib/data/services/clientes";
+import { getGrupos } from "@/lib/data/services/grupos";
+import { getConfiguracion } from "@/lib/data/services/configuracion";
+import { getContratos } from "@/lib/data/services/contratos";
+import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
 import { filterPreventiveMirrorReports } from "@/lib/utils/report-filters";
@@ -271,6 +271,10 @@ function getGroupActivitySpecification(report: ActivityReport) {
 }
 
 function getGroupActivityUiIdentity(report: ActivityReport) {
+  const composedActivityId = report.id.includes(":") ? report.id.split(":")[0] : undefined;
+  const activityId = report.registroActividadId || report.codigoRegistro || composedActivityId;
+  if (activityId) return `group-ui:${activityId}`;
+
   return [
     "group-ui",
     report.fecha,
@@ -430,7 +434,7 @@ function scoreTechnicianScopedReport(report: ActivityReport) {
 
   if ((report.fotosAntes?.length || 0) + (report.fotosDespues?.length || 0) > 0) score += 8;
   if (report.fotoBitacora) score += 6;
-  if (report.firmaReceptor) score += 3;
+  if (report.firmaReceptor || report.firmado) score += 3;
   if (report.datosReceptor?.nombre) score += 3;
   if (normalizeSearchValue(report.descripcion) && normalizeSearchValue(report.descripcion) !== "sin novedad") score += 2;
   if (normalizeSearchValue(report.observaciones) && normalizeSearchValue(report.observaciones) !== "sin novedad") score += 2;
@@ -1810,6 +1814,7 @@ export default function InformesPage() {
       normalizeSearchValue(client?.nombre),
       normalizeSearchValue(group?.nombre),
       normalizeSearchValue(report.fecha),
+      normalizeSearchValue(report.codigoRegistro),
       normalizeSearchValue(report.descripcion),
       normalizeSearchValue(report.especificacion),
     ];
@@ -1929,8 +1934,10 @@ export default function InformesPage() {
   }, [grupoFilter, matchesActivitySearch]);
 
   const groupedPreventivos = useMemo(
-    () => buildGroupedActivityRows(preventivos).filter((row) => row.reports.some((r) => r.esHistoricoContrato || getEvidenceCount(r) > 0)),
-    [buildGroupedActivityRows, preventivos, getEvidenceCount]
+    // Reports are useful even before evidence is uploaded; incomplete evidence
+    // should be shown and marked in the detail, not removed from the report list.
+    () => buildGroupedActivityRows(preventivos),
+    [buildGroupedActivityRows, preventivos]
   );
   const groupedVisitas = useMemo(() => buildGroupedActivityRows(visitas), [buildGroupedActivityRows, visitas]);
   const groupedGrupales = useMemo(() => buildGroupedActivityRows(grupales), [buildGroupedActivityRows, grupales]);
@@ -2753,7 +2760,7 @@ export default function InformesPage() {
           <div className="relative flex-1 max-w-sm">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Buscar..."
+              placeholder="Buscar por código, cliente, grupo, descripción o fecha..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               disabled={!hasSelectedPeriod}
@@ -4137,7 +4144,7 @@ export default function InformesPage() {
                     </div>
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                       <p className="text-xs text-muted-foreground">Firma receptor</p>
-                      <p className="text-sm font-medium text-foreground">{activeDetailReport.firmaReceptor ? "Registrada" : "No registrada"}</p>
+                        <p className="text-sm font-medium text-foreground">{activeDetailReport.firmaReceptor || activeDetailReport.firmado ? "Registrada" : "No registrada"}</p>
                     </div>
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                       <p className="text-xs text-muted-foreground">Fotos evidencias</p>

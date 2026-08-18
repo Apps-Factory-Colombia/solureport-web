@@ -50,8 +50,8 @@ import {
   Loader2,
 } from "lucide-react";
 import { Client } from "@/lib/types";
-import { getClientes, createCliente, updateCliente, deleteCliente } from "@/lib/supabase/services/clientes";
-import { getMantenimientos } from "@/lib/supabase/services/mantenimientos";
+import { getClientes, createCliente, updateCliente, deleteCliente } from "@/lib/data/services/clientes";
+import { getMantenimientos } from "@/lib/data/services/mantenimientos";
 import { Maintenance } from "@/lib/types";
 import { cn } from "@/lib/utils";
 

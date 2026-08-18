@@ -54,11 +54,11 @@ import {
   X,
 } from "lucide-react";
 import { LeaderAccumulation, LiquidationPeriod, LeaderApprovalBatch, ActivityReport, User, WorkGroup, CompanySettings } from "@/lib/types";
-import { getAcumulacionesLider, getLotesAprobacion, getReportesActividad, upsertConfiguracionExtraLider } from "@/lib/supabase/services/reportes-actividad";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
-import { getGrupos } from "@/lib/supabase/services/grupos";
-import { getPeriodos } from "@/lib/supabase/services/liquidacion";
-import { getConfiguracion } from "@/lib/supabase/services/configuracion";
+import { getAcumulacionesLider, getLotesAprobacion, getReportesActividad, upsertConfiguracionExtraLider } from "@/lib/data/services/reportes-actividad";
+import { getUsuarios } from "@/lib/data/services/usuarios";
+import { getGrupos } from "@/lib/data/services/grupos";
+import { getPeriodos } from "@/lib/data/services/liquidacion";
+import { getConfiguracion } from "@/lib/data/services/configuracion";
 import { cn } from "@/lib/utils";
 
 function formatCurrency(value: number) {

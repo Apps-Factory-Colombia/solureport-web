@@ -21,12 +21,13 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { SCHEDULE_DAYS, UserScheduleEditor } from "@/components/usuarios/user-schedule-editor";
+import { Loader2 } from "lucide-react";
 
 interface UserDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   user?: User | null;
-  onSave: (user: Partial<User> & { password?: string; horarios?: UserScheduleDraft[] }) => void;
+  onSave: (user: Partial<User> & { password?: string; horarios?: UserScheduleDraft[] }) => Promise<void> | void;
 }
 
 function buildDefaultHorarios(user?: User | null): UserScheduleDraft[] {
@@ -58,6 +59,9 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
     horarios: buildDefaultHorarios(),
     password: "",
   });
+  const [passwordError, setPasswordError] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   useEffect(() => {
     if (user) {
@@ -91,12 +95,26 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
         password: "",
       });
     }
+    setPasswordError("");
+    setSaveError("");
+    setIsSaving(false);
   }, [user, open]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSaving) return;
 
-    const shouldSendSchedules = formData.rol === "tecnico" || formData.rol === "lider";
+    const passwordIsInvalid = !user
+      ? formData.password.length < 8
+      : formData.password.length > 0 && formData.password.length < 8;
+    if (passwordIsInvalid) {
+      setPasswordError("La contraseña debe tener al menos 8 caracteres.");
+      return;
+    }
+    setPasswordError("");
+    setSaveError("");
+
+    const shouldSendSchedules = formData.rol === "tecnico" || formData.rol === "lider" || formData.rol === "supervisor";
     const activeSchedules = formData.horarios.filter((horario) => horario.activo);
 
     if (shouldSendSchedules) {
@@ -129,18 +147,36 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
       delete payload.password;
     }
 
-    onSave(payload);
-    onOpenChange(false);
+    setIsSaving(true);
+    try {
+      await onSave(payload);
+      onOpenChange(false);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "No se pudo guardar el usuario.");
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!isSaving) onOpenChange(nextOpen); }}>
       <DialogContent className="bg-card border-border sm:max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-foreground">
             {user ? "Editar Usuario" : "Nuevo Usuario"}
           </DialogTitle>
         </DialogHeader>
+        {isSaving && (
+          <div className="flex items-center gap-2 rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold" role="status" aria-live="polite">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>{user ? "Actualizando usuario…" : "Creando usuario…"}</span>
+          </div>
+        )}
+        {saveError && (
+          <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300" role="alert">
+            {saveError}
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
@@ -197,18 +233,22 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
             <Input
               type="password"
               value={formData.password}
-              onChange={(e) =>
-                setFormData({ ...formData, password: e.target.value })
-              }
-              className="bg-secondary/50 border-border/50"
-              placeholder={user ? "Dejar en blanco para mantener la actual" : "Mínimo 6 caracteres"}
-              minLength={6}
+              onChange={(e) => {
+                const password = e.target.value;
+                setFormData({ ...formData, password });
+                setPasswordError(password.length > 0 && password.length < 8 ? "La contraseña debe tener al menos 8 caracteres." : "");
+              }}
+              className={`bg-secondary/50 border-border/50${passwordError ? " border-red-500" : ""}`}
+              placeholder={user ? "Dejar en blanco para mantener la actual" : "Mínimo 8 caracteres"}
+              minLength={8}
               required={!user}
+              aria-invalid={Boolean(passwordError)}
+              aria-describedby="user-password-help"
             />
-            <p className="text-xs text-muted-foreground">
-              {user
-                ? "Solo se actualiza si escribes una nueva contraseña"
-                : "La contraseña debe tener al menos 6 caracteres"}
+            <p id="user-password-help" className={`text-xs ${passwordError ? "text-red-400" : "text-muted-foreground"}`} role={passwordError ? "alert" : undefined}>
+              {passwordError || (user
+                ? "Solo se actualiza si escribes una nueva contraseña. Si la cambias, debe tener al menos 8 caracteres."
+                : "La contraseña debe tener al menos 8 caracteres.")}
             </p>
           </div>
 
@@ -221,7 +261,8 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
                   setFormData({
                     ...formData,
                     rol: value,
-                    esLider: value === "lider" ? true : formData.esLider,
+                    esLider: value === "lider" ? true : value === "supervisor" || value === "admin" ? false : formData.esLider,
+                    esSupervisor: value === "supervisor",
                   })
                 }
               >
@@ -232,6 +273,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
                   <SelectItem value="admin">Administrador</SelectItem>
                   <SelectItem value="lider">Líder</SelectItem>
                   <SelectItem value="tecnico">Técnico</SelectItem>
+                  <SelectItem value="supervisor">Supervisor</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -254,7 +296,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
             </div>
           </div>
 
-          {(formData.rol === "tecnico" || formData.rol === "lider") && (
+          {formData.rol !== "admin" && (
             <div className="space-y-3">
               <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 p-3">
                 <div>
@@ -280,7 +322,11 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
                 <Switch
                   checked={formData.esSupervisor}
                   onCheckedChange={(checked) =>
-                    setFormData({ ...formData, esSupervisor: checked })
+                    setFormData({
+                      ...formData,
+                      rol: checked ? "supervisor" : "tecnico",
+                      esSupervisor: checked,
+                    })
                   }
                 />
               </div>
@@ -327,6 +373,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
               type="button"
               variant="ghost"
               onClick={() => onOpenChange(false)}
+              disabled={isSaving}
               className="text-muted-foreground"
             >
               Cancelar
@@ -334,8 +381,11 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
             <Button
               type="submit"
               className="bg-gold hover:bg-gold-dark text-background font-semibold"
+              disabled={isSaving}
             >
-              {user ? "Guardar Cambios" : "Crear Usuario"}
+              {isSaving ? (
+                <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" />{user ? "Actualizando…" : "Creando…"}</span>
+              ) : user ? "Guardar Cambios" : "Crear Usuario"}
             </Button>
           </DialogFooter>
         </form>

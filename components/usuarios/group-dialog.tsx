@@ -66,11 +66,11 @@ function GroupDialogForm({
   const activeUsers = availableTechnicians.filter((user) => user.estado === "activo");
 
   const leaderOptions = activeUsers.filter(
-    (user) => user.rol === "lider" || user.esLider
+    (user) => user.rol === "lider" || user.rol === "supervisor" || user.esLider
   );
 
   const memberOptions = activeUsers.filter(
-    (user) => user.rol === "tecnico" || user.rol === "lider" || user.esLider
+    (user) => user.rol === "tecnico" || user.rol === "lider" || user.rol === "supervisor" || user.esLider
   );
 
   const filteredMemberOptions = memberOptions.filter((user) => {
@@ -156,14 +156,14 @@ function GroupDialogForm({
   };
 
   return (
-    <form onSubmit={handleSubmit} className="flex max-h-[85vh] flex-col overflow-hidden">
+    <form onSubmit={handleSubmit} className="flex min-h-0 max-h-[85vh] flex-1 flex-col overflow-hidden">
       <DialogHeader>
         <DialogTitle className="text-foreground">
           {group ? "Editar Grupo" : "Nuevo Grupo de Trabajo"}
         </DialogTitle>
       </DialogHeader>
 
-      <ScrollArea className="mt-4 flex-1 pr-4">
+      <ScrollArea className="mt-4 min-h-0 flex-1 pr-4">
         <div className="space-y-5 pb-4">
           <div className="grid gap-4 md:grid-cols-[minmax(0,1.1fr)_minmax(280px,0.9fr)]">
             <div className="space-y-2 rounded-xl border border-border/50 bg-secondary/20 p-4">
@@ -322,7 +322,7 @@ function GroupDialogForm({
         </div>
       </ScrollArea>
 
-      <DialogFooter className="mt-4 border-t border-border/50 pt-4">
+      <DialogFooter className="sticky bottom-0 z-10 mt-4 shrink-0 border-t border-border/50 bg-card pt-4">
         <Button
           type="button"
           variant="ghost"
@@ -352,7 +352,7 @@ export function GroupDialog({
 }: GroupDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-card border-border sm:max-w-5xl">
+      <DialogContent className="flex max-h-[90vh] min-h-0 flex-col overflow-hidden bg-card border-border sm:max-w-5xl">
         <GroupDialogForm
           key={`${group?.id || "new"}-${open ? "open" : "closed"}`}
           group={group}

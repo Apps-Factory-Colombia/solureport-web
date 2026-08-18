@@ -2,8 +2,8 @@
 
 import { useMemo, useState, useEffect } from "react";
 import { Maintenance, MaintenanceParticipant, MaintenanceStatus, Client, User } from "@/lib/types";
-import { getClientes } from "@/lib/supabase/services/clientes";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
+import { getClientes } from "@/lib/data/services/clientes";
+import { getUsuarios } from "@/lib/data/services/usuarios";
 import {
   Dialog,
   DialogContent,

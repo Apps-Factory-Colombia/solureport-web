@@ -45,7 +45,7 @@ import {
   History,
 } from "lucide-react";
 import { Activity } from "@/lib/types";
-import { getActividades, createActividad, updateActividad, deleteActividad } from "@/lib/supabase/services/actividades";
+import { getActividades, createActividad, updateActividad, deleteActividad } from "@/lib/data/services/actividades";
 import { cn } from "@/lib/utils";
 
 function formatCurrency(value: number) {

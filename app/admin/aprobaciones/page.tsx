@@ -61,14 +61,14 @@ import {
   updateCostoActividadAdmin,
   updateCostoClienteVisitaAdmin,
   updateEstadoAprobacion,
-} from "@/lib/supabase/services/reportes-actividad";
-import { getUsuarios } from "@/lib/supabase/services/usuarios";
-import { getClientes } from "@/lib/supabase/services/clientes";
-import { getContratos } from "@/lib/supabase/services/contratos";
-import { getGrupos } from "@/lib/supabase/services/grupos";
-import { getConfiguracion, updateConfiguracion } from "@/lib/supabase/services/configuracion";
-import { createNotificacion } from "@/lib/supabase/services/notificaciones";
-import { getPeriodos } from "@/lib/supabase/services/liquidacion";
+} from "@/lib/data/services/reportes-actividad";
+import { getUsuarios } from "@/lib/data/services/usuarios";
+import { getClientes } from "@/lib/data/services/clientes";
+import { getContratos } from "@/lib/data/services/contratos";
+import { getGrupos } from "@/lib/data/services/grupos";
+import { getConfiguracion, updateConfiguracion } from "@/lib/data/services/configuracion";
+import { createNotificacion } from "@/lib/data/services/notificaciones";
+import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
 import { filterPreventiveMirrorReports } from "@/lib/utils/report-filters";
@@ -186,9 +186,11 @@ function normalizeSearchValue(value?: string | null) {
 }
 
 function getGroupActivityUiIdentity(report: ActivityReport) {
+  const composedActivityId = report.id.includes(":") ? report.id.split(":")[0] : undefined;
+  const activityId = report.registroActividadId || report.codigoRegistro || composedActivityId || report.id;
   return [
     "group-ui-id",
-    report.id,
+    activityId,
   ].join("|");
 }
 
@@ -309,7 +311,8 @@ function usesSharedBasePricing(report: ActivityReport) {
 
 function getGroupActivityIdentity(report: ActivityReport) {
   if (!isGroupActivity(report)) return report.id;
-  return `group:${report.id}`;
+  const composedActivityId = report.id.includes(":") ? report.id.split(":")[0] : report.id;
+  return `group:${report.registroActividadId || report.codigoRegistro || composedActivityId}`;
 }
 
 function getReportRegistrationCode(report: ActivityReport) {
@@ -649,6 +652,7 @@ export default function AprobacionesPage() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [processingLabel, setProcessingLabel] = useState<string | null>(null);
   const [editableCost, setEditableCost] = useState("");
   const [sharedParticipantDrafts, setSharedParticipantDrafts] = useState<SharedParticipantDraft[]>([]);
   const [savingCost, setSavingCost] = useState(false);
@@ -1565,6 +1569,7 @@ export default function AprobacionesPage() {
 
   const handleApprove = useCallback(async (report: ActivityReport) => {
     setProcessing(true);
+    setProcessingLabel("Aprobando actividad..." );
     try {
       if (usesSharedBasePricing(report) && selectedReport?.id === report.id && !sharedParticipantsDraftSummary.canSave) {
         alert("Antes de aprobar, el reparto técnico debe sumar el 100% y coincidir con el costo total.");
@@ -1612,11 +1617,13 @@ export default function AprobacionesPage() {
       console.error("Error aprobando:", err);
     } finally {
       setProcessing(false);
+      setProcessingLabel(null);
     }
   }, [applySharedGroupBaseToReport, costDraft, getEditableValueForReport, getSharedReportsForReport, persistCost, selectedReport, sendApprovalEmail, sharedParticipantsDraftSummary, updateReportStatusInState]);
 
   const handleReject = useCallback(async (report: ActivityReport) => {
     setProcessing(true);
+    setProcessingLabel("Rechazando actividad..." );
     try {
       if (usesSharedBasePricing(report) && selectedReport?.id === report.id && !sharedParticipantsDraftSummary.canSave) {
         alert("Antes de rechazar, deja el reparto técnico consistente con el costo total para evitar inconsistencias.");
@@ -1659,11 +1666,13 @@ export default function AprobacionesPage() {
       console.error("Error rechazando:", err);
     } finally {
       setProcessing(false);
+      setProcessingLabel(null);
     }
   }, [applySharedGroupBaseToReport, costDraft, getEditableValueForReport, getSharedReportsForReport, persistCost, selectedReport, sharedParticipantsDraftSummary, updateReportStatusInState]);
 
   const handleReactivate = useCallback(async (report: ActivityReport) => {
     setProcessing(true);
+    setProcessingLabel("Revirtiendo aprobación..." );
     try {
       const targets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
       await Promise.all(targets.map(async (item) => {
@@ -1676,6 +1685,7 @@ export default function AprobacionesPage() {
       console.error("Error reactivando actividad:", err);
     } finally {
       setProcessing(false);
+      setProcessingLabel(null);
     }
   }, [getSharedReportsForReport, updateReportStatusInState]);
 
@@ -1684,6 +1694,8 @@ export default function AprobacionesPage() {
     if (!confirmed) return;
 
     setDeletingReportId(report.id);
+    setProcessing(true);
+    setProcessingLabel("Eliminando actividad..." );
     try {
       const targets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
       for (const item of targets) {
@@ -1700,6 +1712,8 @@ export default function AprobacionesPage() {
       alert("No se pudo eliminar la actividad. Intenta nuevamente.");
     } finally {
       setDeletingReportId(null);
+      setProcessing(false);
+      setProcessingLabel(null);
     }
   }, [getSharedReportsForReport, selectedReport]);
 
@@ -1786,7 +1800,9 @@ export default function AprobacionesPage() {
     });
   }, [getActivityTotalForReport, getParticipantName, periodScopedReports]);
   const preventivos = useMemo(
-    () => groupedReports.filter((row) => row.tipo === "mantenimiento_preventivo" && row.reports.some((r) => (r.fotosAntes?.length || 0) + (r.fotosDespues?.length || 0) + (r.fotoBitacora ? 1 : 0) > 0)),
+    // An approval record must remain visible even when evidence is incomplete;
+    // hiding it made valid V2 maintenance approvals look as if they did not exist.
+    () => groupedReports.filter((row) => row.tipo === "mantenimiento_preventivo"),
     [groupedReports]
   );
   const visitas = useMemo(
@@ -1818,6 +1834,7 @@ export default function AprobacionesPage() {
           normalizeSearchValue(client?.nombre),
           normalizeSearchValue(group?.nombre),
           normalizeSearchValue(report.fecha),
+          normalizeSearchValue(report.codigoRegistro),
           normalizeSearchValue(report.descripcion),
           normalizeSearchValue(report.especificacion),
         ];
@@ -2144,6 +2161,16 @@ export default function AprobacionesPage() {
   return (
     <div>
       <AdminHeader title="Aprobaciones de Actividades" />
+      {processingLabel && (
+        <div
+          className="fixed right-6 top-20 z-50 flex items-center gap-2 rounded-lg border border-gold/30 bg-card px-4 py-3 text-sm font-medium text-foreground shadow-xl"
+          role="status"
+          aria-live="polite"
+        >
+          <Loader2 className="h-4 w-4 animate-spin text-gold" />
+          {processingLabel}
+        </div>
+      )}
       <div className="p-6 space-y-6">
         {hasSelectedPeriod && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -2238,7 +2265,7 @@ export default function AprobacionesPage() {
           <div className="relative flex-1 max-w-sm">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Buscar por cliente, grupo, descripción o fecha..."
+              placeholder="Buscar por código, cliente, grupo, descripción o fecha..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               disabled={!hasSelectedPeriod}
@@ -2675,7 +2702,7 @@ export default function AprobacionesPage() {
                       <div className="rounded-lg border border-border/50 bg-secondary/20 p-3">
                         <p className="text-xs text-muted-foreground">Firma receptor</p>
                         <p className="text-sm font-medium text-foreground">
-                          {selectedReport.firmaReceptor ? "Sí — Firma digital" : "No registrada"}
+                          {selectedReport.firmaReceptor || selectedReport.firmado ? "Sí — Firma confirmada" : "No registrada"}
                         </p>
                       </div>
                     </div>
