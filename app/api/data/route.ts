@@ -274,11 +274,32 @@ async function activityRows(payload: Payload = {}) {
   if (payload.activityId) { values.push(payload.activityId); filters.push(`a.id = $${values.length}`); }
   if (payload.tecnicoId) { values.push(payload.tecnicoId); filters.push(`EXISTS (SELECT 1 FROM public.actividades_operativas_participantes fp WHERE fp.actividad_id = a.id AND fp.tecnico_id = $${values.length})`); }
   if (payload.grupoId) { values.push(payload.grupoId); filters.push(`a.grupo_id = $${values.length}`); }
+  if (payload.liderId) { values.push(payload.liderId); filters.push(`g.lider_id = $${values.length}`); }
   if (payload.tipo) { values.push(payload.tipo === "actividad_grupal" ? "actividad" : payload.tipo === "mantenimiento_preventivo" ? "mantenimiento" : payload.tipo); filters.push(`a.tipo = $${values.length}`); }
+  if (Array.isArray(payload.tipos) && payload.tipos.length > 0) {
+    const normalizedTypes = payload.tipos
+      .map((type) => type === "actividad_grupal" ? "actividad" : type === "mantenimiento_preventivo" ? "mantenimiento" : String(type))
+      .filter((type) => ["actividad", "mantenimiento", "visita_tecnica", "recorrido"].includes(type));
+    if (normalizedTypes.length > 0) {
+      values.push(normalizedTypes);
+      filters.push(`a.tipo = ANY($${values.length}::text[])`);
+    }
+  }
+  const hasPagination = payload.limit !== undefined || payload.offset !== undefined;
+  let pagination = "";
+  if (hasPagination) {
+    const limit = Math.min(50, Math.max(1, Math.floor(number(payload.limit, 10))));
+    const offset = Math.max(0, Math.floor(number(payload.offset)));
+    values.push(limit);
+    const limitParam = values.length;
+    values.push(offset);
+    const offsetParam = values.length;
+    pagination = `LIMIT $${limitParam} OFFSET $${offsetParam}`;
+  }
   const { rows } = await dbQuery(
     `SELECT a.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, s.direccion AS sede_direccion,
             g.nombre AS grupo_nombre, g.lider_id AS grupo_lider_id,
-            ca.codigo AS catalogo_codigo, ca.nombre AS catalogo_nombre, ac.especificacion,
+            ca.id AS catalogo_actividad_id, ca.codigo AS catalogo_codigo, ca.nombre AS catalogo_nombre, ca.categoria AS catalogo_categoria, ac.especificacion,
             am.mantenimiento_programado_id, am.titulo AS mantenimiento_titulo,
             am.prioridad AS mantenimiento_prioridad, am.tipo_pendiente, am.descripcion_pendiente,
             am.receptor_nombre AS mantenimiento_receptor, am.firmado AS mantenimiento_firmado,
@@ -302,7 +323,8 @@ async function activityRows(payload: Payload = {}) {
               'valorGanadoOriginal', li.valor_ganado_original, 'descuentoTardanza', li.descuento_tardanza,
               'porcentajeDescuentoTardanza', li.porcentaje_descuento_tardanza
             ) ORDER BY li.created_at) FROM public.liquidacion_items li WHERE li.actividad_id = a.id), '[]'::json) AS liquidaciones,
-            (SELECT p.id FROM public.periodos_liquidacion p WHERE a.fecha_operacion BETWEEN p.fecha_inicio AND p.fecha_fin ORDER BY p.fecha_inicio DESC LIMIT 1) AS periodo_id
+            (SELECT p.id FROM public.periodos_liquidacion p WHERE a.fecha_operacion BETWEEN p.fecha_inicio AND p.fecha_fin ORDER BY p.fecha_inicio DESC LIMIT 1) AS periodo_id,
+            COUNT(*) OVER() AS total_count
        FROM public.actividades_operativas a
        LEFT JOIN public.clientes c ON c.id = a.cliente_id
        LEFT JOIN public.cliente_sedes s ON s.id = a.sede_id
@@ -313,7 +335,8 @@ async function activityRows(payload: Payload = {}) {
        LEFT JOIN public.actividades_operativas_visitas av ON av.actividad_id = a.id
        LEFT JOIN public.actividades_operativas_recorridos ar ON ar.actividad_id = a.id
        ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
-      ORDER BY a.fecha_operacion DESC, a.created_at DESC`, values,
+       ORDER BY a.fecha_operacion DESC, a.created_at DESC
+       ${pagination}`, values,
   );
   return rows;
 }
@@ -333,12 +356,17 @@ function mapReport(row: any, participant: any, index: number): any {
     aprobacionId: approval?.id,
     codigoRegistro: row.codigo,
     tipo: type,
+    actividadId: row.catalogo_actividad_id || undefined,
+    actividadCodigo: row.catalogo_codigo || undefined,
+    actividadNombre: row.catalogo_nombre || undefined,
+    actividadCategoria: row.catalogo_categoria || undefined,
     mantenimientoId: row.tipo === "mantenimiento" ? row.mantenimiento_programado_id || undefined : undefined,
     visitaTecnicaId: row.tipo === "visita_tecnica" ? row.id : undefined,
     recorridoId: row.tipo === "recorrido" ? row.id : undefined,
     tipoVisita: row.tipo_visita || undefined,
     registroActividadId: row.tipo === "actividad" ? row.id : undefined,
     tecnicoId: participant?.tecnicoId || row.creado_por_id,
+    reportadoPorId: row.creado_por_id,
     liderGrupoId: row.grupo_lider_id,
     grupoId: row.grupo_id,
     porcentajeParticipacion: number(participant?.porcentaje, 100),
@@ -369,6 +397,7 @@ function mapReport(row: any, participant: any, index: number): any {
     valorModificado: row.valor_sugerido != null && number(row.valor_sugerido) !== number(row.valor_base),
     motivoModificacionValor: row.motivo_modificacion_valor || undefined,
     costoActividad: number(participant?.valorGanado, number(row.valor_aplicado)),
+    participantes: jsonArray(row.participantes),
     liquidacionId: liquidation?.id,
     liquidacionEstado: liquidation?.estado,
     liquidacionValorBase: liquidation ? number(liquidation.valorBase) : undefined,
@@ -387,15 +416,37 @@ function mapReport(row: any, participant: any, index: number): any {
     valorActividadAplicadoGlobal: number(row.valor_aplicado),
     clienteNombre: row.cliente_nombre,
     sedeNombre: row.sede_nombre,
+    sedeDireccion: row.sede_direccion,
   };
 }
 
-async function reportRows(payload: Payload = {}) {
-  const rows = await activityRows(payload);
+function mapReportRows(rows: any[], payload: Payload = {}) {
   return rows.flatMap((row) => {
     const participants = jsonArray(row.participantes);
-    return (participants.length ? participants : [null]).map((participant, index) => mapReport(row, participant, index));
+    const scopedParticipants = payload.participantOnly && payload.tecnicoId
+      ? participants.filter((participant) => participant?.tecnicoId === payload.tecnicoId)
+      : participants;
+    return (scopedParticipants.length ? scopedParticipants : [null]).map((participant, index) => mapReport(row, participant, index));
   });
+}
+
+async function reportRows(payload: Payload = {}) {
+  return mapReportRows(await activityRows(payload), payload);
+}
+
+async function reportPageRows(payload: Payload = {}) {
+  const limit = Math.min(50, Math.max(1, Math.floor(number(payload.limit, 10))));
+  const offset = Math.max(0, Math.floor(number(payload.offset)));
+  const rows = await activityRows({ ...payload, limit, offset });
+  const items = mapReportRows(rows, payload);
+  const total = number(rows[0]?.total_count, 0);
+  return {
+    items,
+    page: Math.floor(offset / limit),
+    pageSize: limit,
+    total,
+    hasMore: offset + rows.length < total,
+  };
 }
 
 async function applyUserSchedules(client: any, userId: string, schedules: any[] = []) {
@@ -686,6 +737,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       return rows.filter((row) => row.codigo === payload.codigo).map((row) => mapReport(row, jsonArray(row.participantes)[0], 0));
     }
     case "reports.list": return reportRows(payload);
+    case "reports.page": return reportPageRows(payload);
     case "reports.approval": return updateApproval(payload, user);
     case "reports.cost": return updateActivityValues(payload);
     case "reports.clientCost": return updateActivityValues({ ...payload, clientCost: payload.value });
