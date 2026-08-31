@@ -1044,6 +1044,7 @@ async function enrichMaintenance(row: any) {
 }
 
 type MaintenanceCategory = "esta_semana" | "proximos" | "vencidos" | "historial";
+type AdminMaintenanceView = "todos" | "programados" | "proximos" | "vencidos" | "realizados" | "calendario";
 
 function addCalendarDays(dateValue: string, days: number) {
   const date = new Date(`${dateValue}T00:00:00Z`);
@@ -1067,7 +1068,27 @@ function maintenanceCategory(payload: Payload): MaintenanceCategory {
     : "esta_semana";
 }
 
+function adminMaintenanceView(payload: Payload): AdminMaintenanceView {
+  const value = String(payload.view || "todos");
+  return ["todos", "programados", "proximos", "vencidos", "realizados", "calendario"].includes(value)
+    ? value as AdminMaintenanceView
+    : "todos";
+}
+
+function monthRange(value: unknown, fallbackDate: string) {
+  const candidate = String(value || "");
+  const month = /^\d{4}-\d{2}$/.test(candidate) ? candidate : fallbackDate.slice(0, 7);
+  const [year, monthNumber] = month.split("-").map(Number);
+  const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  return {
+    start: `${month}-01`,
+    end: `${month}-${String(lastDay).padStart(2, "0")}`,
+  };
+}
+
 async function maintenancePageRows(payload: Payload, user: UserContext) {
+  const adminView = payload.adminView === true;
+  const view = adminView ? adminMaintenanceView(payload) : null;
   const category = maintenanceCategory(payload);
   const today = bogotaClock().date;
   const week = maintenanceWeekRange(today);
@@ -1075,7 +1096,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   const page = Math.max(1, Math.floor(number(payload.page, 1)));
   const offset = (page - 1) * pageSize;
   const privileged = ["admin", "supervisor"].includes(user.rol);
-  const hasUserScope = Boolean(payload.usuarioId) || !privileged;
+  const hasUserScope = !adminView && (Boolean(payload.usuarioId) || !privileged);
   const values: unknown[] = [];
   const filters: string[] = ["m.estado <> 'cancelado'"];
 
@@ -1093,7 +1114,45 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     )`);
   }
 
-  if (category === "historial") {
+  if (adminView) {
+    if (view === "programados") {
+      filters.push("m.estado IN ('programado', 'asignado', 'en_ejecucion', 'en_progreso')");
+    } else if (view === "proximos") {
+      values.push(today, addCalendarDays(today, 3));
+      filters.push(`m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')`);
+      filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+    } else if (view === "vencidos") {
+      values.push(today);
+      filters.push("m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')");
+      filters.push(`m.fecha_programada < $${values.length}::date`);
+    } else if (view === "realizados") {
+      filters.push("m.estado IN ('ejecutado', 'completado')");
+      if (payload.periodoId) {
+        values.push(payload.periodoId);
+        filters.push(`EXISTS (
+          SELECT 1 FROM public.periodos_liquidacion period_filter
+           WHERE period_filter.id = $${values.length}
+             AND COALESCE(m.fecha_realizado, m.fecha_programada) BETWEEN period_filter.fecha_inicio AND period_filter.fecha_fin
+        )`);
+      }
+    } else if (view === "calendario") {
+      const range = monthRange(payload.month, today);
+      values.push(range.start, range.end);
+      filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+    } else if (payload.status) {
+      const status = String(payload.status);
+      if (status === "vencido") {
+        values.push(today);
+        filters.push("m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')");
+        filters.push(`m.fecha_programada < $${values.length}::date`);
+      } else if (status === "realizado" || status === "completado") {
+        filters.push("m.estado IN ('ejecutado', 'completado')");
+      } else if (["pendiente", "programado", "asignado", "en_ejecucion", "en_progreso"].includes(status)) {
+        values.push(status);
+        filters.push(`m.estado = $${values.length}`);
+      }
+    }
+  } else if (category === "historial") {
     filters.push("m.estado IN ('ejecutado', 'completado')");
   } else {
     filters.push("m.estado NOT IN ('ejecutado', 'completado')");
@@ -1114,10 +1173,21 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     values.push(`%${search.toLowerCase()}%`);
     const searchParam = `$${values.length}`;
     filters.push(`lower(concat_ws(' ',
-      coalesce(activity.codigo, ''), coalesce(activity.titulo, ''), coalesce(activity.descripcion, ''),
+      coalesce(activity.codigo, 'MP-' || to_char(m.fecha_programada, 'YYYYMMDD') || '-' || upper(left(replace(m.id::text, '-', ''), 10))),
+      coalesce(activity.titulo, ''), coalesce(activity.descripcion, ''),
       coalesce(activity.descripcion_pendiente, ''), coalesce(m.observaciones, ''),
-      coalesce(m.tipo_pendiente, ''), coalesce(c.nombre, ''), coalesce(s.nombre, ''), coalesce(s.direccion, '')
+      coalesce(m.tipo_pendiente, ''), coalesce(c.nombre, ''), coalesce(s.nombre, ''), coalesce(s.direccion, ''),
+      coalesce((SELECT string_agg(u.nombre || ' ' || u.apellido, ' ')
+                  FROM public.mantenimientos_programados_participantes mp_search
+                  JOIN public.usuarios u ON u.id = mp_search.usuario_id
+                 WHERE mp_search.mantenimiento_id = m.id AND mp_search.estado = 'activo'), '')
     )) LIKE ${searchParam}`);
+  }
+
+  if (adminView && payload.month && view !== "calendario") {
+    const range = monthRange(payload.month, today);
+    values.push(range.start, range.end);
+    filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
   }
 
   const baseFrom = `
@@ -1134,9 +1204,18 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
        LIMIT 1
     ) activity ON true
     WHERE ${filters.join(" AND ")}`;
-  const order = category === "vencidos" || category === "historial"
-    ? "m.fecha_programada DESC NULLS LAST, m.created_at DESC, m.id DESC"
-    : "m.fecha_programada ASC NULLS LAST, m.created_at ASC, m.id ASC";
+  const order = adminView
+    ? view === "vencidos" || view === "realizados"
+      ? "m.fecha_programada DESC NULLS LAST, m.created_at DESC, m.id DESC"
+      : view === "calendario"
+        ? "m.fecha_programada ASC NULLS LAST, m.created_at ASC, m.id ASC"
+        : `CASE WHEN m.fecha_programada >= (now() AT TIME ZONE 'America/Bogota')::date THEN 0 ELSE 1 END,
+           CASE WHEN m.fecha_programada >= (now() AT TIME ZONE 'America/Bogota')::date THEN m.fecha_programada END ASC NULLS LAST,
+           CASE WHEN m.fecha_programada < (now() AT TIME ZONE 'America/Bogota')::date THEN m.fecha_programada END DESC NULLS LAST,
+           m.created_at DESC, m.id DESC`
+    : category === "vencidos" || category === "historial"
+      ? "m.fecha_programada DESC NULLS LAST, m.created_at DESC, m.id DESC"
+      : "m.fecha_programada ASC NULLS LAST, m.created_at ASC, m.id ASC";
 
   const pageValues = [...values, pageSize, offset];
   const limitParam = pageValues.length - 1;
@@ -1235,6 +1314,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     hasNextPage: offset + rows.length < total,
     hasPreviousPage: page > 1 && total > 0,
     category,
+    ...(adminView ? { view } : {}),
     weekStart: week.start,
     weekEnd: week.end,
     generatedAt: new Date().toISOString(),
@@ -1446,6 +1526,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "contracts.delete": { await requireAdmin(user); return deleteContract(payload, user); }
 
     case "maintenances.page": return maintenancePageRows(payload, user);
+    case "maintenances.adminPage": { await requireAdmin(user); return maintenancePageRows({ ...payload, adminView: true }, user); }
     case "maintenances.list": {
       const hasUserScope = Boolean(payload.usuarioId) || !["admin", "supervisor"].includes(user.rol);
       const values = hasUserScope ? [user.id] : [];

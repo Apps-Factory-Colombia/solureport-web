@@ -1,9 +1,35 @@
 import { Maintenance, MaintenanceReport } from "@/lib/types";
 import { dataRequest } from "../client";
 
+export type MaintenanceAdminView = "todos" | "programados" | "proximos" | "vencidos" | "realizados" | "calendario";
+
+export interface MaintenanceAdminPage {
+  items: Maintenance[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+  today?: string;
+  generatedAt?: string;
+  view?: MaintenanceAdminView;
+}
+
 export function invalidateMantenimientosCache() {}
 export function invalidateReportesMantenimientoCache() {}
 export async function getMantenimientos(): Promise<Maintenance[]> { return dataRequest<Maintenance[]>("maintenances.list"); }
+export async function getMantenimientosAdminPage(options: {
+  view: MaintenanceAdminView;
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  status?: string;
+  month?: string;
+  periodoId?: string;
+}): Promise<MaintenanceAdminPage> {
+  return dataRequest<MaintenanceAdminPage>("maintenances.adminPage", options);
+}
 export async function getMantenimientosVencidos(): Promise<{ today: string; generatedAt: string; total: number; items: Maintenance[] }> {
   return dataRequest<{ today: string; generatedAt: string; total: number; items: Maintenance[] }>("maintenances.overdue");
 }

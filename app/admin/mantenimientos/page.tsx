@@ -61,7 +61,7 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 import { Maintenance, MaintenanceStatus, Client, User, CompanySettings, LiquidationPeriod } from "@/lib/types";
-import { getMantenimientos, getMantenimientosVencidos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/data/services/mantenimientos";
+import { MaintenanceAdminPage, MaintenanceAdminView, getMantenimientosAdminPage, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/data/services/mantenimientos";
 import { getContratos, createContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
@@ -118,6 +118,17 @@ const monthNames = [
   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
 ];
 
+type MaintenanceAdminTab = "lista" | "programados" | "realizados" | "proximos" | "calendario" | "vencidos" | "sin-cubrimiento";
+
+const maintenanceViewByTab: Partial<Record<MaintenanceAdminTab, MaintenanceAdminView>> = {
+  lista: "todos",
+  programados: "programados",
+  realizados: "realizados",
+  proximos: "proximos",
+  calendario: "calendario",
+  vencidos: "vencidos",
+};
+
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
     style: "currency",
@@ -132,6 +143,17 @@ function formatDateInput(date: Date) {
 
 function getMonthInputValue(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function getBogotaDateInput() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 interface MiniCalendarProps {
@@ -258,6 +280,20 @@ export default function MantenimientosPage() {
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
+  const [maintenancePage, setMaintenancePage] = useState<MaintenanceAdminPage | null>(null);
+  const [maintenancePageLoading, setMaintenancePageLoading] = useState(true);
+  const [maintenancePageError, setMaintenancePageError] = useState<string | null>(null);
+  const [maintenanceTotals, setMaintenanceTotals] = useState<Record<string, number>>({});
+  const [activeTab, setActiveTab] = useState<MaintenanceAdminTab>("lista");
+  const [pageByTab, setPageByTab] = useState<Record<string, number>>({
+    lista: 1,
+    programados: 1,
+    realizados: 1,
+    proximos: 1,
+    calendario: 1,
+    vencidos: 1,
+  });
+  const [notification, setNotification] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [search, setSearch] = useState("");
   const [overdueSearch, setOverdueSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("todos");
@@ -294,12 +330,10 @@ export default function MantenimientosPage() {
     return new Date(year, month - 1, day);
   };
 
-  const loadData = useCallback(async () => {
-    const requestId = ++maintenanceRequestRef.current;
+  const loadSupportingData = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, ct, c, u, s, p, overdue] = await Promise.all([
-        getMantenimientos(),
+      const [ct, c, u, s, p] = await Promise.all([
         getContratos(),
         getClientes(),
         getUsuarios(),
@@ -311,14 +345,7 @@ export default function MantenimientosPage() {
           console.error("Error cargando períodos de liquidación:", error);
           return [];
         }),
-        getMantenimientosVencidos().catch((error) => {
-          console.error("Error cargando mantenimientos vencidos:", error);
-          return { items: [] as Maintenance[], total: 0, today: "", generatedAt: "" };
-        }),
       ]);
-      if (requestId !== maintenanceRequestRef.current) return;
-      setMaintenances(m);
-      setOverdueMaintenances(overdue.items);
       setContracts(ct);
       setClients(c);
       setUsers(u);
@@ -329,19 +356,73 @@ export default function MantenimientosPage() {
         return p[0]?.id || "";
       });
     } catch (err) {
-      console.error("Error cargando mantenimientos:", err);
+      console.error("Error cargando información de mantenimientos:", err);
     } finally {
-      if (requestId === maintenanceRequestRef.current) setLoading(false);
+      setLoading(false);
     }
   }, []);
 
-  useEffect(() => { void loadData(); }, [loadData]);
+  useEffect(() => { void loadSupportingData(); }, [loadSupportingData]);
+
+  const loadMaintenancePage = useCallback(async (
+    targetTab: MaintenanceAdminTab = activeTab,
+    requestedPage = pageByTab[targetTab] || 1,
+  ) => {
+    const view = maintenanceViewByTab[targetTab];
+    if (!view) return;
+
+    const requestId = ++maintenanceRequestRef.current;
+    setMaintenancePageLoading(true);
+    setMaintenancePageError(null);
+
+    try {
+      const result = await getMantenimientosAdminPage({
+        view,
+        page: requestedPage,
+        pageSize: 20,
+        search: targetTab === "vencidos" ? overdueSearch : search,
+        status: targetTab === "lista" && statusFilter !== "todos" ? statusFilter : undefined,
+        month: targetTab === "programados"
+          ? programadosMonthFilter || undefined
+          : targetTab === "vencidos"
+            ? vencidosMonthFilter || undefined
+            : targetTab === "calendario"
+              ? getMonthInputValue(calendarMonth)
+              : undefined,
+        periodoId: targetTab === "realizados" ? completedPeriodFilter || undefined : undefined,
+      });
+      if (requestId !== maintenanceRequestRef.current) return;
+      setMaintenances(result.items);
+      setMaintenancePage(result);
+      setMaintenanceTotals((current) => ({ ...current, [targetTab]: result.total }));
+      if (targetTab === "vencidos") setOverdueMaintenances(result.items);
+    } catch (err) {
+      if (requestId !== maintenanceRequestRef.current) return;
+      const message = err instanceof Error ? err.message : "No se pudo cargar la agenda de mantenimientos.";
+      setMaintenancePageError(message);
+      console.error("Error cargando página de mantenimientos:", err);
+    } finally {
+      if (requestId === maintenanceRequestRef.current) setMaintenancePageLoading(false);
+    }
+  }, [activeTab, calendarMonth, completedPeriodFilter, overdueSearch, pageByTab, programadosMonthFilter, search, statusFilter, vencidosMonthFilter]);
 
   useEffect(() => {
-    const onFocus = () => { void loadData(); };
+    if (!loading) void loadMaintenancePage();
+  }, [loadMaintenancePage, loading]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      if (!dialogOpen && !scheduleOpen && !loading) void loadMaintenancePage();
+    };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [loadData]);
+  }, [dialogOpen, loadMaintenancePage, loading, scheduleOpen]);
+
+  useEffect(() => {
+    if (!notification) return;
+    const timeoutId = window.setTimeout(() => setNotification(null), 6000);
+    return () => window.clearTimeout(timeoutId);
+  }, [notification]);
 
   const todayStart = useMemo(() => {
     const today = new Date();
@@ -559,7 +640,7 @@ export default function MantenimientosPage() {
 
       setScheduleOpen(false);
       setSchedulingMaint(null);
-      await loadData();
+      await loadMaintenancePage();
     } catch (err) {
       console.error("Error programando mantenimiento:", err);
     }
@@ -822,16 +903,36 @@ export default function MantenimientosPage() {
   }, [companyName, completedMaintenancesByPeriod, getMaintenanceAnnualValue, getMaintenanceChargedValue, getMaintenanceClientLabel, getMaintenanceCompletedDate, getMaintenanceProgressLabel, getMaintenanceStatusLabel, getMaintenanceTechnicianLabel, getPeriodLabel, selectedCompletedPeriod]);
 
   const handleSave = async (data: Partial<Maintenance>) => {
+    const isNew = !editingMaintenance;
     try {
-      if (editingMaintenance) {
-        await updateMantenimiento(editingMaintenance.id, data);
-      } else {
-        await createMantenimiento(data);
-      }
-      setEditingMaintenance(null);
-      await loadData();
+      const saved = editingMaintenance
+        ? await updateMantenimiento(editingMaintenance.id, data)
+        : await createMantenimiento(data);
+      const status = String(saved.estado || data.estado || "programado").toLowerCase();
+      const isCompleted = status === "realizado" || status === "completado";
+      const isOverdue = Boolean(saved.fechaProgramada || data.fechaProgramada)
+        && String(saved.fechaProgramada || data.fechaProgramada) < getBogotaDateInput()
+        && !isCompleted;
+      const targetTab: MaintenanceAdminTab = isOverdue
+        ? "vencidos"
+        : isCompleted
+          ? "realizados"
+          : "programados";
+
+      setPageByTab((current) => ({ ...current, [targetTab]: 1 }));
+      setActiveTab(targetTab);
+      setNotification({
+        type: "success",
+        message: `${isNew ? "Mantenimiento creado" : "Mantenimiento actualizado"} correctamente${saved.codigoRegistro ? ` · ${saved.codigoRegistro}` : ""}. Se mostrará en ${targetTab === "vencidos" ? "Vencidos" : targetTab === "realizados" ? "Realizados" : "Programados"}.`,
+      });
+      await loadMaintenancePage(targetTab, 1);
     } catch (err) {
       console.error("Error guardando mantenimiento:", err);
+      setNotification({
+        type: "error",
+        message: err instanceof Error ? err.message : "No se pudo guardar el mantenimiento.",
+      });
+      throw err;
     }
   };
 
@@ -840,7 +941,7 @@ export default function MantenimientosPage() {
     try {
       await deleteMantenimiento(id);
       setMaintenanceToDelete(null);
-      await loadData();
+      await loadMaintenancePage();
     } catch (err) {
       console.error("Error eliminando mantenimiento:", err);
       const message = err instanceof Error
@@ -915,7 +1016,7 @@ export default function MantenimientosPage() {
 
       setReactivateOpen(false);
       setReactivatingContract(null);
-      await loadData();
+      await Promise.all([loadSupportingData(), loadMaintenancePage()]);
     } catch (err) {
       console.error("Error reactivando cobertura:", err);
       alert("No se pudo reactivar la cobertura. Intenta nuevamente.");
@@ -942,6 +1043,36 @@ export default function MantenimientosPage() {
     <div>
       <AdminHeader title="Programación de Mantenimientos" />
       <div className="p-6 space-y-6">
+        {notification && (
+          <div
+            role={notification.type === "error" ? "alert" : "status"}
+            className={cn(
+              "flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm",
+              notification.type === "error"
+                ? "border-red-500/30 bg-red-500/10 text-red-300"
+                : "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+            )}
+          >
+            <span>{notification.message}</span>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setNotification(null)}>
+              Cerrar
+            </Button>
+          </div>
+        )}
+        {maintenancePageError && (
+          <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+            <span>No se pudo cargar la agenda: {maintenancePageError}</span>
+            <Button type="button" variant="outline" size="sm" onClick={() => void loadMaintenancePage()}>
+              Reintentar
+            </Button>
+          </div>
+        )}
+        {maintenancePageLoading && maintenancePage && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground" aria-live="polite">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-gold" />
+            Actualizando la agenda…
+          </div>
+        )}
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3 flex-1">
             <div className="relative flex-1 max-w-sm">
@@ -949,11 +1080,20 @@ export default function MantenimientosPage() {
               <Input
                 placeholder="Buscar por código, cliente o técnico..."
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setPageByTab((current) => ({ ...current, lista: 1, programados: 1, proximos: 1, calendario: 1 }));
+                }}
                 className="pl-10 bg-secondary/50 border-border/50"
               />
             </div>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <Select
+              value={statusFilter}
+              onValueChange={(value) => {
+                setStatusFilter(value);
+                setPageByTab((current) => ({ ...current, lista: 1 }));
+              }}
+            >
               <SelectTrigger className="w-48 bg-secondary/50 border-border/50">
                 <SelectValue placeholder="Filtrar por estado" />
               </SelectTrigger>
@@ -979,7 +1119,17 @@ export default function MantenimientosPage() {
           </Button>
         </div>
 
-        <Tabs defaultValue="lista" className="space-y-4">
+        <Tabs
+          value={activeTab}
+          onValueChange={(value) => {
+            const nextTab = value as MaintenanceAdminTab;
+            setActiveTab(nextTab);
+            if (maintenanceViewByTab[nextTab]) {
+              setPageByTab((current) => ({ ...current, [nextTab]: 1 }));
+            }
+          }}
+          className="space-y-4"
+        >
           <TabsList className="bg-secondary/50 border border-border/50">
             <TabsTrigger
               value="lista"
@@ -995,7 +1145,7 @@ export default function MantenimientosPage() {
               <UserCheck className="h-4 w-4 mr-2" />
               Programados
               <Badge className="ml-1.5 bg-blue-500/20 text-blue-400 text-[10px] border-0 px-1.5">
-                {programados.length}
+                {maintenanceTotals.programados || 0}
               </Badge>
             </TabsTrigger>
             <TabsTrigger
@@ -1005,7 +1155,7 @@ export default function MantenimientosPage() {
               <FileSpreadsheet className="h-4 w-4 mr-2" />
               Realizados
               <Badge className="ml-1.5 bg-emerald-500/20 text-emerald-400 text-[10px] border-0 px-1.5">
-                {completedMaintenancesByPeriod.length}
+                {maintenanceTotals.realizados || 0}
               </Badge>
             </TabsTrigger>
             <TabsTrigger
@@ -1014,9 +1164,9 @@ export default function MantenimientosPage() {
             >
               <Bell className="h-4 w-4 mr-2" />
               Próximos
-              {proximosMantenimientos.length > 0 && (
+              {(maintenanceTotals.proximos || 0) > 0 && (
                 <Badge className="ml-1.5 h-5 w-5 rounded-full bg-red-500 text-[10px] text-white p-0 flex items-center justify-center border-0">
-                  {proximosMantenimientos.length}
+                  {maintenanceTotals.proximos}
                 </Badge>
               )}
             </TabsTrigger>
@@ -1033,9 +1183,9 @@ export default function MantenimientosPage() {
             >
               <AlertTriangle className="h-4 w-4 mr-2" />
               Vencidos
-              {vencidos.length > 0 && (
+              {(maintenanceTotals.vencidos || 0) > 0 && (
                 <Badge className="ml-1.5 bg-red-500/20 text-red-400 text-[10px] border-0 px-1.5">
-                  {vencidos.length}
+                  {maintenanceTotals.vencidos}
                 </Badge>
               )}
             </TabsTrigger>
@@ -1151,13 +1301,19 @@ export default function MantenimientosPage() {
                       <Input
                         type="month"
                         value={programadosMonthFilter}
-                        onChange={(e) => setProgramadosMonthFilter(e.target.value)}
+                        onChange={(e) => {
+                          setProgramadosMonthFilter(e.target.value);
+                          setPageByTab((current) => ({ ...current, programados: 1 }));
+                        }}
                         className="w-[180px] bg-secondary/50 border-border/50"
                       />
                       <Button
                         type="button"
                         variant="outline"
-                        onClick={() => setProgramadosMonthFilter("")}
+                        onClick={() => {
+                          setProgramadosMonthFilter("");
+                          setPageByTab((current) => ({ ...current, programados: 1 }));
+                        }}
                         className="border-border/50"
                       >
                         Todos
@@ -1253,7 +1409,13 @@ export default function MantenimientosPage() {
                     </p>
                   </div>
                   <div className="flex flex-col gap-3 sm:items-end">
-                    <Select value={completedPeriodFilter} onValueChange={setCompletedPeriodFilter}>
+                    <Select
+                      value={completedPeriodFilter}
+                      onValueChange={(value) => {
+                        setCompletedPeriodFilter(value);
+                        setPageByTab((current) => ({ ...current, realizados: 1 }));
+                      }}
+                    >
                       <SelectTrigger className="w-[260px] bg-secondary/50 border-border/50">
                         <SelectValue placeholder="Seleccionar período" />
                       </SelectTrigger>
@@ -1418,7 +1580,10 @@ export default function MantenimientosPage() {
                 <MiniCalendar
                   maintenances={maintenances}
                   currentMonth={calendarMonth}
-                  onMonthChange={setCalendarMonth}
+                  onMonthChange={(nextMonth) => {
+                    setCalendarMonth(nextMonth);
+                    setPageByTab((current) => ({ ...current, calendario: 1 }));
+                  }}
                   selectedDate={calendarSelectedDate}
                   onSelectDate={setCalendarSelectedDate}
                 />
@@ -1506,7 +1671,10 @@ export default function MantenimientosPage() {
                     <Input
                       placeholder="Buscar en vencidos por cliente o técnico..."
                       value={overdueSearch}
-                      onChange={(e) => setOverdueSearch(e.target.value)}
+                      onChange={(e) => {
+                        setOverdueSearch(e.target.value);
+                        setPageByTab((current) => ({ ...current, vencidos: 1 }));
+                      }}
                       className="pl-10 bg-secondary/50 border-border/50"
                     />
                   </div>
@@ -1514,13 +1682,19 @@ export default function MantenimientosPage() {
                     <Input
                       type="month"
                       value={vencidosMonthFilter}
-                      onChange={(e) => setVencidosMonthFilter(e.target.value)}
+                      onChange={(e) => {
+                        setVencidosMonthFilter(e.target.value);
+                        setPageByTab((current) => ({ ...current, vencidos: 1 }));
+                      }}
                       className="w-[180px] bg-secondary/50 border-border/50"
                     />
                     <Button
                       type="button"
                       variant="outline"
-                      onClick={() => setVencidosMonthFilter("")}
+                      onClick={() => {
+                        setVencidosMonthFilter("");
+                        setPageByTab((current) => ({ ...current, vencidos: 1 }));
+                      }}
                       className="border-border/50"
                     >
                       Todos
@@ -1684,12 +1858,47 @@ export default function MantenimientosPage() {
             </Card>
           </TabsContent>
         </Tabs>
+
+        {activeTab !== "sin-cubrimiento" && maintenancePage && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 bg-card/60 px-4 py-3">
+            <p className="text-sm text-muted-foreground">
+              {maintenancePage.total === 0
+                ? "No hay registros para esta vista."
+                : `Mostrando ${maintenancePage.items.length} de ${maintenancePage.total} mantenimientos · Página ${maintenancePage.page} de ${maintenancePage.totalPages}`}
+            </p>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={maintenancePageLoading || !maintenancePage.hasPreviousPage}
+                onClick={() => setPageByTab((current) => ({ ...current, [activeTab]: Math.max(1, (current[activeTab] || 1) - 1) }))}
+              >
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                Anterior
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={maintenancePageLoading || !maintenancePage.hasNextPage}
+                onClick={() => setPageByTab((current) => ({ ...current, [activeTab]: (current[activeTab] || 1) + 1 }))}
+              >
+                Siguiente
+                <ChevronRight className="ml-1 h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       <MaintenanceDialog
         key={`${dialogOpen ? "open" : "closed"}-${editingMaintenance?.id || "new"}`}
         open={dialogOpen}
-        onOpenChange={setDialogOpen}
+        onOpenChange={(open) => {
+          setDialogOpen(open);
+          if (!open) setEditingMaintenance(null);
+        }}
         maintenance={editingMaintenance}
         onSave={handleSave}
       />

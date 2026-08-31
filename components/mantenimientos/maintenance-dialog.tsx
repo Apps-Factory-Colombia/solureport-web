@@ -138,7 +138,7 @@ interface MaintenanceDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   maintenance?: Maintenance | null;
-  onSave: (maintenance: Partial<Maintenance>) => void;
+  onSave: (maintenance: Partial<Maintenance>) => Promise<void> | void;
 }
 
 export function MaintenanceDialog({
@@ -155,6 +155,7 @@ export function MaintenanceDialog({
   const [participantDrafts, setParticipantDrafts] = useState<ParticipantDraft[]>(() => buildInitialParticipantDrafts(maintenance));
   const [participantSearch, setParticipantSearch] = useState("");
   const [isParticipantListOpen, setIsParticipantListOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -193,8 +194,9 @@ export function MaintenanceDialog({
     [participantSummary.drafts]
   );
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving) return;
     const client = clients.find((c) => c.id === formData.clienteId);
     let proximaFecha: string | undefined;
 
@@ -209,20 +211,27 @@ export function MaintenanceDialog({
       return;
     }
 
-    onSave({
-      ...formData,
-      id: maintenance?.id || `m${Date.now()}`,
-      proximaFecha,
-      costoTecnicoTotal: participantSummary.totalCost,
-      participantes: participantSummary.drafts.map((draft): MaintenanceParticipant => ({
-        usuarioId: draft.usuarioId,
-        porcentaje: Number(draft.porcentaje || 0) || 0,
-        valorCalculado: Number(draft.valorCalculado || 0) || 0,
-      })),
-      fechaCreacion:
-        maintenance?.fechaCreacion || new Date().toISOString().split("T")[0],
-    });
-    onOpenChange(false);
+    setSaving(true);
+    try {
+      await onSave({
+        ...formData,
+        id: maintenance?.id || `m${Date.now()}`,
+        proximaFecha,
+        costoTecnicoTotal: participantSummary.totalCost,
+        participantes: participantSummary.drafts.map((draft): MaintenanceParticipant => ({
+          usuarioId: draft.usuarioId,
+          porcentaje: Number(draft.porcentaje || 0) || 0,
+          valorCalculado: Number(draft.valorCalculado || 0) || 0,
+        })),
+        fechaCreacion:
+          maintenance?.fechaCreacion || new Date().toISOString().split("T")[0],
+      });
+      onOpenChange(false);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "No se pudo guardar el mantenimiento.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const filteredClients = clients.filter((client) => {
@@ -545,15 +554,17 @@ export function MaintenanceDialog({
               type="button"
               variant="ghost"
               onClick={() => onOpenChange(false)}
+              disabled={saving}
               className="text-muted-foreground"
             >
               Cancelar
             </Button>
             <Button
               type="submit"
+              disabled={saving}
               className="bg-gold hover:bg-gold-dark text-background font-semibold"
             >
-              {maintenance ? "Guardar Cambios" : "Crear Mantenimiento"}
+              {saving ? "Guardando…" : maintenance ? "Guardar Cambios" : "Crear Mantenimiento"}
             </Button>
           </DialogFooter>
         </form>
