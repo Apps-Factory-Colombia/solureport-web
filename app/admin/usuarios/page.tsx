@@ -603,8 +603,8 @@ export default function UsuariosPage() {
           <DialogHeader>
             <DialogTitle className="text-foreground">Confirmar eliminación</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              ¿Seguro que quieres retirar a <strong>{userToDelete?.nombre} {userToDelete?.apellido}</strong>?
-              Si tiene historial operativo o financiero, la cuenta se anonimizará y el historial se conservará.
+              ¿Seguro que quieres eliminar definitivamente a <strong>{userToDelete?.nombre} {userToDelete?.apellido}</strong>?
+              Se eliminarán la cuenta, sus asignaciones, sesiones e historial asociado. Esta acción no se puede deshacer.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

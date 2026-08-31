@@ -853,59 +853,56 @@ async function deleteUser(payload: Payload, actor: UserContext) {
       if (number(rows[0]?.total) <= 1) throw new Error("No puedes eliminar al último administrador activo del sistema.");
     }
 
-    const historyResult = await client.query(
-      `SELECT EXISTS (SELECT 1 FROM public.actividades_operativas_participantes WHERE tecnico_id = $1)
-          OR EXISTS (SELECT 1 FROM public.liquidacion_items WHERE tecnico_id = $1)
-          OR EXISTS (SELECT 1 FROM public.registros_asistencia WHERE usuario_id = $1)
-          OR EXISTS (SELECT 1 FROM public.actividades_operativas_aprobaciones WHERE revisor_id = $1)
-          OR EXISTS (SELECT 1 FROM public.lotes_aprobacion WHERE lider_id = $1)
-          OR EXISTS (SELECT 1 FROM public.actividades_operativas WHERE creado_por_id = $1)
-          OR EXISTS (SELECT 1 FROM public.actividades_operativas_evidencias WHERE subido_por_id = $1)
-          OR EXISTS (SELECT 1 FROM public.actividades_operativas_entregas WHERE enviado_por_id = $1)
-          OR EXISTS (SELECT 1 FROM public.mantenimientos_programados WHERE tecnico_principal_id = $1 AND (estado = 'ejecutado' OR fecha_realizado IS NOT NULL OR valor_recaudado > 0))
-          OR EXISTS (SELECT 1 FROM public.auditoria_eventos WHERE actor_id = $1)
-        AS has_history`,
+    // La eliminación solicitada por administración es física. Primero se
+    // borran dependencias históricas que usan ON DELETE RESTRICT y después
+    // se elimina la cuenta. Todo corre dentro de esta transacción: si una
+    // dependencia no está contemplada, no se borra parcialmente nada.
+    const { rows: createdActivityRows } = await client.query(
+      "SELECT id FROM public.actividades_operativas WHERE creado_por_id = $1",
       [id],
     );
-    const hasHistory = Boolean(historyResult.rows[0]?.has_history);
+    const createdActivityIds = createdActivityRows.map((row: any) => row.id);
+    const { rows: participantRows } = await client.query(
+      "SELECT id, actividad_id FROM public.actividades_operativas_participantes WHERE tecnico_id = $1",
+      [id],
+    );
+    const participantIds = participantRows.map((row: any) => row.id);
 
+    if (createdActivityIds.length > 0) {
+      await client.query("DELETE FROM public.lote_aprobacion_items WHERE aprobacion_id IN (SELECT id FROM public.actividades_operativas_aprobaciones WHERE actividad_id = ANY($1::uuid[]))", [createdActivityIds]);
+      await client.query("DELETE FROM public.liquidacion_items WHERE actividad_id = ANY($1::uuid[])", [createdActivityIds]);
+      await client.query("DELETE FROM public.actividades_operativas_aprobaciones WHERE actividad_id = ANY($1::uuid[])", [createdActivityIds]);
+      await client.query("DELETE FROM public.actividades_operativas WHERE id = ANY($1::uuid[])", [createdActivityIds]);
+    }
+
+    if (participantIds.length > 0) {
+      await client.query("DELETE FROM public.lote_aprobacion_items WHERE aprobacion_id IN (SELECT id FROM public.actividades_operativas_aprobaciones WHERE participante_id = ANY($1::uuid[]))", [participantIds]);
+      await client.query("DELETE FROM public.liquidacion_items WHERE participante_id = ANY($1::uuid[])", [participantIds]);
+      await client.query("DELETE FROM public.actividades_operativas_aprobaciones WHERE participante_id = ANY($1::uuid[])", [participantIds]);
+      await client.query("DELETE FROM public.actividades_operativas_entregas WHERE participante_id = ANY($1::uuid[]) OR enviado_por_id = $2", [participantIds, id]);
+      await client.query("DELETE FROM public.actividades_operativas_evidencias WHERE participante_id = ANY($1::uuid[]) OR subido_por_id = $2", [participantIds, id]);
+      await client.query("DELETE FROM public.actividades_operativas_participantes WHERE id = ANY($1::uuid[])", [participantIds]);
+    }
+
+    await client.query("DELETE FROM public.actividades_operativas_entregas WHERE enviado_por_id = $1", [id]);
+    await client.query("DELETE FROM public.actividades_operativas_evidencias WHERE subido_por_id = $1", [id]);
+    await client.query("DELETE FROM public.actividades_operativas_aprobaciones WHERE revisor_id = $1", [id]);
+    await client.query("DELETE FROM public.lote_aprobacion_items WHERE lote_id IN (SELECT id FROM public.lotes_aprobacion WHERE lider_id = $1)", [id]);
+    await client.query("DELETE FROM public.lotes_aprobacion WHERE lider_id = $1", [id]);
+    await client.query("DELETE FROM public.asistencia_descuentos WHERE tecnico_id = $1 OR asistencia_id IN (SELECT id FROM public.registros_asistencia WHERE usuario_id = $1)", [id]);
+    await client.query("DELETE FROM public.registros_asistencia WHERE usuario_id = $1", [id]);
+    await client.query("DELETE FROM public.mantenimientos_programados_participantes WHERE usuario_id = $1", [id]);
+    await client.query("UPDATE public.mantenimientos_programados SET tecnico_principal_id = NULL, updated_at = clock_timestamp() WHERE tecnico_principal_id = $1", [id]);
+    await client.query("UPDATE public.grupos_trabajo SET lider_id = NULL, updated_at = clock_timestamp() WHERE lider_id = $1", [id]);
+    await client.query("DELETE FROM public.grupo_miembros WHERE usuario_id = $1", [id]);
+    await client.query("DELETE FROM public.grupo_reportadores_actividad WHERE usuario_id = $1", [id]);
+    await client.query("DELETE FROM public.operaciones_idempotencia WHERE actor_id = $1", [id]);
+    await client.query("DELETE FROM public.auditoria_eventos WHERE actor_id = $1", [id]);
     await client.query("DELETE FROM public.sesiones_usuario WHERE usuario_id = $1", [id]);
     await client.query("DELETE FROM public.notificaciones WHERE usuario_id = $1", [id]);
     await client.query("DELETE FROM public.asistencia_horarios WHERE usuario_id = $1", [id]);
-    await client.query("UPDATE public.grupos_trabajo SET lider_id = NULL, updated_at = clock_timestamp() WHERE lider_id = $1", [id]);
-    await client.query("UPDATE public.grupo_miembros SET fecha_fin = CASE WHEN fecha_inicio > current_date THEN fecha_inicio ELSE current_date END WHERE usuario_id = $1 AND (fecha_fin IS NULL OR fecha_fin >= current_date)", [id]);
-    await client.query("UPDATE public.grupo_reportadores_actividad SET fecha_fin = CASE WHEN fecha_inicio > current_date THEN fecha_inicio ELSE current_date END WHERE usuario_id = $1 AND (fecha_fin IS NULL OR fecha_fin >= current_date)", [id]);
-    await client.query("UPDATE public.mantenimientos_programados SET tecnico_principal_id = NULL, updated_at = clock_timestamp() WHERE tecnico_principal_id = $1", [id]);
-    await client.query("UPDATE public.mantenimientos_programados_participantes SET estado = 'retirado', fecha_retiro = GREATEST(clock_timestamp(), fecha_asignacion), updated_at = clock_timestamp() WHERE usuario_id = $1 AND estado = 'activo'", [id]);
-
-    if (!hasHistory) {
-      await writeAudit(client, actor.id, "usuario", id, "anular", target, { eliminado: true });
-      await client.query("DELETE FROM public.mantenimientos_programados_participantes WHERE usuario_id = $1", [id]);
-      await client.query("DELETE FROM public.grupo_miembros WHERE usuario_id = $1", [id]);
-      await client.query("DELETE FROM public.grupo_reportadores_actividad WHERE usuario_id = $1", [id]);
-      await client.query("DELETE FROM public.usuarios WHERE id = $1", [id]);
-      return { deleted: true, archived: false, id, message: "Usuario eliminado definitivamente y sesiones/asignaciones futuras revocadas." };
-    }
-
-    const anonymizedUsername = `eliminado_${id.replace(/-/g, "").slice(0, 20)}`;
-    const anonymizedEmail = `eliminado+${id}@invalid.local`;
-    const { rows } = await client.query(
-      `UPDATE public.usuarios
-          SET username = $2,
-              nombre = 'Usuario eliminado',
-              apellido = '',
-              email = $3,
-              telefono = NULL,
-              password_hash = '',
-              avatar_url = NULL,
-              estado = 'inactivo',
-              updated_at = clock_timestamp()
-        WHERE id = $1
-        RETURNING *`,
-      [id, anonymizedUsername, anonymizedEmail],
-    );
-    await writeAudit(client, actor.id, "usuario", id, "anular", target, { eliminado: false, archivado: true, usuario: rows[0] });
-    return { deleted: false, archived: true, id, message: "La cuenta fue retirada y anonimizada porque tiene historial operativo/financiero. El historial se conserva y las asignaciones futuras fueron revocadas." };
+    await client.query("DELETE FROM public.usuarios WHERE id = $1", [id]);
+    return { deleted: true, archived: false, id, message: "Usuario eliminado definitivamente junto con sus datos, asignaciones, historial y sesiones." };
   });
 }
 
@@ -1248,7 +1245,9 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     WHERE ${filters.join(" AND ")}`;
   const order = adminView
     ? view === "vencidos" || view === "realizados"
-      ? "m.fecha_programada DESC NULLS LAST, m.created_at DESC, m.id DESC"
+      ? view === "realizados"
+        ? "COALESCE(m.fecha_realizado, m.fecha_programada) DESC NULLS LAST, m.created_at DESC, m.id DESC"
+        : "m.fecha_programada DESC NULLS LAST, m.created_at DESC, m.id DESC"
       : view === "calendario"
         ? "m.fecha_programada ASC NULLS LAST, m.created_at ASC, m.id ASC"
         : `CASE WHEN m.fecha_programada >= (now() AT TIME ZONE 'America/Bogota')::date THEN 0 ELSE 1 END,
@@ -1656,7 +1655,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "contracts.create": { await requireAdmin(user); return createContract(payload, user); }
     case "contracts.update": { await requireAdmin(user); return updateContract(payload, user); }
     case "contracts.updateMaintenance": { await requireAdmin(user); const { rows } = await dbQuery("UPDATE public.mantenimientos_programados SET estado = COALESCE($2,estado), fecha_programada = COALESCE($3,fecha_programada), fecha_realizado = COALESCE($4,fecha_realizado), tecnico_principal_id = COALESCE($5,tecnico_principal_id), valor_recaudado = COALESCE($6,valor_recaudado), updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id, payload.estado === "realizado" ? "ejecutado" : payload.estado, payload.fechaProgramada, payload.fechaRealizado, payload.tecnicoId, payload.valorRecaudado]); return { id: rows[0].id, mes: number(rows[0].numero), fechaProgramada: dateOnly(rows[0].fecha_programada), fechaRealizado: dateOnly(rows[0].fecha_realizado) || undefined, tecnicoId: rows[0].tecnico_principal_id || undefined, estado: rows[0].estado === "ejecutado" ? "realizado" : rows[0].estado, valorRecaudado: number(rows[0].valor_recaudado) }; }
-    case "contracts.delete": { await requireAdmin(user); return deleteContract(payload, user); }
+    case "contracts.delete": { await requireAdmin(user); return deleteContract(payload); }
 
     case "maintenances.page": return maintenancePageRows(payload, user);
     case "maintenances.adminPage": { await requireAdmin(user); return maintenancePageRows({ ...payload, adminView: true }, user); }
@@ -2314,47 +2313,111 @@ async function updateContract(payload: Payload, user: UserContext) {
   return { ...mapContract(rows[0], maintenanceRows), cronogramaResultado: result.scheduleResult };
 }
 
-async function deleteContract(payload: Payload, user: UserContext) {
+async function deleteContract(payload: Payload) {
   return withTransaction(async (client) => {
     const contractResult = await client.query("SELECT * FROM public.contratos_mantenimiento WHERE id = $1 FOR UPDATE", [payload.id]);
     const contract = contractResult.rows[0];
     if (!contract) throw new Error("No se encontró el contrato que intentas eliminar.");
-    const historyResult = await client.query(
-      `SELECT EXISTS (
-         SELECT 1 FROM public.mantenimientos_programados m
-         JOIN public.actividades_operativas_mantenimientos am ON am.mantenimiento_programado_id = m.id
-         WHERE m.contrato_id = $1
-       ) OR EXISTS (
-         SELECT 1 FROM public.auditoria_eventos ae
-         WHERE ae.entidad_tipo IN ('contrato_mantenimiento','mantenimiento_programado')
-           AND ae.accion <> 'crear'
-           AND (ae.entidad_id = $1 OR ae.entidad_id IN (SELECT id FROM public.mantenimientos_programados WHERE contrato_id = $1))
-       ) AS has_history`,
+    const { rows: scheduleRows } = await client.query(
+      "SELECT id FROM public.mantenimientos_programados WHERE contrato_id = $1 FOR UPDATE",
       [payload.id],
     );
-    if (historyResult.rows[0]?.has_history) {
-      const archived = await client.query("UPDATE public.contratos_mantenimiento SET estado = 'cerrado', updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id]);
-      await writeAudit(client, user.id, "contrato_mantenimiento", payload.id, "anular", contract, archived.rows[0]);
-      return { deleted: false, archived: true, id: payload.id, message: "El contrato conserva historial operativo y fue archivado (cerrado). Sus actividades, aprobaciones y liquidaciones no se borraron." };
+    const maintenanceIds = scheduleRows.map((row: any) => row.id);
+    const activityIds = maintenanceIds.length
+      ? (await client.query(
+          `SELECT DISTINCT actividad_id
+             FROM public.actividades_operativas_mantenimientos
+            WHERE mantenimiento_programado_id = ANY($1::uuid[])`,
+          [maintenanceIds],
+        )).rows.map((row: any) => row.actividad_id)
+      : [];
+
+    // Este flujo es deliberadamente destructivo porque el cliente solicitó
+    // eliminar el contrato y todo su historial, no archivarlo. Se limpian las
+    // restricciones RESTRICT antes de eliminar las actividades y cronograma.
+    if (activityIds.length > 0) {
+      await client.query("DELETE FROM public.lote_aprobacion_items WHERE aprobacion_id IN (SELECT id FROM public.actividades_operativas_aprobaciones WHERE actividad_id = ANY($1::uuid[]))", [activityIds]);
+      await client.query("DELETE FROM public.liquidacion_items WHERE actividad_id = ANY($1::uuid[])", [activityIds]);
+      await client.query("DELETE FROM public.actividades_operativas_aprobaciones WHERE actividad_id = ANY($1::uuid[])", [activityIds]);
+      await client.query("DELETE FROM public.actividades_operativas WHERE id = ANY($1::uuid[])", [activityIds]);
+      await client.query("DELETE FROM public.notificaciones WHERE entidad_id = ANY($1::uuid[])", [activityIds]);
+      await client.query("DELETE FROM public.envios_correo WHERE entidad_id = ANY($1::uuid[])", [activityIds]);
+      await client.query("DELETE FROM public.operaciones_idempotencia WHERE recurso_id = ANY($1::uuid[])", [activityIds]);
+      await client.query("DELETE FROM public.auditoria_eventos WHERE entidad_id = ANY($1::uuid[])", [activityIds]);
     }
-    const scheduleResult = await client.query("SELECT id FROM public.mantenimientos_programados WHERE contrato_id = $1 FOR UPDATE", [payload.id]);
-    await writeAudit(client, user.id, "contrato_mantenimiento", payload.id, "anular", contract, { eliminado: true, mantenimientos: scheduleResult.rowCount || 0 });
-    if (scheduleResult.rows.length > 0) {
-      await client.query(
-        "DELETE FROM public.notificaciones WHERE entidad_tipo = 'mantenimiento_programado' AND entidad_id = ANY($1::uuid[])",
-        [scheduleResult.rows.map((row: any) => row.id)],
-      );
+    if (maintenanceIds.length > 0) {
+      await client.query("DELETE FROM public.notificaciones WHERE entidad_tipo = 'mantenimiento_programado' AND entidad_id = ANY($1::uuid[])", [maintenanceIds]);
+      await client.query("DELETE FROM public.envios_correo WHERE entidad_id = ANY($1::uuid[])", [maintenanceIds]);
+      await client.query("DELETE FROM public.operaciones_idempotencia WHERE recurso_id = ANY($1::uuid[])", [maintenanceIds]);
+      await client.query("DELETE FROM public.auditoria_eventos WHERE entidad_id = ANY($1::uuid[])", [maintenanceIds]);
+      await client.query("DELETE FROM public.actividades_operativas_mantenimientos WHERE mantenimiento_programado_id = ANY($1::uuid[])", [maintenanceIds]);
     }
+    await client.query("DELETE FROM public.auditoria_eventos WHERE entidad_tipo = 'contrato_mantenimiento' AND entidad_id = $1", [payload.id]);
     await client.query("DELETE FROM public.mantenimientos_programados WHERE contrato_id = $1", [payload.id]);
     await client.query("DELETE FROM public.contratos_mantenimiento WHERE id = $1", [payload.id]);
-    return { deleted: true, archived: false, id: payload.id, message: "Contrato eliminado definitivamente. Ya puedes crear otro contrato para el mismo cliente y año." };
+    return { deleted: true, archived: false, id: payload.id, message: "Contrato eliminado definitivamente con sus mantenimientos, reportes, aprobaciones y liquidaciones. Ya puedes crear otro contrato para el mismo cliente y año." };
   });
+}
+
+async function resolveMaintenanceContext(
+  client: any,
+  clientId: string,
+  technicianId: string | null | undefined,
+  fecha: string,
+  requestedGroupId?: string | null,
+  requestedSedeId?: string | null,
+) {
+  let sedeId = requestedSedeId || null;
+  if (!sedeId) {
+    const { rows } = await client.query(
+      "SELECT id FROM public.cliente_sedes WHERE cliente_id = $1 AND estado = 'activo' ORDER BY created_at LIMIT 1",
+      [clientId],
+    );
+    sedeId = rows[0]?.id || null;
+  }
+
+  let grupoId = requestedGroupId || null;
+  if (!grupoId && technicianId) {
+    const { rows } = await client.query(
+      `SELECT g.id
+         FROM public.grupos_trabajo g
+        WHERE g.estado = 'activo'
+          AND (
+            g.lider_id = $1
+            OR EXISTS (
+              SELECT 1 FROM public.grupo_miembros gm
+               WHERE gm.grupo_id = g.id
+                 AND gm.usuario_id = $1
+                 AND gm.fecha_inicio <= $2::date
+                 AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= $2::date)
+            )
+          )
+        ORDER BY (g.lider_id = $1) DESC, g.created_at DESC
+        LIMIT 1`,
+      [technicianId, fecha],
+    );
+    grupoId = rows[0]?.id || null;
+  }
+
+  return { grupoId, sedeId };
 }
 
 async function createMaintenance(payload: Payload, user: UserContext) {
   const clientId = payload.clienteId;
   if (!clientId || !payload.fechaProgramada) throw new Error("El mantenimiento requiere cliente y fecha.");
   const id = await withTransaction(async (client) => {
+    const participantIds = jsonArray(payload.participantes || payload.participants)
+      .map((item) => String(item?.usuarioId || item?.usuario_id || item?.tecnicoId || item?.tecnico_id || "").trim())
+      .filter(Boolean);
+    const technicianId = String(payload.tecnicoId || participantIds[0] || user.id).trim() || null;
+    const context = await resolveMaintenanceContext(
+      client,
+      clientId,
+      technicianId,
+      dateOnly(payload.fechaProgramada) || bogotaClock().date,
+      payload.grupoId || null,
+      payload.sedeId || null,
+    );
     const { rows } = await client.query(
       `INSERT INTO public.mantenimientos_programados
         (contrato_id, cliente_id, sede_id, numero, fecha_programada, hora_programada,
@@ -2365,12 +2428,12 @@ async function createMaintenance(payload: Payload, user: UserContext) {
       [
         payload.contratoId || null,
         clientId,
-        payload.sedeId || null,
+        context.sedeId,
         number(payload.numero, 1),
         payload.fechaProgramada,
         payload.horaProgramada || null,
-        payload.grupoId || null,
-        payload.tecnicoId || user.id,
+        context.grupoId,
+        technicianId,
         number(payload.costoTecnicoTotal || payload.costoActividad),
         payload.estado === "realizado" ? "ejecutado" : payload.estado || "pendiente",
         payload.observaciones || null,
@@ -2418,20 +2481,71 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
       throw new Error("No tienes este mantenimiento asignado para reportarlo.");
     }
 
-    const { rows: assignmentRows } = await client.query(
+    let assignmentRows = (await client.query(
       `SELECT id, usuario_id, rol_participacion, porcentaje, valor_ganado
          FROM public.mantenimientos_programados_participantes
         WHERE mantenimiento_id = $1 AND estado = 'activo'
-        ORDER BY rol_participacion = 'principal' DESC, created_at`,
+         ORDER BY rol_participacion = 'principal' DESC, created_at`,
       [maintenanceId],
-    );
+    )).rows;
     const assignment = assignmentRows.find((row: any) => String(row.usuario_id) === String(user.id));
-    if (!assignment && !["admin", "supervisor"].includes(user.rol)) {
+    let selectedAssignment = assignment || assignmentRows[0];
+    if (!selectedAssignment && maintenance.tecnico_principal_id && (
+      String(maintenance.tecnico_principal_id) === String(user.id)
+      || ["admin", "supervisor"].includes(user.rol)
+    )) {
+      const { rows: fallbackAssignmentRows } = await client.query(
+        `INSERT INTO public.mantenimientos_programados_participantes
+          (mantenimiento_id, usuario_id, rol_participacion, porcentaje, valor_ganado)
+         VALUES ($1,$2,'principal',100,$3)
+         ON CONFLICT (mantenimiento_id, usuario_id) DO UPDATE SET estado = 'activo', fecha_retiro = NULL, updated_at = clock_timestamp()
+         RETURNING id, usuario_id, rol_participacion, porcentaje, valor_ganado`,
+        [maintenanceId, maintenance.tecnico_principal_id, number(maintenance.costo_tecnico_presupuestado)],
+      );
+      selectedAssignment = fallbackAssignmentRows[0];
+      assignmentRows = [...assignmentRows, selectedAssignment];
+    }
+    if (!assignment && !["admin", "supervisor"].includes(user.rol) && String(selectedAssignment?.usuario_id) !== String(user.id)) {
       throw new Error("No estás incluido como participante de este mantenimiento.");
     }
-    const selectedAssignment = assignment || assignmentRows[0];
     if (!selectedAssignment) throw new Error("El mantenimiento no tiene técnicos asignados.");
-    if (!maintenance.grupo_id || !maintenance.sede_id) throw new Error("El mantenimiento debe tener grupo y sede antes de poder reportarse.");
+    const contextCandidates = uniqueIds([
+      String(selectedAssignment.usuario_id || user.id),
+      String(maintenance.tecnico_principal_id || ""),
+      ...assignmentRows.map((item: any) => String(item.usuario_id || "")),
+    ]);
+    let context = await resolveMaintenanceContext(
+      client,
+      maintenance.cliente_id,
+      contextCandidates[0],
+      executionDate,
+      maintenance.grupo_id,
+      maintenance.sede_id,
+    );
+    for (const candidateId of contextCandidates.slice(1)) {
+      if (context.grupoId) break;
+      context = await resolveMaintenanceContext(
+        client,
+        maintenance.cliente_id,
+        candidateId,
+        executionDate,
+        maintenance.grupo_id,
+        context.sedeId || maintenance.sede_id,
+      );
+    }
+    const reportGroupId = context.grupoId;
+    const reportSedeId = context.sedeId;
+    if (!reportGroupId) {
+      throw new Error("El técnico asignado no pertenece a un grupo de trabajo activo.");
+    }
+    if (!maintenance.grupo_id || !maintenance.sede_id) {
+      await client.query(
+        `UPDATE public.mantenimientos_programados
+            SET grupo_id = COALESCE(grupo_id, $2), sede_id = COALESCE(sede_id, $3), updated_at = clock_timestamp()
+          WHERE id = $1`,
+        [maintenanceId, reportGroupId, reportSedeId],
+      );
+    }
 
     const { rows: linkedRows } = await client.query(
       `SELECT a.id, a.codigo, a.grupo_id, a.cliente_id, a.sede_id, a.valor_base, a.valor_aplicado,
@@ -2472,8 +2586,8 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
           payload.codigo || null,
           key,
           maintenance.cliente_id,
-          maintenance.sede_id,
-          maintenance.grupo_id,
+          reportSedeId,
+          reportGroupId,
           user.id,
           executionDate,
           payload.actividades || payload.descripcion || maintenance.titulo || "Mantenimiento preventivo",
@@ -2519,7 +2633,8 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
     const currentParticipant = activityParticipants.find((row: any) => String(row.tecnico_id) === String(user.id)) || activityParticipants[0];
     if (!currentParticipant) throw new Error("No se pudo crear el participante del reporte.");
 
-    const leaderId = maintenance.mantenimiento_lider_id || user.id;
+    const { rows: reportGroupRows } = await client.query("SELECT lider_id FROM public.grupos_trabajo WHERE id = $1", [reportGroupId]);
+    const leaderId = reportGroupRows[0]?.lider_id || maintenance.mantenimiento_lider_id || user.id;
     for (const item of activityParticipants) {
       await client.query(
         `INSERT INTO public.actividades_operativas_aprobaciones (actividad_id, participante_id, revisor_id, estado)
@@ -2544,7 +2659,7 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
              valor_base, valor_ganado, valor_ganado_original, estado, descripcion_snapshot, sede_snapshot)
            VALUES ($1,$2,$3,$4,$5,'mantenimiento',$6,$7,$8,$8,'pendiente',$9,$10)
            ON CONFLICT (periodo_id, actividad_id, participante_id) DO NOTHING`,
-          [periodRows[0].id, activity.id, item.id, item.tecnico_id, periodDate, item.porcentaje, item.valor_base, item.valor_ganado, activity.descripcion, maintenance.sede_id],
+          [periodRows[0].id, activity.id, item.id, item.tecnico_id, periodDate, item.porcentaje, item.valor_base, item.valor_ganado, activity.descripcion, reportSedeId],
         );
       }
     }

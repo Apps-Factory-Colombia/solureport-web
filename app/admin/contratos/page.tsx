@@ -2357,10 +2357,10 @@ export default function ContratosPage() {
             return (
               <div className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  ¿Estás seguro de que deseas eliminar el contrato de{" "}
+                  ¿Estás seguro de que deseas eliminar definitivamente el contrato de{" "}
                   <span className="font-semibold text-foreground">{client?.edificio || client?.nombre}</span>?
-                  Los mantenimientos sin historial se eliminarán. Si ya existen reportes, aprobaciones o liquidaciones,
-                  el sistema lo archivará para proteger la información y te lo informará.
+                  Se eliminarán de forma permanente el contrato, sus mantenimientos, reportes, aprobaciones y liquidaciones.
+                  Esta acción no se puede deshacer.
                 </p>
                 <div className="rounded-lg border border-border/50 bg-secondary/30 p-3 text-sm space-y-1">
                   <div className="flex justify-between">

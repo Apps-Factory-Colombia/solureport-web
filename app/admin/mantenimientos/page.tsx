@@ -60,13 +60,12 @@ import {
   Download,
   FileSpreadsheet,
 } from "lucide-react";
-import { Maintenance, MaintenanceStatus, Client, User, CompanySettings, LiquidationPeriod } from "@/lib/types";
+import { Maintenance, MaintenanceStatus, Client, User, CompanySettings } from "@/lib/types";
 import { MaintenanceAdminPage, MaintenanceAdminView, getMantenimientosAdminPage, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/data/services/mantenimientos";
 import { getContratos, createContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getConfiguracion } from "@/lib/data/services/configuracion";
-import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { isAssignableMaintenanceUser } from "@/lib/utils/maintenance-assignment";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
@@ -277,7 +276,6 @@ export default function MantenimientosPage() {
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
-  const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [maintenancePage, setMaintenancePage] = useState<MaintenanceAdminPage | null>(null);
@@ -319,7 +317,6 @@ export default function MantenimientosPage() {
   // La bandeja de vencidos debe mostrar por defecto el mismo universo del
   // badge. El filtro mensual queda disponible como consulta explícita.
   const [vencidosMonthFilter, setVencidosMonthFilter] = useState<string>("");
-  const [completedPeriodFilter, setCompletedPeriodFilter] = useState<string>("");
 
   const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
   const [calendarSelectedDate, setCalendarSelectedDate] = useState<Date | null>(null);
@@ -333,7 +330,7 @@ export default function MantenimientosPage() {
   const loadSupportingData = useCallback(async () => {
     setLoading(true);
     try {
-      const [ct, c, u, s, p] = await Promise.all([
+      const [ct, c, u, s] = await Promise.all([
         getContratos(),
         getClientes(),
         getUsuarios(),
@@ -341,20 +338,11 @@ export default function MantenimientosPage() {
           console.error("Error cargando configuración de empresa:", error);
           return null;
         }),
-        getPeriodos().catch((error) => {
-          console.error("Error cargando períodos de liquidación:", error);
-          return [];
-        }),
       ]);
       setContracts(ct);
       setClients(c);
       setUsers(u);
       setCompanySettings(s);
-      setPeriods(p);
-      setCompletedPeriodFilter((current) => {
-        if (current && p.some((period) => period.id === current)) return current;
-        return p[0]?.id || "";
-      });
     } catch (err) {
       console.error("Error cargando información de mantenimientos:", err);
     } finally {
@@ -389,7 +377,6 @@ export default function MantenimientosPage() {
             : targetTab === "calendario"
               ? getMonthInputValue(calendarMonth)
               : undefined,
-        periodoId: targetTab === "realizados" ? completedPeriodFilter || undefined : undefined,
         includeCounts: true,
       });
       if (requestId !== maintenanceRequestRef.current) return;
@@ -415,7 +402,7 @@ export default function MantenimientosPage() {
     } finally {
       if (requestId === maintenanceRequestRef.current) setMaintenancePageLoading(false);
     }
-  }, [activeTab, calendarMonth, completedPeriodFilter, overdueSearch, pageByTab, programadosMonthFilter, search, statusFilter, vencidosMonthFilter]);
+  }, [activeTab, calendarMonth, overdueSearch, pageByTab, programadosMonthFilter, search, statusFilter, vencidosMonthFilter]);
 
   useEffect(() => {
     if (!loading) void loadMaintenancePage();
@@ -535,11 +522,6 @@ export default function MantenimientosPage() {
 
   const getMaintenanceCompletedDate = useCallback((maintenance: Maintenance) => {
     return maintenance.fechaCierre || maintenance.fechaProgramada || "";
-  }, []);
-
-  const getPeriodLabel = useCallback((period?: LiquidationPeriod) => {
-    if (!period) return "Sin período";
-    return `${period.fechaInicio} al ${period.fechaFin}`;
   }, []);
 
   const canScheduleMaintenance = useCallback((maintenance: Maintenance) => {
@@ -720,23 +702,12 @@ export default function MantenimientosPage() {
   }, [isMaintenanceCompleted, maintenances]);
 
   const completedMaintenancesByPeriod = useMemo(() => {
-    const selectedPeriod = periods.find((period) => period.id === completedPeriodFilter);
-    if (!selectedPeriod) return [];
-
-    return completedMaintenances.filter((maintenance) => {
-      const completedDate = getMaintenanceCompletedDate(maintenance);
-      return !!completedDate && completedDate >= selectedPeriod.fechaInicio && completedDate <= selectedPeriod.fechaFin;
-    }).sort((left, right) => {
+    return [...completedMaintenances].sort((left, right) => {
       const dateCompare = getMaintenanceCompletedDate(right).localeCompare(getMaintenanceCompletedDate(left));
       if (dateCompare !== 0) return dateCompare;
       return right.id.localeCompare(left.id);
     });
-  }, [completedMaintenances, completedPeriodFilter, getMaintenanceCompletedDate, periods]);
-
-  const selectedCompletedPeriod = useMemo(
-    () => periods.find((period) => period.id === completedPeriodFilter),
-    [completedPeriodFilter, periods]
-  );
+  }, [completedMaintenances, getMaintenanceCompletedDate]);
 
   const calendarFilteredMaintenances = useMemo(() => {
     return filtered.filter((m) => {
@@ -871,21 +842,16 @@ export default function MantenimientosPage() {
   };
 
   const handleExportCompletedByPeriodPDF = useCallback(() => {
-    if (!selectedCompletedPeriod) {
-      alert("Debes seleccionar un período para exportar los mantenimientos realizados.");
-      return;
-    }
-
     if (completedMaintenancesByPeriod.length === 0) {
-      alert("No hay mantenimientos realizados en el período seleccionado.");
+      alert("No hay mantenimientos realizados para exportar.");
       return;
     }
 
     generateTablePDF({
-      titulo: "MANTENIMIENTOS REALIZADOS POR PERIODO",
-      subtitulo: "Exportación de mantenimientos realizados con el valor total del contrato y el valor cobrado de cada avance.",
+      titulo: "MANTENIMIENTOS REALIZADOS",
+      subtitulo: "Página actual del listado general de mantenimientos realizados, ordenada del más reciente al más antiguo.",
       empresa: companyName,
-      periodo: getPeriodLabel(selectedCompletedPeriod),
+      periodo: "Todos los períodos",
       headers: ["Fecha realizada", "Código", "Cliente", "Tecnico", "Avance", "Estado", "Valor total", "Valor cobrado avance"],
       rows: completedMaintenancesByPeriod.map((maintenance) => [
         getMaintenanceCompletedDate(maintenance),
@@ -898,8 +864,8 @@ export default function MantenimientosPage() {
         formatCurrency(getMaintenanceChargedValue(maintenance)),
       ]),
       summary: [
-        { label: "Periodo", value: getPeriodLabel(selectedCompletedPeriod) },
-        { label: "Mantenimientos realizados", value: String(completedMaintenancesByPeriod.length) },
+        { label: "Vista", value: "Todos los períodos" },
+        { label: "Mantenimientos en página", value: String(completedMaintenancesByPeriod.length) },
         {
           label: "Valor total contratos",
           value: formatCurrency(completedMaintenancesByPeriod.reduce((sum, maintenance) => sum + getMaintenanceAnnualValue(maintenance), 0)),
@@ -909,10 +875,10 @@ export default function MantenimientosPage() {
           value: formatCurrency(completedMaintenancesByPeriod.reduce((sum, maintenance) => sum + getMaintenanceChargedValue(maintenance), 0)),
         },
       ],
-      fileName: `mantenimientos_realizados_${selectedCompletedPeriod.fechaInicio}_${selectedCompletedPeriod.fechaFin}`,
+      fileName: "mantenimientos_realizados",
       landscape: true,
     });
-  }, [companyName, completedMaintenancesByPeriod, getMaintenanceAnnualValue, getMaintenanceChargedValue, getMaintenanceClientLabel, getMaintenanceCompletedDate, getMaintenanceProgressLabel, getMaintenanceStatusLabel, getMaintenanceTechnicianLabel, getPeriodLabel, selectedCompletedPeriod]);
+  }, [companyName, completedMaintenancesByPeriod, getMaintenanceAnnualValue, getMaintenanceChargedValue, getMaintenanceClientLabel, getMaintenanceCompletedDate, getMaintenanceProgressLabel, getMaintenanceStatusLabel, getMaintenanceTechnicianLabel]);
 
   const handleSave = async (data: Partial<Maintenance>) => {
     const isNew = !editingMaintenance;
@@ -1433,37 +1399,19 @@ export default function MantenimientosPage() {
                   <div>
                     <CardTitle className="text-lg text-foreground flex items-center gap-2">
                       <FileSpreadsheet className="h-5 w-5 text-emerald-400" />
-                      Mantenimientos Realizados por Período
+                      Mantenimientos Realizados
                     </CardTitle>
                     <p className="mt-2 text-sm text-muted-foreground">
-                      En este módulo puedes ver y exportar por período el valor total del contrato y el valor cobrado correspondiente a cada avance realizado.
+                      Aquí aparecen todos los mantenimientos realizados, ordenados del más reciente al más antiguo y divididos en páginas para no cargar todo de una vez.
                     </p>
                   </div>
                   <div className="flex flex-col gap-3 sm:items-end">
-                    <Select
-                      value={completedPeriodFilter}
-                      onValueChange={(value) => {
-                        setCompletedPeriodFilter(value);
-                        setPageByTab((current) => ({ ...current, realizados: 1 }));
-                      }}
-                    >
-                      <SelectTrigger className="w-[260px] bg-secondary/50 border-border/50">
-                        <SelectValue placeholder="Seleccionar período" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-card border-border">
-                        {periods.map((period) => (
-                          <SelectItem key={period.id} value={period.id}>
-                            {getPeriodLabel(period)}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
                     <Button
                       type="button"
                       variant="outline"
                       className="gap-2 border-gold/30 text-gold hover:bg-gold/10 hover:text-gold"
                       onClick={handleExportCompletedByPeriodPDF}
-                      disabled={!selectedCompletedPeriod || completedMaintenancesByPeriod.length === 0}
+                      disabled={completedMaintenancesByPeriod.length === 0}
                     >
                       <Download className="h-4 w-4" />
                       Exportar PDF
@@ -1489,9 +1437,7 @@ export default function MantenimientosPage() {
                     {completedMaintenancesByPeriod.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
-                          {selectedCompletedPeriod
-                            ? "No hay mantenimientos realizados en el período seleccionado"
-                            : "No hay períodos disponibles para exportar"}
+                          No hay mantenimientos realizados
                         </TableCell>
                       </TableRow>
                     ) : (
