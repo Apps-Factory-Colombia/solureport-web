@@ -74,6 +74,8 @@ type ContractMaintenanceDraft = {
   horaProgramada: string;
   valorTecnico: string;
   tecnicoId: string;
+  responsibleSearch: string;
+  responsibleSelectorOpen: boolean;
   participantDrafts: ContractParticipantDraft[];
   participantSearch: string;
   participantSelectorOpen: boolean;
@@ -373,6 +375,8 @@ export default function ContratosPage() {
         horaProgramada: previous?.horaProgramada || "",
         valorTecnico: previous?.valorTecnico || "0",
         tecnicoId: previous?.tecnicoId || "",
+        responsibleSearch: previous?.responsibleSearch || "",
+        responsibleSelectorOpen: false,
         participantDrafts: previous?.participantDrafts || [],
         participantSearch: previous?.participantSearch || "",
         participantSelectorOpen: false,
@@ -512,8 +516,10 @@ export default function ContratosPage() {
           tecnicoId: source.tecnicoId,
           horaProgramada: source.horaProgramada,
           valorTecnico: source.valorTecnico,
-          participantDrafts: source.participantDrafts.map((participant) => ({ ...participant })),
-          participantSearch: "",
+           participantDrafts: source.participantDrafts.map((participant) => ({ ...participant })),
+           responsibleSearch: "",
+           responsibleSelectorOpen: false,
+           participantSearch: "",
           participantSelectorOpen: false,
         });
     });
@@ -1846,7 +1852,7 @@ export default function ContratosPage() {
       </Dialog>
 
       <Dialog open={createOpen} onOpenChange={handleCreateOpenChange}>
-        <DialogContent className="max-h-[90vh] overflow-hidden bg-card border-border sm:max-w-5xl">
+        <DialogContent className="max-h-[92vh] overflow-hidden bg-card border-border sm:max-w-6xl">
           <DialogHeader>
             <DialogTitle className="text-foreground">Nuevo Contrato de Mantenimiento</DialogTitle>
             <div className="flex flex-wrap items-center gap-2 pt-3 text-xs">
@@ -2028,6 +2034,12 @@ export default function ContratosPage() {
                     const technicalValue = Math.max(0, Math.round(Number(draft.valorTecnico || 0) || 0));
                     const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, technicalValue);
                     const selectedParticipantIds = new Set(draft.participantDrafts.filter((participant) => !!participant.usuarioId).map((participant) => participant.usuarioId));
+                    const selectedResponsible = assignableUsers.find((user) => user.id === draft.tecnicoId);
+                    const filteredResponsibleUsers = assignableUsers.filter((user) => {
+                      const query = draft.responsibleSearch.trim().toLowerCase();
+                      if (!query) return true;
+                      return `${user.nombre} ${user.apellido} ${user.email}`.toLowerCase().includes(query);
+                    });
                     const filteredAssignableUsers = assignableUsers.filter((user) => {
                       const query = draft.participantSearch.trim().toLowerCase();
                       if (!query) return true;
@@ -2046,8 +2058,8 @@ export default function ContratosPage() {
                           </Button>
                         </div>
 
-                        <div className="grid gap-4 md:grid-cols-4">
-                          <div className="space-y-2">
+                        <div className="grid min-w-0 gap-5 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(17rem,1.45fr)_minmax(13rem,1fr)]">
+                          <div className="min-w-0 space-y-2">
                             <Label className="text-foreground/80">Fecha programada</Label>
                             <Input
                               type="date"
@@ -2056,7 +2068,7 @@ export default function ContratosPage() {
                               className="bg-card border-border/50"
                             />
                           </div>
-                          <div className="space-y-2">
+                          <div className="min-w-0 space-y-2">
                             <Label className="text-foreground/80">Hora programada</Label>
                             <Input
                               type="time"
@@ -2065,23 +2077,61 @@ export default function ContratosPage() {
                               className="bg-card border-border/50"
                             />
                           </div>
-                          <div className="space-y-2">
+                          <div className="min-w-0 space-y-2">
                             <Label className="text-foreground/80">Técnico responsable</Label>
-                            <Select
-                              value={draft.tecnicoId}
-                              onValueChange={(value) => updateCreateMaintenanceDraft(index, (current) => ensureTechnicianParticipant(current, value, current.tecnicoId))}
+                            <Popover
+                              open={draft.responsibleSelectorOpen}
+                              onOpenChange={(open) => updateCreateMaintenanceDraft(index, (current) => ({ ...current, responsibleSelectorOpen: open }))}
                             >
-                              <SelectTrigger className="bg-card border-border/50">
-                                <SelectValue placeholder="Seleccionar técnico" />
-                              </SelectTrigger>
-                              <SelectContent className="bg-card border-border">
-                                {assignableUsers.map((user) => (
-                                  <SelectItem key={user.id} value={user.id}>{`${user.nombre} ${user.apellido}`}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
+                              <PopoverTrigger asChild>
+                                <Button type="button" variant="outline" className="h-10 w-full min-w-0 justify-between border-border/50 bg-card text-left text-foreground hover:bg-secondary/70">
+                                  <span className="truncate">
+                                    {selectedResponsible ? `${selectedResponsible.nombre} ${selectedResponsible.apellido}` : "Seleccionar técnico"}
+                                  </span>
+                                  <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-60" />
+                                </Button>
+                              </PopoverTrigger>
+                              <PopoverContent className="w-[min(28rem,calc(100vw-2rem))] border-border bg-card p-3" align="start">
+                                <div className="space-y-3">
+                                  <Input
+                                    value={draft.responsibleSearch}
+                                    onChange={(event) => updateCreateMaintenanceDraft(index, (current) => ({ ...current, responsibleSearch: event.target.value }))}
+                                    placeholder="Buscar por nombre, apellido o correo"
+                                    className="bg-secondary/50 border-border/50"
+                                    autoFocus
+                                  />
+                                  <ScrollArea className="h-56 rounded-md border border-border/50">
+                                    <div className="space-y-1 p-2">
+                                      {filteredResponsibleUsers.map((user) => (
+                                        <button
+                                          key={user.id}
+                                          type="button"
+                                          className={cn(
+                                            "flex w-full min-w-0 flex-col rounded-md px-3 py-2 text-left hover:bg-secondary/50",
+                                            draft.tecnicoId === user.id && "bg-gold/10 text-gold",
+                                          )}
+                                          onClick={() => {
+                                            updateCreateMaintenanceDraft(index, (current) => ({
+                                              ...ensureTechnicianParticipant(current, user.id, current.tecnicoId),
+                                              responsibleSearch: "",
+                                              responsibleSelectorOpen: false,
+                                            }));
+                                          }}
+                                        >
+                                          <span className="truncate text-sm font-medium">{user.nombre} {user.apellido}</span>
+                                          <span className="truncate text-xs text-muted-foreground">{user.email}</span>
+                                        </button>
+                                      ))}
+                                      {filteredResponsibleUsers.length === 0 && (
+                                        <p className="px-3 py-4 text-center text-xs text-muted-foreground">No hay técnicos que coincidan con la búsqueda.</p>
+                                      )}
+                                    </div>
+                                  </ScrollArea>
+                                </div>
+                              </PopoverContent>
+                            </Popover>
                           </div>
-                          <div className="space-y-2">
+                          <div className="min-w-0 space-y-2">
                             <Label className="text-foreground/80">Valor técnico total</Label>
                             <Input
                               type="number"
@@ -2095,7 +2145,7 @@ export default function ContratosPage() {
                                   Number(event.target.value || 0)
                                 ),
                               }))}
-                              className="bg-card border-border/50"
+                              className="h-10 bg-card border-border/50 tabular-nums"
                             />
                           </div>
                         </div>

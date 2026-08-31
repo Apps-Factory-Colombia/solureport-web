@@ -302,6 +302,7 @@ export default function MantenimientosPage() {
   const [scheduleTecnico, setScheduleTecnico] = useState("");
   const [scheduleDate, setScheduleDate] = useState("");
   const [scheduleTime, setScheduleTime] = useState("");
+  const [scheduleSaving, setScheduleSaving] = useState(false);
   const [maintenanceToDelete, setMaintenanceToDelete] = useState<Maintenance | null>(null);
   const [deletingMaintenanceId, setDeletingMaintenanceId] = useState<string | null>(null);
   const [uncoveredSearch, setUncoveredSearch] = useState("");
@@ -355,6 +356,7 @@ export default function MantenimientosPage() {
   const loadMaintenancePage = useCallback(async (
     targetTab: MaintenanceAdminTab = activeTab,
     requestedPage = pageByTab[targetTab] || 1,
+    monthOverride?: string,
   ) => {
     const view = maintenanceViewByTab[targetTab];
     if (!view) return;
@@ -371,7 +373,7 @@ export default function MantenimientosPage() {
         search: targetTab === "vencidos" ? overdueSearch : search,
         status: targetTab === "lista" && statusFilter !== "todos" ? statusFilter : undefined,
         month: targetTab === "programados"
-          ? programadosMonthFilter || undefined
+          ? monthOverride || programadosMonthFilter || undefined
           : targetTab === "vencidos"
             ? vencidosMonthFilter || undefined
             : targetTab === "calendario"
@@ -606,9 +608,19 @@ export default function MantenimientosPage() {
 
   const handleSchedule = async () => {
     if (!schedulingMaint) return;
+    const tecnicoId = scheduleTecnico || schedulingMaint.tecnicoId;
+    const fecha = scheduleDate || schedulingMaint.fechaProgramada;
+    if (!tecnicoId) {
+      setNotification({ type: "error", message: "Selecciona un técnico responsable antes de programar." });
+      return;
+    }
+    if (!fecha) {
+      setNotification({ type: "error", message: "Selecciona una fecha válida antes de programar." });
+      return;
+    }
+
+    setScheduleSaving(true);
     try {
-      const tecnicoId = scheduleTecnico || schedulingMaint.tecnicoId;
-      const fecha = scheduleDate || schedulingMaint.fechaProgramada;
       const keepExistingParticipants = Boolean(
         schedulingMaint.participantes &&
         schedulingMaint.participantes.length > 1 &&
@@ -634,9 +646,23 @@ export default function MantenimientosPage() {
 
       setScheduleOpen(false);
       setSchedulingMaint(null);
-      await loadMaintenancePage();
+      const scheduledMonth = fecha.slice(0, 7);
+      setProgramadosMonthFilter(scheduledMonth);
+      setPageByTab((current) => ({ ...current, programados: 1, proximos: 1, lista: 1 }));
+      setActiveTab("programados");
+      setNotification({
+        type: "success",
+        message: `Mantenimiento programado correctamente. Se actualizó el cronograma del mantenimiento seleccionado y se muestra en Programados (${scheduledMonth}).`,
+      });
+      await loadMaintenancePage("programados", 1, scheduledMonth);
     } catch (err) {
       console.error("Error programando mantenimiento:", err);
+      setNotification({
+        type: "error",
+        message: err instanceof Error ? err.message : "No se pudo programar el mantenimiento.",
+      });
+    } finally {
+      setScheduleSaving(false);
     }
   };
 
@@ -1899,6 +1925,9 @@ export default function MantenimientosPage() {
             <div id="schedule-dialog-desc" className="sr-only">
               Formulario para asignar líder o técnico, fecha y hora a un mantenimiento pendiente.
             </div>
+            <p className="text-xs text-muted-foreground">
+              Esta acción actualiza únicamente el mantenimiento seleccionado. El resto del cronograma conserva su fecha y estado.
+            </p>
           </DialogHeader>
           {schedulingMaint && (() => {
             const client = clients.find((c) => c.id === schedulingMaint.clienteId);
@@ -1959,10 +1988,15 @@ export default function MantenimientosPage() {
             </Button>
             <Button
               onClick={handleSchedule}
+              disabled={scheduleSaving}
               className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
             >
-              <ArrowRight className="h-4 w-4" />
-              Programar y Notificar
+              {scheduleSaving ? (
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-background border-t-transparent" />
+              ) : (
+                <ArrowRight className="h-4 w-4" />
+              )}
+              {scheduleSaving ? "Programando..." : "Programar y Notificar"}
             </Button>
           </DialogFooter>
         </DialogContent>

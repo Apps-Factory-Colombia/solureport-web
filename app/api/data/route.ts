@@ -235,7 +235,8 @@ function mapPeriod(row: any): any {
 }
 
 function mapMaintenance(row: any): any {
-  const state = row.estado === "ejecutado" ? "realizado" : row.estado === "asignado" ? "programado" : row.estado;
+  const sourceState = row.estado_usuario || row.estado;
+  const state = sourceState === "ejecutado" ? "realizado" : sourceState === "asignado" ? "programado" : sourceState;
   const participants = jsonArray(row.participantes).map((item) => ({
     id: item.id,
     usuarioId: item.usuarioId || item.usuario_id,
@@ -1064,9 +1065,10 @@ async function getMaintenanceParticipantRows(maintenanceId: string) {
        LEFT JOIN LATERAL (
          SELECT d.id, d.estado, d.observaciones, d.fecha_ejecucion
            FROM public.actividades_operativas_entregas d
-          WHERE d.actividad_id = linked.actividad_id
-            AND d.participante_id = activity_participant.participante_id
-          LIMIT 1
+           WHERE d.actividad_id = linked.actividad_id
+             AND d.participante_id = activity_participant.participante_id
+           ORDER BY d.updated_at DESC NULLS LAST
+           LIMIT 1
        ) delivery ON true
       WHERE mp.mantenimiento_id = $1
         AND mp.estado = 'activo'
@@ -1138,34 +1140,66 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   const hasUserScope = !adminView && (Boolean(payload.usuarioId) || !privileged);
   const values: unknown[] = [];
   const filters: string[] = ["m.estado <> 'cancelado'"];
+  const anySubmittedDelivery = `EXISTS (
+    SELECT 1
+      FROM public.actividades_operativas_mantenimientos am_scope
+      JOIN public.actividades_operativas_participantes ap_scope
+        ON ap_scope.actividad_id = am_scope.actividad_id
+      JOIN public.actividades_operativas_entregas d_scope
+        ON d_scope.actividad_id = ap_scope.actividad_id
+       AND d_scope.participante_id = ap_scope.id
+     WHERE am_scope.mantenimiento_programado_id = m.id
+       AND d_scope.estado IN ('enviada', 'aprobada')
+  )`;
+  let userScopeParam: string | null = null;
 
   if (hasUserScope) {
     values.push(user.id);
+    userScopeParam = `$${values.length}`;
     filters.push(`(
-      m.tecnico_principal_id = $${values.length}
-      OR g.lider_id = $${values.length}
+      m.tecnico_principal_id = ${userScopeParam}
+      OR g.lider_id = ${userScopeParam}
       OR EXISTS (
         SELECT 1 FROM public.mantenimientos_programados_participantes mp_scope
          WHERE mp_scope.mantenimiento_id = m.id
-           AND mp_scope.usuario_id = $${values.length}
+           AND mp_scope.usuario_id = ${userScopeParam}
            AND mp_scope.estado = 'activo'
       )
     )`);
   }
+  const ownSubmittedDelivery = userScopeParam ? `EXISTS (
+    SELECT 1
+      FROM public.actividades_operativas_mantenimientos am_scope
+      JOIN public.actividades_operativas_participantes ap_scope
+        ON ap_scope.actividad_id = am_scope.actividad_id
+      JOIN public.actividades_operativas_entregas d_scope
+        ON d_scope.actividad_id = ap_scope.actividad_id
+       AND d_scope.participante_id = ap_scope.id
+     WHERE am_scope.mantenimiento_programado_id = m.id
+       AND ap_scope.tecnico_id = ${userScopeParam}
+       AND d_scope.estado IN ('enviada', 'aprobada')
+  )` : null;
+  const displayDelivery = adminView ? anySubmittedDelivery : ownSubmittedDelivery;
+  const displayStateExpression = displayDelivery
+    ? `(CASE WHEN m.estado IN ('ejecutado', 'completado') OR ${displayDelivery} THEN 'ejecutado' ELSE m.estado END)`
+    : "m.estado";
 
   if (adminView) {
     if (view === "programados") {
       filters.push("m.estado IN ('programado', 'asignado', 'en_ejecucion', 'en_progreso')");
+      filters.push(`NOT (${anySubmittedDelivery})`);
     } else if (view === "proximos") {
       values.push(today, addCalendarDays(today, 3));
       filters.push(`m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')`);
       filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+      filters.push(`NOT (${anySubmittedDelivery})`);
     } else if (view === "vencidos") {
       values.push(today);
       filters.push("m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')");
       filters.push(`m.fecha_programada < $${values.length}::date`);
+      filters.push(`NOT (${anySubmittedDelivery})`);
     } else if (view === "realizados") {
-      filters.push("m.estado IN ('ejecutado', 'completado')");
+      filters.push(`(m.estado IN ('ejecutado', 'completado') OR ${anySubmittedDelivery})`);
       if (payload.periodoId) {
         values.push(payload.periodoId);
         filters.push(`EXISTS (
@@ -1184,17 +1218,22 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
         values.push(today);
         filters.push("m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')");
         filters.push(`m.fecha_programada < $${values.length}::date`);
+        filters.push(`NOT (${anySubmittedDelivery})`);
       } else if (status === "realizado" || status === "completado") {
-        filters.push("m.estado IN ('ejecutado', 'completado')");
+        filters.push(`(m.estado IN ('ejecutado', 'completado') OR ${anySubmittedDelivery})`);
       } else if (["pendiente", "programado", "asignado", "en_ejecucion", "en_progreso"].includes(status)) {
         values.push(status);
         filters.push(`m.estado = $${values.length}`);
+        filters.push(`NOT (${anySubmittedDelivery})`);
       }
     }
   } else if (category === "historial") {
-    filters.push("m.estado IN ('ejecutado', 'completado')");
+    filters.push(ownSubmittedDelivery
+      ? `(m.estado IN ('ejecutado', 'completado') OR ${ownSubmittedDelivery})`
+      : "m.estado IN ('ejecutado', 'completado')");
   } else {
     filters.push("m.estado NOT IN ('ejecutado', 'completado')");
+    if (ownSubmittedDelivery) filters.push(`NOT (${ownSubmittedDelivery})`);
     if (category === "esta_semana") {
       values.push(week.start, week.end);
       filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
@@ -1263,6 +1302,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   const offsetParam = pageValues.length;
   const { rows } = await dbQuery(
     `SELECT m.*,
+      ${displayStateExpression} AS estado_usuario,
       COALESCE(activity.codigo, 'MP-' || to_char(m.fecha_programada, 'YYYYMMDD') || '-' || upper(left(replace(m.id::text, '-', ''), 10))) AS codigo,
       COALESCE(activity.titulo, c.nombre, 'Mantenimiento programado') AS titulo,
       COALESCE(activity.descripcion, activity.descripcion_pendiente, m.observaciones) AS descripcion,
@@ -1311,7 +1351,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   let adminCounts: { todos: number; programados: number; proximos: number; vencidos: number; realizados: number } | undefined;
   if (adminView && payload.includeCounts === true) {
     const countValues: unknown[] = [today];
-    let realizedFilter = "m.estado IN ('ejecutado', 'completado')";
+    let realizedFilter = `(m.estado IN ('ejecutado', 'completado') OR ${anySubmittedDelivery})`;
     if (payload.periodoId) {
       countValues.push(payload.periodoId);
       realizedFilter += ` AND EXISTS (
@@ -1323,11 +1363,14 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     const { rows: countRows } = await dbQuery(
       `SELECT
         COUNT(*) FILTER (WHERE m.estado <> 'cancelado')::int AS todos,
-        COUNT(*) FILTER (WHERE m.estado IN ('programado', 'asignado', 'en_ejecucion', 'en_progreso'))::int AS programados,
+        COUNT(*) FILTER (WHERE m.estado IN ('programado', 'asignado', 'en_ejecucion', 'en_progreso')
+          AND NOT (${anySubmittedDelivery}))::int AS programados,
         COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
-          AND m.fecha_programada BETWEEN $1::date AND ($1::date + INTERVAL '3 days')::date)::int AS proximos,
+          AND m.fecha_programada BETWEEN $1::date AND ($1::date + INTERVAL '3 days')::date
+          AND NOT (${anySubmittedDelivery}))::int AS proximos,
         COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
-          AND m.fecha_programada < $1::date)::int AS vencidos,
+          AND m.fecha_programada < $1::date
+          AND NOT (${anySubmittedDelivery}))::int AS vencidos,
         COUNT(*) FILTER (WHERE ${realizedFilter})::int AS realizados
        FROM public.mantenimientos_programados m`,
       countValues,
@@ -1346,25 +1389,47 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     const statusValues: unknown[] = [];
     const statusFilters = ["m.estado <> 'cancelado'", `m.fecha_programada BETWEEN $1::date AND $2::date`];
     statusValues.push(week.start, week.end);
+    let statusUserParam: string | null = null;
     if (hasUserScope) {
       statusValues.push(user.id);
-      const userParam = `$${statusValues.length}`;
+      statusUserParam = `$${statusValues.length}`;
       statusFilters.push(`(
-        m.tecnico_principal_id = ${userParam}
-        OR g.lider_id = ${userParam}
+        m.tecnico_principal_id = ${statusUserParam}
+        OR g.lider_id = ${statusUserParam}
         OR EXISTS (
           SELECT 1 FROM public.mantenimientos_programados_participantes mp_scope
            WHERE mp_scope.mantenimiento_id = m.id
-             AND mp_scope.usuario_id = ${userParam}
+             AND mp_scope.usuario_id = ${statusUserParam}
              AND mp_scope.estado = 'activo'
         )
       )`);
     }
+    const statusOwnSubmittedDelivery = statusUserParam ? `EXISTS (
+      SELECT 1
+        FROM public.actividades_operativas_mantenimientos am_scope
+        JOIN public.actividades_operativas_participantes ap_scope
+          ON ap_scope.actividad_id = am_scope.actividad_id
+        JOIN public.actividades_operativas_entregas d_scope
+          ON d_scope.actividad_id = ap_scope.actividad_id
+         AND d_scope.participante_id = ap_scope.id
+       WHERE am_scope.mantenimiento_programado_id = m.id
+         AND ap_scope.tecnico_id = ${statusUserParam}
+         AND d_scope.estado IN ('enviada', 'aprobada')
+    )` : null;
+    const statusPendingFilter = statusOwnSubmittedDelivery
+      ? `m.estado IN ('pendiente', 'programado', 'asignado') AND NOT (${statusOwnSubmittedDelivery})`
+      : "m.estado IN ('pendiente', 'programado', 'asignado')";
+    const statusInProgressFilter = statusOwnSubmittedDelivery
+      ? `m.estado IN ('en_progreso', 'en_ejecucion') AND NOT (${statusOwnSubmittedDelivery})`
+      : "m.estado IN ('en_progreso', 'en_ejecucion')";
+    const statusCompletedFilter = statusOwnSubmittedDelivery
+      ? `(m.estado IN ('ejecutado', 'completado') OR ${statusOwnSubmittedDelivery})`
+      : "m.estado IN ('ejecutado', 'completado')";
     const { rows: counts } = await dbQuery(
       `SELECT
-        COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado'))::int AS pendientes,
-        COUNT(*) FILTER (WHERE m.estado IN ('en_progreso', 'en_ejecucion'))::int AS "enProgreso",
-        COUNT(*) FILTER (WHERE m.estado IN ('ejecutado', 'completado'))::int AS completados,
+        COUNT(*) FILTER (WHERE ${statusPendingFilter})::int AS pendientes,
+        COUNT(*) FILTER (WHERE ${statusInProgressFilter})::int AS "enProgreso",
+        COUNT(*) FILTER (WHERE ${statusCompletedFilter})::int AS completados,
         COUNT(*)::int AS total
        FROM public.mantenimientos_programados m
        LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
