@@ -958,12 +958,15 @@ async function replaceMaintenanceParticipants(client: any, maintenanceId: string
   if (invalid) throw new Error("Todos los técnicos asignados deben existir y estar activos.");
 
   const { rows: maintenanceRows } = await client.query(
-    "SELECT id, costo_tecnico_presupuestado, titulo, fecha_programada, grupo_id, cliente_id, sede_id FROM public.mantenimientos_programados WHERE id = $1 FOR UPDATE",
+    "SELECT id, costo_tecnico_presupuestado, fecha_programada, grupo_id, cliente_id, sede_id FROM public.mantenimientos_programados WHERE id = $1 FOR UPDATE",
     [maintenanceId],
   );
   const maintenance = maintenanceRows[0];
   if (!maintenance) throw new Error("No se encontró el mantenimiento para asignar sus técnicos.");
   const defaultValue = number(maintenance.costo_tecnico_presupuestado);
+  const maintenanceLabel = String(
+    payload.titulo || payload.descripcionPendiente || payload.observaciones || "programado",
+  ).trim();
 
   await client.query("DELETE FROM public.mantenimientos_programados_participantes WHERE mantenimiento_id = $1", [maintenanceId]);
   for (const item of participants) {
@@ -982,7 +985,7 @@ async function replaceMaintenanceParticipants(client: any, maintenanceId: string
       [
         item.usuarioId,
         "Mantenimiento asignado",
-        `Tienes asignado el mantenimiento ${maintenance.titulo || "programado"} para el ${dateOnly(maintenance.fecha_programada) || "día programado"}. Puedes diligenciar tu entrega de forma independiente.`,
+        `Tienes asignado el mantenimiento ${maintenanceLabel} para el ${dateOnly(maintenance.fecha_programada) || "día programado"}. Puedes diligenciar tu entrega de forma independiente.`,
         maintenanceId,
         `mantenimiento-asignacion:${maintenanceId}:${item.usuarioId}`,
         JSON.stringify({ mantenimientoId: maintenanceId, fechaProgramada: dateOnly(maintenance.fecha_programada), grupoId: maintenance.grupo_id }),
@@ -1267,6 +1270,39 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     total = number(countResult.rows[0]?.total, 0);
   }
 
+  let adminCounts: { todos: number; programados: number; proximos: number; vencidos: number; realizados: number } | undefined;
+  if (adminView && payload.includeCounts === true) {
+    const countValues: unknown[] = [today];
+    let realizedFilter = "m.estado IN ('ejecutado', 'completado')";
+    if (payload.periodoId) {
+      countValues.push(payload.periodoId);
+      realizedFilter += ` AND EXISTS (
+        SELECT 1 FROM public.periodos_liquidacion period_count
+         WHERE period_count.id = $${countValues.length}
+           AND COALESCE(m.fecha_realizado, m.fecha_programada) BETWEEN period_count.fecha_inicio AND period_count.fecha_fin
+      )`;
+    }
+    const { rows: countRows } = await dbQuery(
+      `SELECT
+        COUNT(*) FILTER (WHERE m.estado <> 'cancelado')::int AS todos,
+        COUNT(*) FILTER (WHERE m.estado IN ('programado', 'asignado', 'en_ejecucion', 'en_progreso'))::int AS programados,
+        COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+          AND m.fecha_programada BETWEEN $1::date AND ($1::date + INTERVAL '3 days')::date)::int AS proximos,
+        COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+          AND m.fecha_programada < $1::date)::int AS vencidos,
+        COUNT(*) FILTER (WHERE ${realizedFilter})::int AS realizados
+       FROM public.mantenimientos_programados m`,
+      countValues,
+    );
+    adminCounts = {
+      todos: number(countRows[0]?.todos),
+      programados: number(countRows[0]?.programados),
+      proximos: number(countRows[0]?.proximos),
+      vencidos: number(countRows[0]?.vencidos),
+      realizados: number(countRows[0]?.realizados),
+    };
+  }
+
   let statusCounts: { pendientes: number; enProgreso: number; completados: number; total: number } | undefined;
   if (Boolean(payload.includeStatusCounts)) {
     const statusValues: unknown[] = [];
@@ -1318,6 +1354,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     weekStart: week.start,
     weekEnd: week.end,
     generatedAt: new Date().toISOString(),
+    ...(adminCounts ? { counts: adminCounts } : {}),
     ...(statusCounts ? { statusCounts } : {}),
   };
 }

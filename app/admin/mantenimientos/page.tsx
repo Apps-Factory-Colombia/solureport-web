@@ -390,11 +390,20 @@ export default function MantenimientosPage() {
               ? getMonthInputValue(calendarMonth)
               : undefined,
         periodoId: targetTab === "realizados" ? completedPeriodFilter || undefined : undefined,
+        includeCounts: true,
       });
       if (requestId !== maintenanceRequestRef.current) return;
       setMaintenances(result.items);
       setMaintenancePage(result);
-      setMaintenanceTotals((current) => ({ ...current, [targetTab]: result.total }));
+      setMaintenanceTotals((current) => ({
+        ...current,
+        lista: result.counts?.todos ?? current.lista,
+        programados: result.counts?.programados ?? current.programados,
+        proximos: result.counts?.proximos ?? current.proximos,
+        vencidos: result.counts?.vencidos ?? current.vencidos,
+        realizados: result.counts?.realizados ?? current.realizados,
+        [targetTab]: result.total,
+      }));
       if (targetTab === "vencidos") setOverdueMaintenances(result.items);
     } catch (err) {
       if (requestId !== maintenanceRequestRef.current) return;
@@ -532,7 +541,8 @@ export default function MantenimientosPage() {
   }, []);
 
   const canScheduleMaintenance = useCallback((maintenance: Maintenance) => {
-    return String(maintenance.estado).toLowerCase() === "pendiente";
+    return ["pendiente", "programado", "asignado", "en_ejecucion", "en_progreso"]
+      .includes(String(maintenance.estado).toLowerCase());
   }, []);
 
   const openScheduleDialog = useCallback((maintenance: Maintenance) => {

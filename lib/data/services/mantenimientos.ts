@@ -14,6 +14,7 @@ export interface MaintenanceAdminPage {
   today?: string;
   generatedAt?: string;
   view?: MaintenanceAdminView;
+  counts?: Partial<Record<MaintenanceAdminView, number>>;
 }
 
 export function invalidateMantenimientosCache() {}
@@ -27,6 +28,7 @@ export async function getMantenimientosAdminPage(options: {
   status?: string;
   month?: string;
   periodoId?: string;
+  includeCounts?: boolean;
 }): Promise<MaintenanceAdminPage> {
   return dataRequest<MaintenanceAdminPage>("maintenances.adminPage", options);
 }
