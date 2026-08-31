@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from "next/server";
-import { getAuthenticatedUser, hashPassword } from "@/lib/db/auth";
+import { getAuthenticatedUser, hashPassword, renewSession } from "@/lib/db/auth";
 import { dbQuery, withTransaction } from "@/lib/db/postgres";
 
 export const runtime = "nodejs";
@@ -318,7 +318,7 @@ async function userRows(where = "", values: unknown[] = []) {
             (SELECT gm.grupo_id FROM public.grupo_miembros gm
               WHERE gm.usuario_id = u.id AND gm.fecha_inicio <= current_date
                 AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= current_date) LIMIT 1) AS grupo_id,
-            EXISTS (SELECT 1 FROM public.grupos_trabajo g WHERE g.lider_id = u.id) AS es_lider
+            EXISTS (SELECT 1 FROM public.grupos_trabajo g WHERE g.lider_id = u.id AND g.estado = 'activo') AS es_lider
        FROM public.usuarios u ${where}
       ORDER BY u.created_at DESC`, values,
   );
@@ -968,15 +968,54 @@ async function replaceMaintenanceParticipants(client: any, maintenanceId: string
     payload.titulo || payload.descripcionPendiente || payload.observaciones || "programado",
   ).trim();
 
-  await client.query("DELETE FROM public.mantenimientos_programados_participantes WHERE mantenimiento_id = $1", [maintenanceId]);
+  // Never delete participant rows while editing a maintenance. A submitted
+  // delivery, approval or liquidation item may reference that row. Reuse
+  // the same participant id when possible and retire only the users removed
+  // from the assignment, preserving the operational history.
+  const { rows: currentParticipants } = await client.query(
+    `SELECT id, usuario_id
+       FROM public.mantenimientos_programados_participantes
+      WHERE mantenimiento_id = $1
+      FOR UPDATE`,
+    [maintenanceId],
+  );
+  const currentByUserId = new Map<string, any>(currentParticipants.map((row: any) => [String(row.usuario_id), row]));
+  const requestedIds = new Set(ids);
+  for (const currentParticipant of currentParticipants) {
+    if (!requestedIds.has(String(currentParticipant.usuario_id))) {
+      await client.query(
+        `UPDATE public.mantenimientos_programados_participantes
+            SET estado = 'retirado',
+                fecha_retiro = GREATEST(clock_timestamp(), fecha_asignacion),
+                updated_at = clock_timestamp()
+          WHERE id = $1`,
+        [currentParticipant.id],
+      );
+    }
+  }
   for (const item of participants) {
     const value = item.valorCalculado == null ? roundCurrency(defaultValue * item.porcentaje / 100) : Math.max(0, number(item.valorCalculado));
-    await client.query(
-      `INSERT INTO public.mantenimientos_programados_participantes
-        (mantenimiento_id, usuario_id, rol_participacion, porcentaje, valor_ganado)
-       VALUES ($1,$2,$3,$4,$5)`,
-      [maintenanceId, item.usuarioId, item.rol || "acompanante", item.porcentaje, value],
-    );
+    const currentParticipant = currentByUserId.get(item.usuarioId);
+    if (currentParticipant) {
+      await client.query(
+        `UPDATE public.mantenimientos_programados_participantes
+            SET rol_participacion = $2,
+                porcentaje = $3,
+                valor_ganado = $4,
+                estado = 'activo',
+                fecha_retiro = NULL,
+                updated_at = clock_timestamp()
+          WHERE id = $1`,
+        [currentParticipant.id, item.rol || "acompanante", item.porcentaje, value],
+      );
+    } else {
+      await client.query(
+        `INSERT INTO public.mantenimientos_programados_participantes
+          (mantenimiento_id, usuario_id, rol_participacion, porcentaje, valor_ganado)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [maintenanceId, item.usuarioId, item.rol || "acompanante", item.porcentaje, value],
+      );
+    }
     await client.query(
       `INSERT INTO public.notificaciones
         (usuario_id, tipo, titulo, mensaje, entidad_tipo, entidad_id, clave_dedupe, metadata)
@@ -1399,10 +1438,12 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       const values: unknown[] = [];
       const set = (column: string, value: unknown) => { values.push(value); fields.push(`${column} = $${values.length}`); };
       let role = requestedUserRole(payload);
+      const hasLeaderFlag = typeof payload.esLider === "boolean";
       // "Líder de Grupo" del modal debe tener un efecto persistente. En V2
       // el liderazgo se refleja en el grupo; si aún no existe grupo, al menos
       // conservamos el rol de líder para que pueda ser asignado desde Grupos.
       if (payload.esLider === true && role === "tecnico") role = "lider";
+      if (payload.esLider === false && role === "lider") role = payload.esSupervisor === true ? "supervisor" : "tecnico";
       for (const [key, column] of [["nombre", "nombre"], ["apellido", "apellido"], ["email", "email"], ["telefono", "telefono"], ["estado", "estado"], ["avatar", "avatar_url"], ["tieneRecorrido", "tiene_recorrido"], ["tieneMoto", "tiene_moto"]] as const) {
         if (payload[key] !== undefined) set(column, key === "email" ? String(payload[key]).toLowerCase() : payload[key]);
       }
@@ -1422,6 +1463,14 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
         }
         if (payload.horarios !== undefined) {
           await applyUserSchedules(client, id, payload.horarios);
+        }
+        if (hasLeaderFlag) {
+          // Primero retiramos cualquier liderazgo anterior. Esto hace que
+          // apagar "Líder de Grupo" sea una operación real y no solo visual.
+          await client.query(
+            "UPDATE public.grupos_trabajo SET lider_id = NULL, updated_at = clock_timestamp() WHERE lider_id = $1",
+            [id],
+          );
         }
         if (payload.esLider === true) {
           const { rows: memberships } = await client.query(
@@ -1456,17 +1505,64 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "groups.create": {
       await requireAdmin(user);
       const id = await withTransaction(async (client) => {
-        const { rows } = await client.query("INSERT INTO public.grupos_trabajo (nombre, lider_id, estado) VALUES ($1,$2,$3) RETURNING id", [payload.nombre, payload.liderId || null, payload.estado || "activo"]);
-        await replaceGroupMembers(client, rows[0].id, payload.miembros || [], payload.reporterosIds || []);
+        const leaderId = normalizeOptionalId(payload.liderId);
+        const memberIds = uniqueIds([
+          ...idList(payload.miembros ?? payload.members ?? payload.memberIds),
+          ...(leaderId ? [leaderId] : []),
+        ]);
+        const reporterIds = idList(payload.reporterosIds ?? payload.reporterIds ?? payload.reporters);
+        const { rows } = await client.query("INSERT INTO public.grupos_trabajo (nombre, lider_id, estado) VALUES ($1,$2,$3) RETURNING id", [payload.nombre, leaderId, payload.estado || "activo"]);
+        await replaceGroupMembers(client, rows[0].id, memberIds, reporterIds);
         return rows[0].id;
       });
       const rows = await groupRows("WHERE g.id = $1", [id]); return mapGroup(rows[0]);
     }
     case "groups.update": {
       await requireAdmin(user);
+      const hasLeader = Object.prototype.hasOwnProperty.call(payload, "liderId");
+      const hasMembers = Object.prototype.hasOwnProperty.call(payload, "miembros")
+        || Object.prototype.hasOwnProperty.call(payload, "members")
+        || Object.prototype.hasOwnProperty.call(payload, "memberIds");
+      const hasReporters = Object.prototype.hasOwnProperty.call(payload, "reporterosIds")
+        || Object.prototype.hasOwnProperty.call(payload, "reporterIds")
+        || Object.prototype.hasOwnProperty.call(payload, "reporters");
       await withTransaction(async (client) => {
-        await client.query("UPDATE public.grupos_trabajo SET nombre = COALESCE($2,nombre), lider_id = $3, estado = COALESCE($4,estado), updated_at = clock_timestamp() WHERE id = $1", [payload.id, payload.nombre, payload.liderId || null, payload.estado]);
-        await replaceGroupMembers(client, payload.id, payload.miembros || [], payload.reporterosIds || []);
+        const existing = await client.query("SELECT lider_id FROM public.grupos_trabajo WHERE id = $1 FOR UPDATE", [payload.id]);
+        if (!existing.rows[0]) throw new Error("No se encontró el grupo que intentas actualizar.");
+        const leaderId = hasLeader ? normalizeOptionalId(payload.liderId) : existing.rows[0].lider_id;
+        await client.query(
+          `UPDATE public.grupos_trabajo
+              SET nombre = COALESCE($2,nombre),
+                  lider_id = CASE WHEN $3::boolean THEN $4::uuid ELSE lider_id END,
+                  estado = COALESCE($5,estado),
+                  updated_at = clock_timestamp()
+            WHERE id = $1`,
+          [payload.id, payload.nombre, hasLeader, leaderId, payload.estado],
+        );
+        if (hasMembers || hasReporters || hasLeader) {
+          const memberIds = hasMembers
+            ? idList(payload.miembros ?? payload.members ?? payload.memberIds)
+            : (await client.query(
+              `SELECT usuario_id
+                 FROM public.grupo_miembros
+                WHERE grupo_id = $1
+                  AND fecha_inicio <= current_date
+                  AND (fecha_fin IS NULL OR fecha_fin >= current_date)`,
+              [payload.id],
+            )).rows.map((row: any) => String(row.usuario_id));
+          const reporterIds = hasReporters
+            ? idList(payload.reporterosIds ?? payload.reporterIds ?? payload.reporters)
+            : (await client.query(
+              `SELECT usuario_id
+                 FROM public.grupo_reportadores_actividad
+                WHERE grupo_id = $1
+                  AND fecha_inicio <= current_date
+                  AND (fecha_fin IS NULL OR fecha_fin >= current_date)`,
+              [payload.id],
+            )).rows.map((row: any) => String(row.usuario_id));
+          if (leaderId) memberIds.push(leaderId);
+          await replaceGroupMembers(client, payload.id, uniqueIds(memberIds), uniqueIds(reporterIds));
+        }
       });
       const rows = await groupRows("WHERE g.id = $1", [payload.id]); return mapGroup(rows[0]);
     }
@@ -1864,11 +1960,33 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
   }
 }
 
+function normalizeOptionalId(value: unknown): string | null {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+function idList(value: unknown): string[] {
+  return jsonArray(value)
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object") {
+        const candidate = item as Record<string, unknown>;
+        return String(candidate.id || candidate.usuarioId || candidate.usuario_id || "").trim();
+      }
+      return "";
+    })
+    .filter(Boolean);
+}
+
+function uniqueIds(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
 async function replaceGroupMembers(client: any, groupId: string, memberIds: string[], reporterIds: string[]) {
   await client.query("DELETE FROM public.grupo_miembros WHERE grupo_id = $1", [groupId]);
   await client.query("DELETE FROM public.grupo_reportadores_actividad WHERE grupo_id = $1", [groupId]);
-  for (const id of [...new Set(memberIds.filter(Boolean))]) await client.query("INSERT INTO public.grupo_miembros (grupo_id, usuario_id) VALUES ($1,$2)", [groupId, id]);
-  for (const id of [...new Set(reporterIds.filter(Boolean))]) await client.query("INSERT INTO public.grupo_reportadores_actividad (grupo_id, usuario_id) VALUES ($1,$2)", [groupId, id]);
+  for (const id of uniqueIds(memberIds)) await client.query("INSERT INTO public.grupo_miembros (grupo_id, usuario_id) VALUES ($1,$2)", [groupId, id]);
+  for (const id of uniqueIds(reporterIds)) await client.query("INSERT INTO public.grupo_reportadores_actividad (grupo_id, usuario_id) VALUES ($1,$2)", [groupId, id]);
 }
 
 function configDefaults(): any {
@@ -3015,7 +3133,13 @@ export async function POST(request: NextRequest) {
     if (!user) return NextResponse.json({ error: "Sesión no válida." }, { status: 401 });
     const body = await request.json();
     const data = await execute(String(body?.action || ""), (body?.payload || {}) as Payload, user);
-    return NextResponse.json({ data });
+    const response = NextResponse.json({ data });
+    try {
+      await renewSession(request, response);
+    } catch (renewError) {
+      console.error("No se pudo renovar la sesión durante la operación de datos:", renewError);
+    }
+    return response;
   } catch (error: any) {
     console.error("Error en API de datos V2:", error);
     const message = error?.code === "23505" ? "Ya existe un registro con esos datos." : error?.code === "23503" ? "La operación referencia datos inexistentes o protegidos." : error?.code === "23P01" ? "El rango de fechas se cruza con otro registro." : error?.message || "Error interno de datos.";

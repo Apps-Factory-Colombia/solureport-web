@@ -261,7 +261,10 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
                   setFormData({
                     ...formData,
                     rol: value,
-                    esLider: value === "lider" ? true : value === "supervisor" || value === "admin" ? false : formData.esLider,
+                    // El selector de rol también debe poder retirar el
+                    // liderazgo. El estado visual y el payload quedan
+                    // alineados para que la API limpie el grupo.
+                    esLider: value === "lider",
                     esSupervisor: value === "supervisor",
                   })
                 }
@@ -307,9 +310,13 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
                 </div>
                 <Switch
                   checked={formData.esLider}
-                  onCheckedChange={(checked) =>
-                    setFormData({ ...formData, esLider: checked })
-                  }
+                  onCheckedChange={(checked) => setFormData((current) => ({
+                    ...current,
+                    esLider: checked,
+                    rol: checked
+                      ? (current.rol === "supervisor" ? "supervisor" : "lider")
+                      : (current.rol === "lider" ? "tecnico" : current.rol),
+                  }))}
                 />
               </div>
               <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 p-3">

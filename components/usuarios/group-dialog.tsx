@@ -29,7 +29,7 @@ interface GroupDialogProps {
   onOpenChange: (open: boolean) => void;
   group?: WorkGroup | null;
   availableTechnicians: User[];
-  onSave: (group: Partial<WorkGroup>) => void;
+  onSave: (group: Partial<WorkGroup>) => Promise<void> | void;
 }
 
 function buildInitialMembers(group?: WorkGroup | null) {
@@ -44,7 +44,7 @@ interface GroupDialogFormProps {
   group?: WorkGroup | null;
   availableTechnicians: User[];
   onOpenChange: (open: boolean) => void;
-  onSave: (group: Partial<WorkGroup>) => void;
+  onSave: (group: Partial<WorkGroup>) => Promise<void> | void;
 }
 
 function GroupDialogForm({
@@ -58,19 +58,19 @@ function GroupDialogForm({
   const [selectedMembers, setSelectedMembers] = useState<string[]>(buildInitialMembers(group));
   const [selectedReporters, setSelectedReporters] = useState<string[]>(buildInitialReporters(group));
   const [memberSearch, setMemberSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const totalMembers = Array.from(new Set(liderId ? [liderId, ...selectedMembers] : selectedMembers));
   const hasValidMemberCount = totalMembers.length >= 1;
-  const hasValidReporterSelection = selectedReporters.length > 0;
-
   const activeUsers = availableTechnicians.filter((user) => user.estado === "activo");
 
-  const leaderOptions = activeUsers.filter(
-    (user) => user.rol === "lider" || user.rol === "supervisor" || user.esLider
-  );
+  // Cualquier usuario operativo puede asumir o dejar de asumir el liderazgo
+  // del grupo. El rol de la cuenta no debe ocultarlo del selector.
+  const leaderOptions = activeUsers.filter((user) => user.rol !== "admin");
 
   const memberOptions = activeUsers.filter(
-    (user) => user.rol === "tecnico" || user.rol === "lider" || user.rol === "supervisor" || user.esLider
+    (user) => user.rol !== "admin"
   );
 
   const filteredMemberOptions = memberOptions.filter((user) => {
@@ -125,25 +125,29 @@ function GroupDialogForm({
   };
 
   const handleLeaderChange = (nextLeaderId: string) => {
-    const nextTotalMembers = Array.from(new Set(nextLeaderId ? [nextLeaderId, ...selectedMembers] : selectedMembers));
+    const normalizedLeaderId = nextLeaderId === "__sin_lider__" ? "" : nextLeaderId;
+    const nextTotalMembers = Array.from(new Set(normalizedLeaderId ? [normalizedLeaderId, ...selectedMembers] : selectedMembers));
 
-    setLiderId(nextLeaderId);
+    setLiderId(normalizedLeaderId);
     setSelectedReporters((prevReporters) => {
       const filteredReporters = prevReporters.filter((id) => nextTotalMembers.includes(id));
 
-      if (nextLeaderId && !filteredReporters.includes(nextLeaderId)) {
-        filteredReporters.push(nextLeaderId);
+      if (normalizedLeaderId && !filteredReporters.includes(normalizedLeaderId)) {
+        filteredReporters.push(normalizedLeaderId);
       }
 
       return filteredReporters;
     });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!liderId || !hasValidMemberCount || !hasValidReporterSelection) return;
+    if (saving || !hasValidMemberCount || !nombre) return;
 
-    onSave({
+    setSaving(true);
+    setSaveError("");
+    try {
+      await onSave({
       id: group?.id || `g${Date.now()}`,
       nombre,
       liderId,
@@ -151,8 +155,13 @@ function GroupDialogForm({
       reporterosIds: selectedReporters.filter((userId) => totalMembers.includes(userId)),
       estado: "activo",
       fechaCreacion: group?.fechaCreacion || new Date().toISOString().split("T")[0],
-    });
-    onOpenChange(false);
+      });
+      onOpenChange(false);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "No se pudo guardar el grupo.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -162,6 +171,12 @@ function GroupDialogForm({
           {group ? "Editar Grupo" : "Nuevo Grupo de Trabajo"}
         </DialogTitle>
       </DialogHeader>
+
+      {saveError && (
+        <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300" role="alert">
+          {saveError}
+        </div>
+      )}
 
       <ScrollArea className="mt-4 min-h-0 flex-1 pr-4">
         <div className="space-y-5 pb-4">
@@ -179,11 +194,12 @@ function GroupDialogForm({
 
             <div className="space-y-2 rounded-xl border border-border/50 bg-secondary/20 p-4">
               <Label className="text-foreground/80">Líder del Grupo</Label>
-              <Select value={liderId} onValueChange={handleLeaderChange}>
+              <Select value={liderId || "__sin_lider__"} onValueChange={handleLeaderChange} disabled={saving}>
                 <SelectTrigger className="bg-secondary/50 border-border/50">
                   <SelectValue placeholder="Seleccionar líder" />
                 </SelectTrigger>
                 <SelectContent className="bg-card border-border">
+                  <SelectItem value="__sin_lider__">Sin líder</SelectItem>
                   {leaderOptions.map((user) => (
                     <SelectItem key={user.id} value={user.id}>
                       {user.nombre} {user.apellido}
@@ -333,10 +349,10 @@ function GroupDialogForm({
         </Button>
         <Button
           type="submit"
-          disabled={!hasValidMemberCount || !hasValidReporterSelection || !liderId || !nombre}
+          disabled={saving || !hasValidMemberCount || !nombre}
           className="bg-gold hover:bg-gold-dark text-background font-semibold"
         >
-          {group ? "Guardar Cambios" : "Crear Grupo"}
+          {saving ? "Guardando…" : group ? "Guardar Cambios" : "Crear Grupo"}
         </Button>
       </DialogFooter>
     </form>

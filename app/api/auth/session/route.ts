@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAuthenticatedUser } from "@/lib/db/auth";
+import { getAuthenticatedUser, renewSession } from "@/lib/db/auth";
 import { dbQuery } from "@/lib/db/postgres";
 
 export const runtime = "nodejs";
@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
       [user.id],
     );
     const profile = rows[0] || {};
-    return NextResponse.json({ data: {
+    const response = NextResponse.json({ data: {
       id: user.id,
       nombre: user.nombre,
       apellido: user.apellido,
@@ -33,6 +33,12 @@ export async function GET(request: NextRequest) {
       fechaCreacion: "",
       avatar: user.avatar_url || undefined,
     } });
+    try {
+      await renewSession(request, response);
+    } catch (renewError) {
+      console.error("No se pudo renovar la sesión; se conserva la sesión actual:", renewError);
+    }
+    return response;
   } catch (error) {
     console.error("Error validando sesión:", error);
     return NextResponse.json({ data: null });

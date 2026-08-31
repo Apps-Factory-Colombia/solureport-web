@@ -5,7 +5,10 @@ import { dbQuery } from "./postgres";
 
 const scrypt = promisify(scryptCallback);
 export const SESSION_COOKIE = "solureport_session";
-const SESSION_DAYS = 30;
+// Sessions are rolling: an active browser or mobile client keeps its session
+// alive, while an abandoned token still has a finite lifetime for security.
+// The session endpoint renews this window on every validation request.
+const SESSION_DAYS = 365;
 
 export interface AuthenticatedUser {
   id: string;
@@ -107,6 +110,41 @@ export async function issueSession(userId: string, request: NextRequest, respons
     expires: expiresAt,
   });
   return token;
+}
+
+/**
+ * Extends an authenticated session without issuing a new token. This keeps
+ * the same browser/mobile credential stable while preventing active users
+ * from being logged out during normal work. Mobile clients renew the DB row
+ * through the bearer token; browser clients also receive a refreshed cookie.
+ */
+export async function renewSession(request: NextRequest, response?: NextResponse): Promise<void> {
+  const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  const token = bearer || request.cookies.get(SESSION_COOKIE)?.value;
+  if (!token) return;
+
+  const expiresAt = new Date(Date.now() + SESSION_DAYS * 86_400_000);
+  const { rows } = await dbQuery<{ usuario_id: string }>(
+    `UPDATE public.sesiones_usuario
+        SET expires_at = $2
+      WHERE token_hash = $1
+        AND revoked_at IS NULL
+        AND expires_at > clock_timestamp()
+      RETURNING usuario_id`,
+    [hashSessionToken(token), expiresAt.toISOString()],
+  );
+
+  if (!rows[0] || !response || bearer) return;
+
+  const secureCookie = process.env.SOLUREPORT_COOKIE_SECURE === "true"
+    || (process.env.NODE_ENV === "production" && request.headers.get("x-forwarded-proto") === "https");
+  response.cookies.set(SESSION_COOKIE, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: secureCookie,
+    path: "/",
+    expires: expiresAt,
+  });
 }
 
 export async function revokeSession(request: NextRequest, response: NextResponse): Promise<void> {

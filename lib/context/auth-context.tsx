@@ -18,15 +18,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/auth/session", { credentials: "include" })
-      .then((response) => response.json() as Promise<{ data?: User | null }>)
-      .then((body) => { if (!cancelled) setUser(body.data || null); })
-      .catch(() => { if (!cancelled) setUser(null); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+  const refreshSession = useCallback(async (initial = false) => {
+    try {
+      const response = await fetch("/api/auth/session", { credentials: "include", cache: "no-store" });
+      const body = await response.json() as { data?: User | null };
+      if (body.data) {
+        setUser(body.data);
+      } else if (initial) {
+        setUser(null);
+      }
+    } catch {
+      // A temporary network failure must not erase the authenticated user.
+      // The next heartbeat/focus event will retry the session validation.
+    } finally {
+      if (initial) setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshSession(true);
+
+    // The server renews the rolling session window on this heartbeat. The
+    // focus listener also covers returning to the tab after a long pause.
+    const heartbeat = window.setInterval(() => { void refreshSession(); }, 10 * 60 * 1000);
+    const onFocus = () => { void refreshSession(); };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(heartbeat);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [refreshSession]);
 
   const login = useCallback(async (email: string, password: string) => {
     const loggedUser = await loginUsuario(email, password);

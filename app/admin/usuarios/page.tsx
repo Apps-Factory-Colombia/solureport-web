@@ -179,13 +179,18 @@ export default function UsuariosPage() {
     try {
       if (editingGroup) {
         await updateGrupo(editingGroup.id, groupData);
+        window.alert("Grupo actualizado correctamente.");
       } else {
         await createGrupo(groupData);
+        window.alert("Grupo creado correctamente.");
       }
       setEditingGroup(null);
       await loadData();
     } catch (err) {
       console.error("Error guardando grupo:", err);
+      const message = err instanceof Error ? err.message : "No se pudo guardar el grupo.";
+      window.alert(message);
+      throw err;
     }
   };
 

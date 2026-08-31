@@ -1360,12 +1360,13 @@ export default function MantenimientosPage() {
                       <TableHead className="text-muted-foreground">Fecha</TableHead>
                       <TableHead className="text-muted-foreground">Observaciones</TableHead>
                       <TableHead className="text-muted-foreground">Estado</TableHead>
+                      <TableHead className="text-muted-foreground text-right">Acciones</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {programados.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                        <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
                           No hay mantenimientos programados
                         </TableCell>
                       </TableRow>
@@ -1402,6 +1403,18 @@ export default function MantenimientosPage() {
                                 <Bell className="h-3 w-3 mr-1" />
                                 Notificado
                               </Badge>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                title="Editar mantenimiento"
+                                onClick={() => { setEditingMaintenance(m); setDialogOpen(true); }}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
                             </TableCell>
                           </TableRow>
                         );
@@ -1731,7 +1744,7 @@ export default function MantenimientosPage() {
                       <TableHead className="text-muted-foreground">Avance</TableHead>
                       <TableHead className="text-muted-foreground">Valor técnico</TableHead>
                       <TableHead className="text-muted-foreground">Estado</TableHead>
-                      <TableHead className="text-muted-foreground text-right">Acción</TableHead>
+                              <TableHead className="text-muted-foreground text-right">Acciones</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1771,14 +1784,26 @@ export default function MantenimientosPage() {
                               </Badge>
                             </TableCell>
                             <TableCell className="text-right">
-                              <Button
-                                onClick={() => openScheduleDialog(m)}
-                                size="sm"
-                                className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
-                              >
-                                <UserCheck className="h-4 w-4" />
-                                Programar
-                              </Button>
+                              <div className="flex items-center justify-end gap-2">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                  title="Editar mantenimiento"
+                                  onClick={() => { setEditingMaintenance(m); setDialogOpen(true); }}
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  onClick={() => openScheduleDialog(m)}
+                                  size="sm"
+                                  className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
+                                >
+                                  <UserCheck className="h-4 w-4" />
+                                  Programar
+                                </Button>
+                              </div>
                             </TableCell>
                           </TableRow>
                         );
