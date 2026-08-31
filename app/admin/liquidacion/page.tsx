@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Badge } from "@/components/ui/badge";
@@ -52,7 +52,7 @@ import {
   Percent,
 } from "lucide-react";
 import { LiquidationPeriod, User, WorkGroup, LeaderAccumulation, ActivityReport, ArrivalRecord } from "@/lib/types";
-import { getPeriodos, closePeriodo } from "@/lib/data/services/liquidacion";
+import { getPeriodos, closePeriodo, getCanonicalLiquidationSummary, CanonicalLiquidationSummary } from "@/lib/data/services/liquidacion";
 import { getConfiguracion } from "@/lib/data/services/configuracion";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getGrupos } from "@/lib/data/services/grupos";
@@ -243,6 +243,8 @@ export default function LiquidacionPage() {
   const [actReports, setActReports] = useState<ActivityReport[]>([]);
   const [arrivalRecords, setArrivalRecords] = useState<ArrivalRecord[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
+  const [canonicalSummary, setCanonicalSummary] = useState<CanonicalLiquidationSummary | null>(null);
+  const [canonicalSummaryLoading, setCanonicalSummaryLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [closeDialogOpen, setCloseDialogOpen] = useState(false);
@@ -267,6 +269,8 @@ export default function LiquidacionPage() {
   const reportOrderRef = useRef(new Map<string, number>());
   const techOrderRef = useRef(new Map<string, number>());
   const groupOrderRef = useRef(new Map<string, number>());
+  const liquidationRequestRef = useRef(0);
+  const canonicalSummaryRequestRef = useRef(0);
   const nextReportOrderRef = useRef(0);
   const nextTechOrderRef = useRef(0);
   const nextGroupOrderRef = useRef(0);
@@ -335,10 +339,12 @@ export default function LiquidacionPage() {
   };
 
   useEffect(() => {
+    const requestId = ++liquidationRequestRef.current;
     setLoading(true);
     Promise.allSettled([
       getPeriodos(), getUsuarios(), getGrupos(), getAcumulacionesLider(), getReportesActividad(), getConfiguracion(), getLlegadas(),
     ]).then(([periodsResult, usersResult, groupsResult, accumulationsResult, reportsResult, settingsResult, arrivalsResult]) => {
+      if (requestId !== liquidationRequestRef.current) return;
       const p = periodsResult.status === "fulfilled" ? periodsResult.value : [];
       const u = usersResult.status === "fulfilled" ? usersResult.value : [];
       const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
@@ -363,8 +369,43 @@ export default function LiquidacionPage() {
       setArrivalRecords(l);
       setCompanySettings(s);
       setSelectedPeriodId((current) => (current && p.some((period) => period.id === current) ? current : p[0]?.id || ""));
-    }).finally(() => setLoading(false));
+    }).finally(() => {
+      if (requestId === liquidationRequestRef.current) setLoading(false);
+    });
   }, []);
+
+  const loadCanonicalSummary = useCallback(async (periodId: string) => {
+    const requestId = ++canonicalSummaryRequestRef.current;
+    if (!periodId) {
+      setCanonicalSummary(null);
+      setCanonicalSummaryLoading(false);
+      return;
+    }
+    setCanonicalSummaryLoading(true);
+    try {
+      const result = await getCanonicalLiquidationSummary(periodId);
+      if (requestId === canonicalSummaryRequestRef.current) setCanonicalSummary(result);
+    } catch (error) {
+      if (requestId === canonicalSummaryRequestRef.current) {
+        console.error("Error cargando resumen canónico de liquidación:", error);
+        setCanonicalSummary(null);
+      }
+    } finally {
+      if (requestId === canonicalSummaryRequestRef.current) setCanonicalSummaryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadCanonicalSummary(selectedPeriodId);
+  }, [loadCanonicalSummary, selectedPeriodId]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      void loadCanonicalSummary(selectedPeriodId);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadCanonicalSummary, selectedPeriodId]);
 
   useEffect(() => {
     if (scrollRestorePositionRef.current === null || typeof window === "undefined") return;
@@ -724,13 +765,38 @@ export default function LiquidacionPage() {
 
   // Resumen por técnico basado en reportes_actividad
   const liquidationUsers = users.filter((user) => user.rol !== "admin");
-  const techSummary = buildTechDisplaySummary(liquidationUsers, periodReports, liquidablePeriodReports, true);
+  const canonicalTechSummary = (() => {
+    if (!canonicalSummary) return null;
+    const rowsByUser = new Map(canonicalSummary.technicians.map((row) => [row.tecnicoId, row]));
+    const summary = new Map<string, TechLiquidationDisplaySummary>();
+    liquidationUsers.forEach((tech) => {
+      const row = rowsByUser.get(tech.id);
+      summary.set(tech.id, {
+        nombre: row?.nombre || `${tech.nombre} ${tech.apellido}`,
+        actividades: row?.actividadesAprobadas || 0,
+        actividadesVisibles: periodReports.filter((report) => report.tecnicoId === tech.id).length,
+        actividadesAprobadas: row?.actividadesAprobadas || 0,
+        totalBruto: row?.totalBruto || 0,
+        totalNoRecorridos: row?.totalNoRecorridos || 0,
+        totalRecorridos: row?.totalRecorridos || 0,
+        extraLider: row?.extraLider || 0,
+        descuentoPorcentaje: row && row.totalNoRecorridos > 0
+          ? Math.round((row.descuentoValor / row.totalNoRecorridos) * 100)
+          : 0,
+        descuentoValor: row?.descuentoValor || 0,
+        total: row?.total || 0,
+      });
+    });
+    return summary;
+  })();
 
-  const totalPeriod = Array.from(techSummary.values()).reduce(
+  const techSummary = canonicalTechSummary || buildTechDisplaySummary(liquidationUsers, periodReports, liquidablePeriodReports, true);
+
+  const totalPeriod = canonicalSummary?.totals.total || Array.from(techSummary.values()).reduce(
     (sum, t) => sum + t.total,
-    0
+    0,
   );
-  const totalPenaltyPeriod = Array.from(techSummary.values()).reduce((sum, t) => sum + t.descuentoValor, 0);
+  const totalPenaltyPeriod = canonicalSummary?.totals.descuentoValor || Array.from(techSummary.values()).reduce((sum, t) => sum + t.descuentoValor, 0);
 
   const applyStableReportOrder = (reports: ActivityReport[]) => {
     reports.forEach((report) => {
@@ -964,6 +1030,12 @@ export default function LiquidacionPage() {
     <div>
       <AdminHeader title="Liquidación de Actividades" />
       <div className="p-6 space-y-6">
+        {canonicalSummaryLoading && (
+          <div className="flex items-center gap-2 rounded-lg border border-gold/20 bg-gold/5 px-4 py-2 text-sm text-gold">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Actualizando liquidación canónica del período...
+          </div>
+        )}
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
             <CalendarDays className="h-5 w-5 text-gold" />

@@ -16,53 +16,59 @@ import {
 import { getMantenimientos } from "@/lib/data/services/mantenimientos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
-import { getReportesActividad } from "@/lib/data/services/reportes-actividad";
-import { Maintenance, User, ActivityReport, Client } from "@/lib/types";
+import { getDashboardMetrics, DashboardMetrics } from "@/lib/data/services/dashboard";
+import { Maintenance, User, Client } from "@/lib/types";
 
 export default function DashboardPage() {
   const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
-  const [reports, setReports] = useState<ActivityReport[]>([]);
+  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const touchStartY = useRef<number | null>(null);
   const pullDistance = useRef(0);
   const isPulling = useRef(false);
+  const dashboardRequestRef = useRef(0);
 
   const loadCoreDashboardData = useCallback(async (showLoader = true) => {
+    const requestId = ++dashboardRequestRef.current;
     if (showLoader) setLoading(true);
     try {
-      const [m, c, u] = await Promise.all([getMantenimientos(), getClientes(), getUsuarios()]);
+      const [m, c, u, dashboardMetrics] = await Promise.all([
+        getMantenimientos(),
+        getClientes(),
+        getUsuarios(),
+        getDashboardMetrics(),
+      ]);
+      if (requestId !== dashboardRequestRef.current) return;
       setMaintenances(m);
       setClients(c);
       setUsers(u);
+      setMetrics(dashboardMetrics);
     } catch (err) {
       console.error("Error cargando dashboard:", err);
     } finally {
-      if (showLoader) setLoading(false);
-    }
-  }, []);
-
-  const loadDashboardReports = useCallback(async () => {
-    try {
-      const r = await getReportesActividad();
-      setReports(r);
-    } catch (err) {
-      console.error("Error cargando reportes del dashboard:", err instanceof Error ? err.message : JSON.stringify(err));
+      if (showLoader && requestId === dashboardRequestRef.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     loadCoreDashboardData();
-    loadDashboardReports();
 
     const interval = setInterval(() => {
       loadCoreDashboardData(false);
-      loadDashboardReports();
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [loadCoreDashboardData, loadDashboardReports]);
+  }, [loadCoreDashboardData]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      void loadCoreDashboardData(false);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadCoreDashboardData]);
 
   useEffect(() => {
     const resetPullState = () => {
@@ -114,25 +120,12 @@ export default function DashboardPage() {
     };
   }, []);
 
-  const now = new Date();
-  const thisYear = now.getFullYear();
-  const thisMonth = now.getMonth();
-
-  const maintenancesThisMonth = maintenances.filter((m) => {
-    if (!m.fechaProgramada) return false;
-    const [year, month] = m.fechaProgramada.split("-").map(Number);
-    return year === thisYear && month - 1 === thisMonth;
-  });
-
-  const programados = maintenancesThisMonth.filter((m) => m.estado === "programado").length;
-  const realizados = maintenancesThisMonth.filter((m) => ["realizado", "completado"].includes(String(m.estado))).length;
-  const pendientes = maintenances.filter((m) => m.estado === "pendiente").length;
-  const enEjecucion = maintenances.filter((m) => ["en_ejecucion", "en_progreso"].includes(String(m.estado))).length;
-  const tecnicosActivos = users.filter((u) => u.rol === "tecnico" && u.estado === "activo").length;
-  const reportesGenerados = reports.filter((r) => {
-    const [year, month] = r.fecha.split("-").map(Number);
-    return year === thisYear && month - 1 === thisMonth;
-  }).length;
+  const programados = metrics?.programados ?? 0;
+  const realizados = metrics?.realizados ?? 0;
+  const pendientes = metrics?.pendientes ?? 0;
+  const enEjecucion = metrics?.enEjecucion ?? 0;
+  const tecnicosActivos = metrics?.tecnicosActivos ?? 0;
+  const reportesGenerados = metrics?.reportesGenerados ?? 0;
 
   if (loading) {
     return (

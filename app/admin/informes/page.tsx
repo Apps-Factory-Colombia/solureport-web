@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { Button } from "@/components/ui/button";
@@ -66,7 +66,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { ActivityReport, User, Client, WorkGroup, CompanySettings, LiquidationPeriod, MaintenanceContract } from "@/lib/types";
-import { deleteReporteActividadAdmin, getReportesActividad, markReporteActividadEmailSent, updateCostoActividadAdmin, updateCostoClienteVisitaAdmin } from "@/lib/data/services/reportes-actividad";
+import { deleteReporteActividadAdmin, getReportesActividad, getReportesActividadParaExportar, markReporteActividadEmailSent, updateCostoActividadAdmin, updateCostoClienteVisitaAdmin } from "@/lib/data/services/reportes-actividad";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getGrupos } from "@/lib/data/services/grupos";
@@ -863,6 +863,8 @@ export default function InformesPage() {
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
+  const [monthlyExportReports, setMonthlyExportReports] = useState<ActivityReport[]>([]);
+  const [monthlyExportLoading, setMonthlyExportLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [viewRangeStart, setViewRangeStart] = useState("");
@@ -905,8 +907,10 @@ export default function InformesPage() {
     recorridos: 1,
     grupales: 1,
   });
+  const reportsRequestRef = useRef(0);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
+    const requestId = ++reportsRequestRef.current;
     setLoading(true);
     Promise.allSettled([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion(), getContratos(), getPeriodos()])
       .then(([reportsResult, usersResult, clientsResult, groupsResult, settingsResult, contractsResult, periodsResult]) => {
@@ -926,6 +930,7 @@ export default function InformesPage() {
         if (contractsResult.status === "rejected") console.error("Error cargando contratos en informes:", contractsResult.reason);
         if (periodsResult.status === "rejected") console.error("Error cargando períodos en informes:", periodsResult.reason);
 
+        if (requestId !== reportsRequestRef.current) return;
         const normalizedReports = normalizeSharedVisitRowsForUi(r);
         const reportsWithContractHistory = mergeContractMaintenanceHistory(normalizedReports, ct);
         const historicalData = resolveHistoricalReportPeriods(reportsWithContractHistory, p);
@@ -937,12 +942,43 @@ export default function InformesPage() {
           return currentPeriod?.id || p[0]?.id || historicalData.periods[0]?.id || "";
         });
       })
-      .finally(() => setLoading(false));
-  };
+      .finally(() => {
+        if (requestId === reportsRequestRef.current) setLoading(false);
+      });
+  }, [today]);
 
   useEffect(() => {
     loadData();
-  }, []);
+    const onFocus = () => { void loadData(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadData]);
+
+  useEffect(() => {
+    if (exportReportType !== "mantenimiento_preventivo" || !preventiveMonthlyMonth) {
+      setMonthlyExportReports([]);
+      return;
+    }
+
+    let cancelled = false;
+    setMonthlyExportLoading(true);
+    getReportesActividadParaExportar({
+      startDate: `${preventiveMonthlyMonth}-01`,
+      endDate: getMonthEndDate(preventiveMonthlyMonth),
+      tipo: "mantenimiento_preventivo",
+    }).then((result) => {
+      if (!cancelled) setMonthlyExportReports(result.items);
+    }).catch((error) => {
+      if (!cancelled) {
+        console.error("Error cargando fuente de exportación preventiva:", error);
+        setMonthlyExportReports([]);
+      }
+    }).finally(() => {
+      if (!cancelled) setMonthlyExportLoading(false);
+    });
+
+    return () => { cancelled = true; };
+  }, [exportReportType, preventiveMonthlyMonth]);
 
   const selectedPeriod = useMemo(
     () => periods.find((period) => period.id === selectedPeriodId),
@@ -2106,7 +2142,7 @@ export default function InformesPage() {
 
     const monthStart = `${preventiveMonthlyMonth}-01`;
     const monthEnd = getMonthEndDate(preventiveMonthlyMonth);
-    const monthlyReports = filterPreventiveMirrorReports(reports).filter((report) => {
+    const monthlyReports = monthlyExportReports.filter((report) => {
       if (report.tipo !== "mantenimiento_preventivo" || report.fecha < monthStart || report.fecha > monthEnd) return false;
       return preventiveExportClientId === "todos" || report.clienteId === preventiveExportClientId;
     });
@@ -2146,7 +2182,7 @@ export default function InformesPage() {
       })
       .sort((left, right) => left.maintenanceDate.localeCompare(right.maintenanceDate)
         || left.buildingName.localeCompare(right.buildingName, "es", { sensitivity: "base" }));
-  }, [buildGroupedActivityRows, clientsById, contracts, exportReportType, getExportTechnicalValue, preventiveExportClientId, preventiveExportCostMode, preventiveMonthlyMonth, reports, usersById]);
+  }, [buildGroupedActivityRows, clientsById, contracts, exportReportType, getExportTechnicalValue, monthlyExportReports, preventiveExportClientId, preventiveExportCostMode, preventiveMonthlyMonth, usersById]);
 
   const selectedPreventiveTechnicalTotal = useMemo(
     () => selectedPreventiveEntries.reduce((sum, entry) => sum + entry.technicalValue, 0),
@@ -3032,7 +3068,9 @@ export default function InformesPage() {
                               ))}
                             </SelectContent>
                           </Select>
-                          <p className="text-[11px] text-muted-foreground">Reporte mensual completo: {preventiveMonthlyRangeLabel}.</p>
+                          <p className="text-[11px] text-muted-foreground">
+                            {monthlyExportLoading ? "Cargando fuente consolidada..." : `Reporte mensual completo: ${preventiveMonthlyRangeLabel}.`}
+                          </p>
                         </div>
                       )}
                       <div className="space-y-2 sm:col-span-2 xl:col-span-1">
@@ -3157,8 +3195,8 @@ export default function InformesPage() {
                           Cobro del corte
                           <span className="hidden border-l border-black/20 pl-2 text-xs font-normal sm:inline">{formatCurrency(selectedPreventiveClientTotal)}</span>
                         </Button>
-                        <Button type="button" size="sm" variant="outline" className="h-9 gap-2 rounded-lg border-gold/40 bg-gold/5 px-3 text-gold hover:bg-gold/10 hover:text-gold" onClick={handleExportPreventiveMonthlySummary} disabled={exportingPreventiveMonthlySummary}>
-                          {exportingPreventiveMonthlySummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        <Button type="button" size="sm" variant="outline" className="h-9 gap-2 rounded-lg border-gold/40 bg-gold/5 px-3 text-gold hover:bg-gold/10 hover:text-gold" onClick={handleExportPreventiveMonthlySummary} disabled={exportingPreventiveMonthlySummary || monthlyExportLoading}>
+                          {exportingPreventiveMonthlySummary || monthlyExportLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                           Reporte mensual
                           <span className="hidden border-l border-gold/30 pl-2 text-xs font-normal sm:inline">{preventiveMonthlyRangeLabel}</span>
                         </Button>

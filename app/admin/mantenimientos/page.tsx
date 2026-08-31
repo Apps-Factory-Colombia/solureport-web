@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
 import { MaintenanceDialog } from "@/components/mantenimientos/maintenance-dialog";
@@ -61,7 +61,7 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 import { Maintenance, MaintenanceStatus, Client, User, CompanySettings, LiquidationPeriod } from "@/lib/types";
-import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/data/services/mantenimientos";
+import { getMantenimientos, getMantenimientosVencidos, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/data/services/mantenimientos";
 import { getContratos, createContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
@@ -250,6 +250,7 @@ function MiniCalendar({ maintenances, currentMonth, onMonthChange, selectedDate,
 
 export default function MantenimientosPage() {
   const [maintenances, setMaintenances] = useState<Maintenance[]>([]);
+  const [overdueMaintenances, setOverdueMaintenances] = useState<Maintenance[]>([]);
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -278,11 +279,14 @@ export default function MantenimientosPage() {
   // El panel de programados abre en el mes calendario actual; "Todos" sigue
   // disponible para consultar histórico completo de forma explícita.
   const [programadosMonthFilter, setProgramadosMonthFilter] = useState<string>(() => getMonthInputValue(new Date()));
-  const [vencidosMonthFilter, setVencidosMonthFilter] = useState<string>(() => getMonthInputValue(new Date()));
+  // La bandeja de vencidos debe mostrar por defecto el mismo universo del
+  // badge. El filtro mensual queda disponible como consulta explícita.
+  const [vencidosMonthFilter, setVencidosMonthFilter] = useState<string>("");
   const [completedPeriodFilter, setCompletedPeriodFilter] = useState<string>("");
 
   const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
   const [calendarSelectedDate, setCalendarSelectedDate] = useState<Date | null>(null);
+  const maintenanceRequestRef = useRef(0);
 
   const parseLocalDate = (dateStr: string) => {
     const [year, month, day] = dateStr.split("-").map(Number);
@@ -290,9 +294,10 @@ export default function MantenimientosPage() {
   };
 
   const loadData = useCallback(async () => {
+    const requestId = ++maintenanceRequestRef.current;
     setLoading(true);
     try {
-      const [m, ct, c, u, s, p] = await Promise.all([
+      const [m, ct, c, u, s, p, overdue] = await Promise.all([
         getMantenimientos(),
         getContratos(),
         getClientes(),
@@ -305,8 +310,14 @@ export default function MantenimientosPage() {
           console.error("Error cargando períodos de liquidación:", error);
           return [];
         }),
+        getMantenimientosVencidos().catch((error) => {
+          console.error("Error cargando mantenimientos vencidos:", error);
+          return { items: [] as Maintenance[], total: 0, today: "", generatedAt: "" };
+        }),
       ]);
+      if (requestId !== maintenanceRequestRef.current) return;
       setMaintenances(m);
+      setOverdueMaintenances(overdue.items);
       setContracts(ct);
       setClients(c);
       setUsers(u);
@@ -319,11 +330,17 @@ export default function MantenimientosPage() {
     } catch (err) {
       console.error("Error cargando mantenimientos:", err);
     } finally {
-      setLoading(false);
+      if (requestId === maintenanceRequestRef.current) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { void loadData(); }, [loadData]);
+
+  useEffect(() => {
+    const onFocus = () => { void loadData(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadData]);
 
   const todayStart = useMemo(() => {
     const today = new Date();
@@ -436,13 +453,6 @@ export default function MantenimientosPage() {
     return String(maintenance.estado).toLowerCase() === "pendiente";
   }, []);
 
-  const isMaintenanceOverdue = useCallback((maintenance: Maintenance) => {
-    if (!maintenance.fechaProgramada) return false;
-    if (isMaintenanceCompleted(maintenance)) return false;
-    const maintenanceDate = parseLocalDate(maintenance.fechaProgramada);
-    return maintenanceDate.getTime() < todayStart.getTime();
-  }, [isMaintenanceCompleted, todayStart]);
-
   const openScheduleDialog = useCallback((maintenance: Maintenance) => {
     setSchedulingMaint(maintenance);
     setScheduleTecnico(maintenance.tecnicoId);
@@ -479,8 +489,10 @@ export default function MantenimientosPage() {
   }, [maintenances, programadosMonthFilter]);
 
   const vencidos = useMemo(() => {
-    return maintenances.filter((m) => canScheduleMaintenance(m) && isMaintenanceOverdue(m));
-  }, [canScheduleMaintenance, maintenances, isMaintenanceOverdue]);
+    return overdueMaintenances;
+  }, [overdueMaintenances]);
+
+  const overdueIds = useMemo(() => new Set(vencidos.map((maintenance) => maintenance.id)), [vencidos]);
 
   const activeCoverageClientIds = useMemo(() => {
     return new Set(
@@ -588,7 +600,7 @@ export default function MantenimientosPage() {
   const filtered = maintenances.filter((m) => {
     const matchesSearch = maintenanceMatchesSearch(m, search);
     const matchesStatus = statusFilter === "todos"
-      || (statusFilter === "vencido" ? canScheduleMaintenance(m) && isMaintenanceOverdue(m) : m.estado === statusFilter);
+      || (statusFilter === "vencido" ? overdueIds.has(m.id) : m.estado === statusFilter);
     return matchesSearch && matchesStatus;
   });
 

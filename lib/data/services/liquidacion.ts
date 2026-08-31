@@ -1,6 +1,34 @@
 import { LiquidationEntry, LiquidationPeriod } from "@/lib/types";
 import { dataRequest } from "../client";
 
+export type CanonicalLiquidationTechnician = {
+  tecnicoId: string;
+  nombre: string;
+  email: string;
+  rol: string;
+  esLider: boolean;
+  actividades: number;
+  actividadesAprobadas: number;
+  totalBruto: number;
+  totalNoRecorridos: number;
+  totalRecorridos: number;
+  descuentoValor: number;
+  totalAprobado: number;
+  totalPendiente: number;
+  extraLider: number;
+  total: number;
+};
+
+export type CanonicalLiquidationSummary = {
+  periodoId: string;
+  fechaInicio: string;
+  fechaFin: string;
+  estado: LiquidationPeriod["estado"];
+  generatedAt: string;
+  totals: Omit<CanonicalLiquidationTechnician, "tecnicoId" | "nombre" | "email" | "rol" | "esLider">;
+  technicians: CanonicalLiquidationTechnician[];
+};
+
 function dateOnly(value?: Date | string): string {
   if (!value) return new Date().toISOString().split("T")[0] || "";
   return typeof value === "string" ? value.split("T")[0] || value : value.toISOString().split("T")[0] || "";
@@ -17,4 +45,7 @@ export async function updatePeriodo(id: string, period: Partial<LiquidationPerio
 export async function closePeriodo(id: string): Promise<LiquidationPeriod> { return dataRequest<LiquidationPeriod>("periods.close", { id }); }
 export async function deletePeriodo(id: string): Promise<void> { await dataRequest("periods.delete", { id }); }
 export async function getLiquidationEntries(): Promise<LiquidationEntry[]> { return dataRequest<LiquidationEntry[]>("liquidation.periodEntries"); }
+export async function getCanonicalLiquidationSummary(periodoId: string): Promise<CanonicalLiquidationSummary> {
+  return dataRequest<CanonicalLiquidationSummary>("liquidation.periodSummary", { periodoId });
+}
 export async function createLiquidationEntry(entry: Partial<LiquidationEntry> & { periodoId: string }): Promise<LiquidationEntry> { return dataRequest<LiquidationEntry>("liquidation.create", entry); }

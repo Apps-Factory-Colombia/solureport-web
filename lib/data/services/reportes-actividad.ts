@@ -3,6 +3,9 @@ import { dataRequest } from "../client";
 import { BUCKETS, uploadFile } from "@/lib/storage/supabase";
 
 export async function getReportesActividad(filters?: Record<string, unknown>): Promise<ActivityReport[]> { return dataRequest<ActivityReport[]>("reports.list", filters || {}); }
+export async function getReportesActividadParaExportar(filters?: Record<string, unknown>): Promise<{ startDate: string; endDate: string; generatedAt: string; total: number; items: ActivityReport[] }> {
+  return dataRequest<{ startDate: string; endDate: string; generatedAt: string; total: number; items: ActivityReport[] }>("reports.export", filters || {});
+}
 export async function deleteReporteActividadAdmin(id: string): Promise<void> { await dataRequest("reports.delete", { id }); }
 export async function markReporteActividadEmailSent(id: string, sentAt?: string): Promise<void> { await dataRequest("reports.emailSent", { id, sentAt }); }
 export async function updateCostoActividadAdmin(id: string, value: number, options?: Record<string, unknown>): Promise<void> { await dataRequest("reports.cost", { id, value, ...(options || {}) }); }

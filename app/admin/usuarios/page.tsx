@@ -120,8 +120,10 @@ export default function UsuariosPage() {
   const handleSaveUser = async (userData: Partial<User> & { password?: string; horarios?: UserScheduleDraft[] }) => {
     if (editingUser) {
       await updateUsuario(editingUser.id, userData);
+      window.alert("Usuario actualizado correctamente.");
     } else {
       await createUsuario(userData);
+      window.alert("Usuario creado correctamente.");
     }
     await loadData();
     setEditingUser(null);
@@ -147,8 +149,9 @@ export default function UsuariosPage() {
   const handleDeleteUser = async (id: string) => {
     setDeletingUserId(id);
     try {
-      await deleteUsuario(id);
+      const result = await deleteUsuario(id);
       setUserToDelete(null);
+      alert(result.message);
       await loadData();
     } catch (err) {
       console.error("Error eliminando usuario:", err);
@@ -595,7 +598,8 @@ export default function UsuariosPage() {
           <DialogHeader>
             <DialogTitle className="text-foreground">Confirmar eliminación</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              ¿Seguro que quieres eliminar a <strong>{userToDelete?.nombre} {userToDelete?.apellido}</strong>? Esta acción también eliminará sus registros relacionados.
+              ¿Seguro que quieres retirar a <strong>{userToDelete?.nombre} {userToDelete?.apellido}</strong>?
+              Si tiene historial operativo o financiero, la cuenta se anonimizará y el historial se conservará.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { Button } from "@/components/ui/button";
@@ -35,11 +35,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, ChevronDown, ArrowLeft, X, } from "lucide-react";
-import { MaintenanceContract, Client, MaintenanceParticipant, MaintenanceStatus, User } from "@/lib/types";
+import { MaintenanceContract, Client, User } from "@/lib/types";
 import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
-import { updateMantenimiento } from "@/lib/data/services/mantenimientos";
 import { cn } from "@/lib/utils";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 
@@ -207,18 +206,17 @@ export default function ContratosPage() {
   const [newPuertasVehiculares, setNewPuertasVehiculares] = useState("0");
   const [newValorPuertaPeatonal, setNewValorPuertaPeatonal] = useState("0");
   const [newValorPuertaVehicular, setNewValorPuertaVehicular] = useState("0");
-  const [newCostoTotal, setNewCostoTotal] = useState("");
   const [newCantidad, setNewCantidad] = useState("3");
   const [createMaintenanceDrafts, setCreateMaintenanceDrafts] = useState<ContractMaintenanceDraft[]>([]);
   const [creating, setCreating] = useState(false);
   const [createdContractInfo, setCreatedContractInfo] = useState<{ cliente: string; cantidad: number } | null>(null);
+  const createIdempotencyKey = useRef<string | null>(null);
 
   // Estados para edición del contrato general en el modal unificado
   const [editClienteId, setEditClienteId] = useState("");
   const [editAnio, setEditAnio] = useState("");
   const [editMesInicio, setEditMesInicio] = useState("1");
   const [editDiaInicio, setEditDiaInicio] = useState("1");
-  const [editCostoTotal, setEditCostoTotal] = useState("");
   const [editCantidad, setEditCantidad] = useState("3");
   const [editEstado, setEditEstado] = useState<"activo" | "cerrado">("activo");
   const [editPuertasPeatonales, setEditPuertasPeatonales] = useState("0");
@@ -252,10 +250,6 @@ export default function ContratosPage() {
   };
 
   useEffect(() => { loadData(); }, []);
-
-  const costoPorMant = newCostoTotal && newCantidad
-    ? Math.round(Number(newCostoTotal) / Number(newCantidad))
-    : 0;
 
   const assignableUsers = useMemo(
     () => users.filter((user) => user.estado === "activo" && (user.rol === "tecnico" || user.rol === "lider" || user.esLider)),
@@ -301,6 +295,12 @@ export default function ContratosPage() {
     (Number(editPuertasPeatonales) || 0) * (Number(editValorPuertaPeatonal) || 0)
     + (Number(editPuertasVehiculares) || 0) * (Number(editValorPuertaVehicular) || 0);
 
+  const calculatedNewTotal = Math.round(valorConfiguradoPuertasNuevo * (Number(newCantidad) || 0));
+  const calculatedEditTotal = Math.round(valorConfiguradoPuertasEdicion * (Number(editCantidad) || 0));
+  const costoPorMant = calculatedNewTotal > 0 && Number(newCantidad) > 0
+    ? Math.round(calculatedNewTotal / Number(newCantidad))
+    : 0;
+
   const resetCreateFlow = () => {
     setCreateStep(1);
     setCreateClientSelectorOpen(false);
@@ -313,9 +313,9 @@ export default function ContratosPage() {
     setNewPuertasVehiculares("0");
     setNewValorPuertaPeatonal("0");
     setNewValorPuertaVehicular("0");
-    setNewCostoTotal("");
     setNewCantidad("3");
     setCreateMaintenanceDrafts([]);
+    createIdempotencyKey.current = null;
   };
 
   const handleCreateOpenChange = (open: boolean) => {
@@ -447,7 +447,7 @@ export default function ContratosPage() {
 
     const cantidad = Number(newCantidad);
     const anio = Number(newAnio);
-    const costoTotal = Number(newCostoTotal);
+    const costoTotal = calculatedNewTotal;
     const mesInicio = Number(newMesInicio);
     const diaInicio = Number(newDiaInicio);
 
@@ -467,7 +467,7 @@ export default function ContratosPage() {
     }
 
     if (!Number.isFinite(costoTotal) || costoTotal <= 0) {
-      window.alert("Ingresa un costo total anual mayor a cero.");
+      window.alert("Configura cantidades y valores de puertas para obtener un costo total anual mayor a cero.");
       return;
     }
 
@@ -549,26 +549,42 @@ export default function ContratosPage() {
   };
 
   const handleCreateContract = async () => {
-    if (!newClienteId || !newCostoTotal || !newCantidad) return;
+    if (!newClienteId || !calculatedNewTotal || !newCantidad) return;
     if (!validateCreateMaintenanceDrafts()) return;
     setCreating(true);
     try {
+      if (!createIdempotencyKey.current) {
+        createIdempotencyKey.current = typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `contract-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      }
       const anio = Number(newAnio);
       const cantidad = Number(newCantidad);
-      const costoTotal = Number(newCostoTotal);
+      const costoTotal = calculatedNewTotal;
       const mesInicio = Number(newMesInicio);
       const diaInicio = Number(newDiaInicio);
       const costoPorMantenimiento = Math.round(costoTotal / cantidad);
-      const mantenimientos = createMaintenanceDrafts.map((draft) => ({
-        id: `temp-${draft.mes}-${draft.fechaProgramada}`,
-        mes: draft.mes,
-        fechaProgramada: draft.fechaProgramada,
-        tecnicoId: draft.tecnicoId,
-        estado: "programado" as const,
-        valorRecaudado: 0,
-      }));
+      const mantenimientos = createMaintenanceDrafts.map((draft) => {
+        const technicalValue = Math.max(0, Math.round(Number(draft.valorTecnico || 0) || 0));
+        const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, technicalValue);
+        return {
+          mes: draft.mes,
+          fechaProgramada: draft.fechaProgramada,
+          horaProgramada: draft.horaProgramada || undefined,
+          tecnicoId: draft.tecnicoId,
+          estado: "programado" as const,
+          costoTecnicoTotal: technicalValue,
+          valorRecaudado: 0,
+          participantes: participantSummary.drafts.map((participant) => ({
+            usuarioId: participant.usuarioId,
+            porcentaje: Number(participant.porcentaje || 0) || 0,
+            valorCalculado: Number(participant.valorCalculado || 0) || 0,
+            rol: participant.usuarioId === draft.tecnicoId ? "principal" as const : "acompanante" as const,
+          })),
+        };
+      });
 
-      const createdContract = await createContrato({
+      await createContrato({
         clienteId: newClienteId,
         anio,
         mesInicio,
@@ -582,36 +598,10 @@ export default function ContratosPage() {
         costoPorMantenimiento,
         mantenimientosRealizados: mantenimientos,
         estado: "activo",
+        claveIdempotencia: createIdempotencyKey.current,
       });
 
       const selectedClient = clients.find((client) => client.id === newClienteId);
-
-      const createdMaintenancesByKey = new Map(
-        createdContract.mantenimientosRealizados.map((maintenance) => [
-          buildContractMaintenanceDraftKey(maintenance.mes, maintenance.fechaProgramada),
-          maintenance,
-        ])
-      );
-
-      await Promise.all(createMaintenanceDrafts.map(async (draft) => {
-        const createdMaintenance = createdMaintenancesByKey.get(buildContractMaintenanceDraftKey(draft.mes, draft.fechaProgramada));
-        if (!createdMaintenance) return;
-
-        const technicalValue = Math.max(0, Math.round(Number(draft.valorTecnico || 0) || 0));
-        const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, technicalValue);
-        await updateMantenimiento(createdMaintenance.id, {
-          tecnicoId: draft.tecnicoId,
-          fechaProgramada: draft.fechaProgramada,
-          horaProgramada: draft.horaProgramada || undefined,
-          estado: "programado" as MaintenanceStatus,
-          costoTecnicoTotal: technicalValue,
-          participantes: participantSummary.drafts.map((participant): MaintenanceParticipant => ({
-            usuarioId: participant.usuarioId,
-            porcentaje: Number(participant.porcentaje || 0) || 0,
-            valorCalculado: Number(participant.valorCalculado || 0) || 0,
-          })),
-        });
-      }));
 
       setCreateOpen(false);
       resetCreateFlow();
@@ -622,6 +612,7 @@ export default function ContratosPage() {
       await loadData();
     } catch (err) {
       console.error("Error creando contrato:", err);
+      window.alert(err instanceof Error ? err.message : "No se pudo crear el contrato y su cronograma.");
     } finally {
       setCreating(false);
     }
@@ -633,7 +624,6 @@ export default function ContratosPage() {
     setEditAnio(String(ct.anio));
     setEditMesInicio(String(ct.mesInicio || 1));
     setEditDiaInicio(String(ct.diaInicio || 1));
-    setEditCostoTotal(String(ct.costoTotalAnual));
     setEditCantidad(String(ct.cantidadMantenimientos));
     setEditEstado(ct.estado);
     setEditPuertasPeatonales(String(ct.puertasPeatonales || 0));
@@ -645,11 +635,11 @@ export default function ContratosPage() {
   };
 
   const handleSaveEdit = async () => {
-    if (!selectedContract || !editClienteId || !editCostoTotal) return;
+    if (!selectedContract || !editClienteId || !calculatedEditTotal) return;
     setSaving(true);
     try {
       const cantidad = Number(editCantidad);
-      const costoTotal = Number(editCostoTotal);
+      const costoTotal = calculatedEditTotal;
       const updated = await updateContrato(selectedContract.id, {
         clienteId: editClienteId,
         anio: Number(editAnio),
@@ -666,9 +656,13 @@ export default function ContratosPage() {
         regenerarMantenimientos: editRegenerarMants,
       });
       setSelectedContract(updated);
+      window.alert(editRegenerarMants
+        ? "Contrato actualizado. El cronograma fue reconciliado sin borrar mantenimientos con historial."
+        : "Contrato actualizado correctamente.");
       await loadData();
     } catch (err) {
       console.error("Error editando contrato:", err);
+      window.alert(err instanceof Error ? err.message : "No se pudo actualizar el contrato.");
     } finally {
       setSaving(false);
     }
@@ -804,12 +798,14 @@ export default function ContratosPage() {
     if (!deleteContract) return;
     setDeleting(true);
     try {
-      await deleteContrato(deleteContract.id);
+      const result = await deleteContrato(deleteContract.id);
       setDeleteOpen(false);
       setDeleteContract(null);
+      window.alert(result.message);
       await loadData();
     } catch (err) {
       console.error("Error eliminando contrato:", err);
+      window.alert(err instanceof Error ? err.message : "No se pudo eliminar el contrato.");
     } finally {
       setDeleting(false);
     }
@@ -1736,14 +1732,9 @@ export default function ContratosPage() {
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-2">
-                        <Label className="text-foreground/80">Costo Total Anual ($)</Label>
-                        <Input
-                          type="number"
-                          min="0"
-                          value={editCostoTotal}
-                          onChange={(e) => setEditCostoTotal(e.target.value)}
-                          className="bg-secondary/50 border-border/50"
-                        />
+                        <Label className="text-foreground/80">Costo Total Anual calculado ($)</Label>
+                        <Input type="number" value={calculatedEditTotal} readOnly className="bg-secondary/30 border-border/50 text-gold font-semibold" />
+                        <p className="text-xs text-muted-foreground">(Puertas peatonales × valor + puertas vehiculares × valor) × mantenimientos.</p>
                       </div>
                       <div className="space-y-2">
                         <Label className="text-foreground/80">Puertas Peatonales</Label>
@@ -1809,7 +1800,7 @@ export default function ContratosPage() {
                         <span className="font-semibold text-cyan-neon">{formatCurrency(valorConfiguradoPuertasEdicion)}</span>
                       </div>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        El valor total anual del contrato se mantiene independiente de esta configuración.
+                        El total anual se calcula automáticamente con la cantidad de mantenimientos.
                       </p>
                     </div>
 
@@ -1834,7 +1825,7 @@ export default function ContratosPage() {
                     <div className="flex justify-end pt-4 border-t border-border/50 mt-6">
                       <Button
                         onClick={handleSaveEdit}
-                        disabled={saving || !editClienteId || !editCostoTotal}
+                        disabled={saving || !editClienteId || calculatedEditTotal <= 0}
                         className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
                       >
                         {saving ? (
@@ -1971,8 +1962,9 @@ export default function ContratosPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label className="text-foreground/80">Costo Total Anual ($)</Label>
-                    <Input type="number" min="0" value={newCostoTotal} onChange={(e) => setNewCostoTotal(e.target.value)} className="bg-secondary/50 border-border/50" placeholder="Ej: 12000000" />
+                    <Label className="text-foreground/80">Costo Total Anual calculado ($)</Label>
+                    <Input type="number" value={calculatedNewTotal} readOnly className="bg-secondary/30 border-border/50 text-gold font-semibold" />
+                    <p className="text-xs text-muted-foreground">Se calcula automáticamente: valor por puertas × cantidad anual.</p>
                   </div>
                 </div>
 
@@ -1989,7 +1981,7 @@ export default function ContratosPage() {
                     </div>
                     <div className="flex justify-between text-sm">
                       <span className="text-muted-foreground">Costo total anual</span>
-                      <span className="font-semibold text-gold">{newCostoTotal ? formatCurrency(Number(newCostoTotal)) : "—"}</span>
+                      <span className="font-semibold text-gold">{calculatedNewTotal > 0 ? formatCurrency(calculatedNewTotal) : "—"}</span>
                     </div>
                     <div className="flex justify-between text-sm">
                       <span className="text-muted-foreground">Referencia contrato por mantenimiento</span>
@@ -2006,7 +1998,7 @@ export default function ContratosPage() {
                       <span className="font-semibold text-cyan-neon">{formatCurrency(valorConfiguradoPuertasNuevo)}</span>
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      Se guarda como referencia del contrato y no reemplaza el costo total anual.
+                      Este valor alimenta directamente el costo total anual calculado.
                     </p>
                   </div>
                 </div>
@@ -2256,7 +2248,7 @@ export default function ContratosPage() {
             )}
             <Button
               onClick={createStep === 1 ? handleCreateStepContinue : handleCreateContract}
-              disabled={creating || !newClienteId || !newCostoTotal}
+              disabled={creating || !newClienteId || calculatedNewTotal <= 0}
               className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
             >
               {creating ? (
@@ -2366,7 +2358,8 @@ export default function ContratosPage() {
                 <p className="text-sm text-muted-foreground">
                   ¿Estás seguro de que deseas eliminar el contrato de{" "}
                   <span className="font-semibold text-foreground">{client?.edificio || client?.nombre}</span>?
-                  Esta acción eliminará también todos los mantenimientos asociados y no se puede deshacer.
+                  Los mantenimientos sin historial se eliminarán. Si ya existen reportes, aprobaciones o liquidaciones,
+                  el sistema lo archivará para proteger la información y te lo informará.
                 </p>
                 <div className="rounded-lg border border-border/50 bg-secondary/30 p-3 text-sm space-y-1">
                   <div className="flex justify-between">

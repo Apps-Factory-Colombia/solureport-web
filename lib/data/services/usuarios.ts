@@ -7,7 +7,8 @@ export async function getUsuarios(): Promise<User[]> { return dataRequest<User[]
 export async function getUsuarioById(id: string): Promise<User | null> { return dataRequest<User | null>("users.get", { id }); }
 export async function createUsuario(user: UserPayload): Promise<User> { return dataRequest<User>("users.create", user); }
 export async function updateUsuario(id: string, user: UserPayload): Promise<User> { return dataRequest<User>("users.update", { id, ...user }); }
-export async function deleteUsuario(id: string): Promise<void> { await dataRequest("users.delete", { id }); }
+export type UserDeleteResult = { id: string; deleted: boolean; archived: boolean; message: string };
+export async function deleteUsuario(id: string): Promise<UserDeleteResult> { return dataRequest<UserDeleteResult>("users.delete", { id }); }
 
 export async function loginUsuario(email: string, password: string): Promise<User | null> {
   const response = await fetch("/api/auth/login", {

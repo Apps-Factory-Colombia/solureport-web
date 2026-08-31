@@ -4,6 +4,9 @@ import { dataRequest } from "../client";
 export function invalidateMantenimientosCache() {}
 export function invalidateReportesMantenimientoCache() {}
 export async function getMantenimientos(): Promise<Maintenance[]> { return dataRequest<Maintenance[]>("maintenances.list"); }
+export async function getMantenimientosVencidos(): Promise<{ today: string; generatedAt: string; total: number; items: Maintenance[] }> {
+  return dataRequest<{ today: string; generatedAt: string; total: number; items: Maintenance[] }>("maintenances.overdue");
+}
 export async function createMantenimiento(maintenance: Partial<Maintenance>): Promise<Maintenance> { return dataRequest<Maintenance>("maintenances.create", maintenance); }
 export async function updateMantenimiento(id: string, maintenance: Partial<Maintenance>): Promise<Maintenance> { return dataRequest<Maintenance>("maintenances.update", { id, ...maintenance }); }
 export async function deleteMantenimiento(id: string): Promise<void> { await dataRequest("maintenances.delete", { id }); }
