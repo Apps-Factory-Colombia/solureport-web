@@ -68,6 +68,7 @@ import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getConfiguracion } from "@/lib/data/services/configuracion";
 import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
+import { isAssignableMaintenanceUser } from "@/lib/utils/maintenance-assignment";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 import { formatClientDoorBreakdown } from "@/lib/utils/report-content";
 import type { MaintenanceContract } from "@/lib/types";
@@ -526,11 +527,7 @@ export default function MantenimientosPage() {
     return Array.from(latestClosedByClient.values());
   }, [activeCoverageClientIds, contracts]);
 
-  const assignableUsers = users.filter(
-    (u) =>
-      u.estado === "activo" &&
-      (u.rol === "tecnico" || u.rol === "lider" || u.esLider)
-  );
+  const assignableUsers = users.filter(isAssignableMaintenanceUser);
 
   const handleSchedule = async () => {
     if (!schedulingMaint) return;

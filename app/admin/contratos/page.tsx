@@ -40,6 +40,7 @@ import { getContratos, createContrato, updateContrato, deleteContrato, updateMan
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { cn } from "@/lib/utils";
+import { isAssignableMaintenanceUser } from "@/lib/utils/maintenance-assignment";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
 
 function formatCurrency(value: number) {
@@ -252,7 +253,7 @@ export default function ContratosPage() {
   useEffect(() => { loadData(); }, []);
 
   const assignableUsers = useMemo(
-    () => users.filter((user) => user.estado === "activo" && (user.rol === "tecnico" || user.rol === "lider" || user.esLider)),
+    () => users.filter(isAssignableMaintenanceUser),
     [users]
   );
 
@@ -2117,7 +2118,7 @@ export default function ContratosPage() {
                                   <Input
                                     value={draft.participantSearch}
                                     onChange={(event) => updateCreateMaintenanceDraft(index, (current) => ({ ...current, participantSearch: event.target.value }))}
-                                    placeholder="Buscar técnico o líder"
+                                    placeholder="Buscar usuario"
                                     className="bg-secondary/50 border-border/50"
                                   />
                                   <ScrollArea className="h-56 rounded-md border border-border/50">

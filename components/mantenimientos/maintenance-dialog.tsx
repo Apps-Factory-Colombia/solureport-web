@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Search, X } from "lucide-react";
+import { isAssignableMaintenanceUser } from "@/lib/utils/maintenance-assignment";
 
 type ParticipantDraft = {
   usuarioId: string;
@@ -159,11 +160,7 @@ export function MaintenanceDialog({
     if (open) {
       Promise.all([getUsuarios(), getClientes()])
         .then(([users, cls]) => {
-          const availableTechnicians = users.filter(
-            (u) =>
-              u.estado === "activo" &&
-              (u.rol === "tecnico" || u.rol === "lider" || u.esLider)
-          );
+          const availableTechnicians = users.filter(isAssignableMaintenanceUser);
 
           setTechnicians(availableTechnicians);
           setClients(cls.filter((c) => c.estado === "activo"));
@@ -415,7 +412,7 @@ export function MaintenanceDialog({
           <div className="space-y-3 rounded-lg border border-border/50 bg-secondary/20 p-4">
             <div>
               <p className="text-sm font-medium text-foreground">Participantes del mantenimiento</p>
-              <p className="text-xs text-muted-foreground">Elige los técnicos asignados, configura el porcentaje de cada uno y el pago se calcula automáticamente con base en el total.</p>
+              <p className="text-xs text-muted-foreground">Elige todos los usuarios activos que participarán, configura el porcentaje de cada uno y el pago se calcula automáticamente con base en el total.</p>
             </div>
 
             <div className="space-y-3">
@@ -433,7 +430,7 @@ export function MaintenanceDialog({
                       setIsParticipantListOpen(false);
                     }, 120);
                   }}
-                  placeholder="Buscar líder o técnico"
+                  placeholder="Buscar usuario"
                   className="bg-background/60 border-border/50 pl-9"
                 />
               </div>
