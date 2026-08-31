@@ -1043,6 +1043,205 @@ async function enrichMaintenance(row: any) {
   return maintenance;
 }
 
+type MaintenanceCategory = "esta_semana" | "proximos" | "vencidos" | "historial";
+
+function addCalendarDays(dateValue: string, days: number) {
+  const date = new Date(`${dateValue}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function maintenanceWeekRange(referenceDate = bogotaClock().date) {
+  const date = new Date(`${referenceDate}T00:00:00Z`);
+  const daysSinceMonday = (date.getUTCDay() + 6) % 7;
+  return {
+    start: addCalendarDays(referenceDate, -daysSinceMonday),
+    end: addCalendarDays(referenceDate, 6 - daysSinceMonday),
+  };
+}
+
+function maintenanceCategory(payload: Payload): MaintenanceCategory {
+  const value = String(payload.category || payload.tab || "esta_semana");
+  return ["esta_semana", "proximos", "vencidos", "historial"].includes(value)
+    ? value as MaintenanceCategory
+    : "esta_semana";
+}
+
+async function maintenancePageRows(payload: Payload, user: UserContext) {
+  const category = maintenanceCategory(payload);
+  const today = bogotaClock().date;
+  const week = maintenanceWeekRange(today);
+  const pageSize = Math.min(25, Math.max(1, Math.floor(number(payload.pageSize, 10))));
+  const page = Math.max(1, Math.floor(number(payload.page, 1)));
+  const offset = (page - 1) * pageSize;
+  const privileged = ["admin", "supervisor"].includes(user.rol);
+  const hasUserScope = Boolean(payload.usuarioId) || !privileged;
+  const values: unknown[] = [];
+  const filters: string[] = ["m.estado <> 'cancelado'"];
+
+  if (hasUserScope) {
+    values.push(user.id);
+    filters.push(`(
+      m.tecnico_principal_id = $${values.length}
+      OR g.lider_id = $${values.length}
+      OR EXISTS (
+        SELECT 1 FROM public.mantenimientos_programados_participantes mp_scope
+         WHERE mp_scope.mantenimiento_id = m.id
+           AND mp_scope.usuario_id = $${values.length}
+           AND mp_scope.estado = 'activo'
+      )
+    )`);
+  }
+
+  if (category === "historial") {
+    filters.push("m.estado IN ('ejecutado', 'completado')");
+  } else {
+    filters.push("m.estado NOT IN ('ejecutado', 'completado')");
+    if (category === "esta_semana") {
+      values.push(week.start, week.end);
+      filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+    } else if (category === "proximos") {
+      values.push(week.end);
+      filters.push(`m.fecha_programada > $${values.length}::date`);
+    } else {
+      values.push(today);
+      filters.push(`m.fecha_programada < $${values.length}::date`);
+    }
+  }
+
+  const search = String(payload.search || "").trim();
+  if (search) {
+    values.push(`%${search.toLowerCase()}%`);
+    const searchParam = `$${values.length}`;
+    filters.push(`lower(concat_ws(' ',
+      coalesce(activity.codigo, ''), coalesce(activity.titulo, ''), coalesce(activity.descripcion, ''),
+      coalesce(activity.descripcion_pendiente, ''), coalesce(m.observaciones, ''),
+      coalesce(m.tipo_pendiente, ''), coalesce(c.nombre, ''), coalesce(s.nombre, ''), coalesce(s.direccion, '')
+    )) LIKE ${searchParam}`);
+  }
+
+  const baseFrom = `
+    FROM public.mantenimientos_programados m
+    JOIN public.clientes c ON c.id = m.cliente_id
+    LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
+    LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+    LEFT JOIN LATERAL (
+      SELECT am.titulo, am.descripcion_pendiente, a.descripcion, a.codigo
+        FROM public.actividades_operativas_mantenimientos am
+        JOIN public.actividades_operativas a ON a.id = am.actividad_id
+       WHERE am.mantenimiento_programado_id = m.id
+       ORDER BY a.created_at DESC
+       LIMIT 1
+    ) activity ON true
+    WHERE ${filters.join(" AND ")}`;
+  const order = category === "vencidos" || category === "historial"
+    ? "m.fecha_programada DESC NULLS LAST, m.created_at DESC, m.id DESC"
+    : "m.fecha_programada ASC NULLS LAST, m.created_at ASC, m.id ASC";
+
+  const pageValues = [...values, pageSize, offset];
+  const limitParam = pageValues.length - 1;
+  const offsetParam = pageValues.length;
+  const { rows } = await dbQuery(
+    `SELECT m.*,
+      COALESCE(activity.codigo, 'MP-' || to_char(m.fecha_programada, 'YYYYMMDD') || '-' || upper(left(replace(m.id::text, '-', ''), 10))) AS codigo,
+      COALESCE(activity.titulo, c.nombre, 'Mantenimiento programado') AS titulo,
+      COALESCE(activity.descripcion, activity.descripcion_pendiente, m.observaciones) AS descripcion,
+      c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id,
+      COALESCE((SELECT json_agg(json_build_object(
+        'id', mp.id,
+        'usuario_id', mp.usuario_id,
+        'rol_participacion', mp.rol_participacion,
+        'porcentaje', mp.porcentaje,
+        'valor_calculado', mp.valor_ganado,
+        'estado', mp.estado,
+        'estado_reporte', COALESCE((
+          SELECT d.estado
+            FROM public.actividades_operativas_mantenimientos am2
+            JOIN public.actividades_operativas_participantes ap2 ON ap2.actividad_id = am2.actividad_id AND ap2.tecnico_id = mp.usuario_id
+            JOIN public.actividades_operativas_entregas d ON d.actividad_id = ap2.actividad_id AND d.participante_id = ap2.id
+           WHERE am2.mantenimiento_programado_id = m.id
+           ORDER BY d.updated_at DESC
+           LIMIT 1
+        ), 'pendiente'),
+        'entrega_id', (
+          SELECT d.id
+            FROM public.actividades_operativas_mantenimientos am2
+            JOIN public.actividades_operativas_participantes ap2 ON ap2.actividad_id = am2.actividad_id AND ap2.tecnico_id = mp.usuario_id
+            JOIN public.actividades_operativas_entregas d ON d.actividad_id = ap2.actividad_id AND d.participante_id = ap2.id
+           WHERE am2.mantenimiento_programado_id = m.id
+           ORDER BY d.updated_at DESC
+           LIMIT 1
+        )
+      ) ORDER BY mp.rol_participacion = 'principal' DESC, mp.created_at)
+        FROM public.mantenimientos_programados_participantes mp
+       WHERE mp.mantenimiento_id = m.id AND mp.estado = 'activo'), '[]'::json) AS participantes,
+      COUNT(*) OVER() AS total_count
+    ${baseFrom}
+    ORDER BY ${order}
+    LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    pageValues,
+  );
+
+  let total = number(rows[0]?.total_count, 0);
+  if (rows.length === 0 && offset > 0) {
+    const countResult = await dbQuery(`SELECT COUNT(*)::int AS total ${baseFrom}`, values);
+    total = number(countResult.rows[0]?.total, 0);
+  }
+
+  let statusCounts: { pendientes: number; enProgreso: number; completados: number; total: number } | undefined;
+  if (Boolean(payload.includeStatusCounts)) {
+    const statusValues: unknown[] = [];
+    const statusFilters = ["m.estado <> 'cancelado'", `m.fecha_programada BETWEEN $1::date AND $2::date`];
+    statusValues.push(week.start, week.end);
+    if (hasUserScope) {
+      statusValues.push(user.id);
+      const userParam = `$${statusValues.length}`;
+      statusFilters.push(`(
+        m.tecnico_principal_id = ${userParam}
+        OR g.lider_id = ${userParam}
+        OR EXISTS (
+          SELECT 1 FROM public.mantenimientos_programados_participantes mp_scope
+           WHERE mp_scope.mantenimiento_id = m.id
+             AND mp_scope.usuario_id = ${userParam}
+             AND mp_scope.estado = 'activo'
+        )
+      )`);
+    }
+    const { rows: counts } = await dbQuery(
+      `SELECT
+        COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado'))::int AS pendientes,
+        COUNT(*) FILTER (WHERE m.estado IN ('en_progreso', 'en_ejecucion'))::int AS "enProgreso",
+        COUNT(*) FILTER (WHERE m.estado IN ('ejecutado', 'completado'))::int AS completados,
+        COUNT(*)::int AS total
+       FROM public.mantenimientos_programados m
+       LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+      WHERE ${statusFilters.join(" AND ")}`,
+      statusValues,
+    );
+    statusCounts = {
+      pendientes: number(counts[0]?.pendientes),
+      enProgreso: number(counts[0]?.enProgreso),
+      completados: number(counts[0]?.completados),
+      total: number(counts[0]?.total),
+    };
+  }
+
+  return {
+    items: rows.map(mapMaintenance),
+    page,
+    pageSize,
+    total,
+    totalPages: total > 0 ? Math.ceil(total / pageSize) : 0,
+    hasNextPage: offset + rows.length < total,
+    hasPreviousPage: page > 1 && total > 0,
+    category,
+    weekStart: week.start,
+    weekEnd: week.end,
+    generatedAt: new Date().toISOString(),
+    ...(statusCounts ? { statusCounts } : {}),
+  };
+}
+
 function requestedUserRole(payload: Payload): string | undefined {
   if (payload.esSupervisor === true) return "supervisor";
   if (payload.esSupervisor === false && (payload.rol === undefined || payload.rol === "supervisor")) return "tecnico";
@@ -1246,6 +1445,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "contracts.updateMaintenance": { await requireAdmin(user); const { rows } = await dbQuery("UPDATE public.mantenimientos_programados SET estado = COALESCE($2,estado), fecha_programada = COALESCE($3,fecha_programada), fecha_realizado = COALESCE($4,fecha_realizado), tecnico_principal_id = COALESCE($5,tecnico_principal_id), valor_recaudado = COALESCE($6,valor_recaudado), updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id, payload.estado === "realizado" ? "ejecutado" : payload.estado, payload.fechaProgramada, payload.fechaRealizado, payload.tecnicoId, payload.valorRecaudado]); return { id: rows[0].id, mes: number(rows[0].numero), fechaProgramada: dateOnly(rows[0].fecha_programada), fechaRealizado: dateOnly(rows[0].fecha_realizado) || undefined, tecnicoId: rows[0].tecnico_principal_id || undefined, estado: rows[0].estado === "ejecutado" ? "realizado" : rows[0].estado, valorRecaudado: number(rows[0].valor_recaudado) }; }
     case "contracts.delete": { await requireAdmin(user); return deleteContract(payload, user); }
 
+    case "maintenances.page": return maintenancePageRows(payload, user);
     case "maintenances.list": {
       const hasUserScope = Boolean(payload.usuarioId) || !["admin", "supervisor"].includes(user.rol);
       const values = hasUserScope ? [user.id] : [];
