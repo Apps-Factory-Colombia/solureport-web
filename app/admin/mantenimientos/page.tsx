@@ -1073,6 +1073,12 @@ export default function MantenimientosPage() {
             Actualizando la agenda…
           </div>
         )}
+        {maintenancePageLoading && !maintenancePage && (
+          <div className="flex items-center gap-2 rounded-lg border border-gold/20 bg-gold/5 px-4 py-3 text-sm text-muted-foreground" aria-live="polite">
+            <Loader2 className="h-4 w-4 animate-spin text-gold" />
+            Cargando la agenda de mantenimientos…
+          </div>
+        )}
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3 flex-1">
             <div className="relative flex-1 max-w-sm">
