@@ -65,7 +65,6 @@ import { getMantenimientos, createMantenimiento, updateMantenimiento, deleteMant
 import { getContratos, createContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
-import { createNotificacion } from "@/lib/data/services/notificaciones";
 import { getConfiguracion } from "@/lib/data/services/configuracion";
 import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
@@ -526,35 +525,27 @@ export default function MantenimientosPage() {
     try {
       const tecnicoId = scheduleTecnico || schedulingMaint.tecnicoId;
       const fecha = scheduleDate || schedulingMaint.fechaProgramada;
-      const scheduledMaintenance = await updateMantenimiento(schedulingMaint.id, {
+      const keepExistingParticipants = Boolean(
+        schedulingMaint.participantes &&
+        schedulingMaint.participantes.length > 1 &&
+        tecnicoId === schedulingMaint.tecnicoId,
+      );
+      const participants = keepExistingParticipants
+        ? schedulingMaint.participantes
+        : [{
+            usuarioId: tecnicoId,
+            porcentaje: 100,
+            valorCalculado: getMaintenancePaymentCost(schedulingMaint),
+          }];
+      await updateMantenimiento(schedulingMaint.id, {
         estado: "programado" as MaintenanceStatus,
         tecnicoId,
         fechaProgramada: fecha,
         horaProgramada: scheduleTime,
-        participantes: [{
-          usuarioId: tecnicoId,
-          porcentaje: 100,
-          valorCalculado: getMaintenancePaymentCost(schedulingMaint),
-        }],
+        participantes: participants,
         observaciones: scheduleTime
           ? `Hora: ${scheduleTime}. ${schedulingMaint.observaciones || ""}`
           : schedulingMaint.observaciones,
-      });
-
-      const client = clients.find((c) => c.id === schedulingMaint.clienteId);
-      const contratoMantenimientoId = scheduledMaintenance.contratoMantenimientoId || schedulingMaint.contratoMantenimientoId;
-      await createNotificacion({
-        usuarioId: tecnicoId,
-        titulo: "Mantenimiento Programado",
-        mensaje: `Se te ha asignado un mantenimiento en ${client?.edificio || "un edificio"} para el ${fecha}${scheduleTime ? ` a las ${scheduleTime}` : ""}. Revisa los detalles en la app.`,
-        tipo: "mantenimiento",
-        datos: {
-          mantenimientoId: scheduledMaintenance.id,
-          ...(contratoMantenimientoId ? { contratoMantenimientoId } : {}),
-          clienteId: schedulingMaint.clienteId,
-          fecha,
-          hora: scheduleTime || null,
-        },
       });
 
       setScheduleOpen(false);

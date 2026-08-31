@@ -139,6 +139,17 @@ function mapPeriod(row: any): any {
 
 function mapMaintenance(row: any): any {
   const state = row.estado === "ejecutado" ? "realizado" : row.estado === "asignado" ? "programado" : row.estado;
+  const participants = jsonArray(row.participantes).map((item) => ({
+    id: item.id,
+    usuarioId: item.usuarioId || item.usuario_id,
+    porcentaje: number(item.porcentaje),
+    valorCalculado: number(item.valorCalculado ?? item.valor_calculado ?? item.valorGanado),
+    rol: item.rol || item.rol_participacion,
+    estado: item.estado || "activo",
+    estadoReporte: item.estadoReporte || item.estado_reporte || "pendiente",
+    entregaId: item.entregaId || item.entrega_id || undefined,
+    fechaCreacion: item.fechaCreacion || item.fecha_creacion || undefined,
+  }));
   return {
     id: row.id,
     codigoRegistro: row.codigo || undefined,
@@ -161,7 +172,7 @@ function mapMaintenance(row: any): any {
     descripcionPendiente: row.descripcion_pendiente || undefined,
     valorRecaudado: number(row.valor_recaudado),
     costoTecnicoTotal: number(row.costo_tecnico_presupuestado),
-    participantes: [],
+    participantes: participants,
     fechaCreacion: dateOnly(row.created_at) || "",
     fechaCierre: dateOnly(row.fecha_realizado) || undefined,
     clienteNombre: row.cliente_nombre || undefined,
@@ -308,15 +319,22 @@ async function activityRows(payload: Payload = {}) {
             ar.inicio_recorrido, ar.fin_recorrido,
             COALESCE((SELECT json_agg(json_build_object(
               'id', p.id, 'tecnicoId', p.tecnico_id, 'rol', p.rol_participacion,
-              'porcentaje', p.porcentaje, 'valorBase', p.valor_base, 'valorGanado', p.valor_ganado
+              'porcentaje', p.porcentaje, 'valorBase', p.valor_base, 'valorGanado', p.valor_ganado,
+              'estadoReporte', COALESCE((SELECT d.estado FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1), 'pendiente'),
+              'entregaId', (SELECT d.id FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1)
             ) ORDER BY p.created_at) FROM public.actividades_operativas_participantes p WHERE p.actividad_id = a.id), '[]'::json) AS participantes,
             COALESCE((SELECT json_agg(json_build_object(
               'id', ap.id, 'participanteId', ap.participante_id, 'revisorId', ap.revisor_id,
               'estado', ap.estado, 'comentario', ap.comentario, 'revisadoEn', ap.revisado_en
             ) ORDER BY ap.created_at) FROM public.actividades_operativas_aprobaciones ap WHERE ap.actividad_id = a.id), '[]'::json) AS aprobaciones,
             COALESCE((SELECT json_agg(json_build_object(
-              'id', e.id, 'tipo', e.tipo, 'bucket', e.storage_bucket, 'key', e.storage_key, 'url', e.url, 'orden', e.orden
+              'id', e.id, 'participanteId', e.participante_id, 'tipo', e.tipo, 'bucket', e.storage_bucket, 'key', e.storage_key, 'url', e.url, 'orden', e.orden
             ) ORDER BY e.tipo, e.orden) FROM public.actividades_operativas_evidencias e WHERE e.actividad_id = a.id), '[]'::json) AS evidencias,
+            COALESCE((SELECT json_agg(json_build_object(
+              'id', d.id, 'participanteId', d.participante_id, 'estado', d.estado,
+              'observaciones', d.observaciones, 'fechaEjecucion', d.fecha_ejecucion,
+              'enviadoEn', d.enviado_en
+            ) ORDER BY d.created_at) FROM public.actividades_operativas_entregas d WHERE d.actividad_id = a.id), '[]'::json) AS entregas,
             COALESCE((SELECT json_agg(json_build_object(
               'id', li.id, 'participanteId', li.participante_id, 'tecnicoId', li.tecnico_id,
               'estado', li.estado, 'valorBase', li.valor_base, 'valorGanado', li.valor_ganado,
@@ -464,6 +482,136 @@ async function applyUserSchedules(client: any, userId: string, schedules: any[] 
 
 async function requireAdmin(user: UserContext) {
   if (!["admin", "supervisor"].includes(user.rol)) throw new Error("No tienes permisos para esta operación.");
+}
+
+type MaintenanceParticipantInput = {
+  usuarioId: string;
+  porcentaje: number;
+  valorCalculado?: number;
+  rol?: "principal" | "acompanante";
+};
+
+function normalizeMaintenanceParticipants(payload: Payload, fallbackUserId?: string): MaintenanceParticipantInput[] {
+  const raw = jsonArray(payload.participantes || payload.participants);
+  const source = raw.length ? raw : [{ usuarioId: payload.tecnicoId || fallbackUserId, porcentaje: 100 }];
+  const unique = new Map<string, MaintenanceParticipantInput>();
+  for (const item of source) {
+    const usuarioId = String(item?.usuarioId || item?.usuario_id || item?.tecnicoId || item?.tecnico_id || "").trim();
+    if (!usuarioId) continue;
+    const porcentaje = number(item?.porcentaje, 0);
+    if (unique.has(usuarioId)) throw new Error("No puedes asignar dos veces al mismo técnico en un mantenimiento.");
+    unique.set(usuarioId, {
+      usuarioId,
+      porcentaje,
+      valorCalculado: item?.valorCalculado ?? item?.valor_calculado ?? item?.valorGanado ?? item?.valor_ganado,
+      rol: item?.rol === "principal" || item?.esResponsable === true ? "principal" : "acompanante",
+    });
+  }
+  const participants = Array.from(unique.values());
+  if (!participants.length) throw new Error("El mantenimiento requiere al menos un técnico asignado.");
+  const principalIndex = participants.findIndex((item) => item.rol === "principal");
+  if (principalIndex < 0) participants[0].rol = "principal";
+  else participants.forEach((item, index) => { if (index !== principalIndex) item.rol = "acompanante"; });
+  const total = participants.reduce((sum, item) => sum + item.porcentaje, 0);
+  if (Math.abs(total - 100) > 0.01) throw new Error("La suma de porcentajes de los técnicos asignados debe ser exactamente 100%.");
+  return participants;
+}
+
+async function replaceMaintenanceParticipants(client: any, maintenanceId: string, payload: Payload, fallbackUserId?: string) {
+  const participants = normalizeMaintenanceParticipants(payload, fallbackUserId);
+  const ids = participants.map((item) => item.usuarioId);
+  const { rows: activeUsers } = await client.query(
+    "SELECT id FROM public.usuarios WHERE id = ANY($1::uuid[]) AND estado = 'activo' AND rol <> 'admin'",
+    [ids],
+  );
+  const activeIds = new Set(activeUsers.map((row: any) => String(row.id)));
+  const invalid = ids.find((id) => !activeIds.has(id));
+  if (invalid) throw new Error("Todos los técnicos asignados deben existir y estar activos.");
+
+  const { rows: maintenanceRows } = await client.query(
+    "SELECT id, costo_tecnico_presupuestado, titulo, fecha_programada, grupo_id, cliente_id, sede_id FROM public.mantenimientos_programados WHERE id = $1 FOR UPDATE",
+    [maintenanceId],
+  );
+  const maintenance = maintenanceRows[0];
+  if (!maintenance) throw new Error("No se encontró el mantenimiento para asignar sus técnicos.");
+  const defaultValue = number(maintenance.costo_tecnico_presupuestado);
+
+  await client.query("DELETE FROM public.mantenimientos_programados_participantes WHERE mantenimiento_id = $1", [maintenanceId]);
+  for (const item of participants) {
+    const value = item.valorCalculado == null ? roundCurrency(defaultValue * item.porcentaje / 100) : Math.max(0, number(item.valorCalculado));
+    await client.query(
+      `INSERT INTO public.mantenimientos_programados_participantes
+        (mantenimiento_id, usuario_id, rol_participacion, porcentaje, valor_ganado)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [maintenanceId, item.usuarioId, item.rol || "acompanante", item.porcentaje, value],
+    );
+    await client.query(
+      `INSERT INTO public.notificaciones
+        (usuario_id, tipo, titulo, mensaje, entidad_tipo, entidad_id, clave_dedupe, metadata)
+       VALUES ($1,'mantenimiento',$2,$3,'mantenimiento_programado',$4,$5,$6::jsonb)
+       ON CONFLICT (usuario_id, clave_dedupe) WHERE clave_dedupe IS NOT NULL DO NOTHING`,
+      [
+        item.usuarioId,
+        "Mantenimiento asignado",
+        `Tienes asignado el mantenimiento ${maintenance.titulo || "programado"} para el ${dateOnly(maintenance.fecha_programada) || "día programado"}. Puedes diligenciar tu entrega de forma independiente.`,
+        maintenanceId,
+        `mantenimiento-asignacion:${maintenanceId}:${item.usuarioId}`,
+        JSON.stringify({ mantenimientoId: maintenanceId, fechaProgramada: dateOnly(maintenance.fecha_programada), grupoId: maintenance.grupo_id }),
+      ],
+    );
+  }
+  const principal = participants.find((item) => item.rol === "principal") || participants[0];
+  await client.query(
+    "UPDATE public.mantenimientos_programados SET tecnico_principal_id = $2, estado = CASE WHEN estado = 'pendiente' THEN 'asignado' ELSE estado END, updated_at = clock_timestamp() WHERE id = $1",
+    [maintenanceId, principal.usuarioId],
+  );
+  return participants;
+}
+
+async function getMaintenanceParticipantRows(maintenanceId: string) {
+  const { rows } = await dbQuery(
+    `SELECT mp.id, mp.mantenimiento_id, mp.usuario_id, mp.rol_participacion,
+            mp.porcentaje, mp.valor_ganado AS valor_calculado, mp.estado,
+            mp.created_at AS fecha_creacion,
+            delivery.id AS entrega_id, delivery.estado AS estado_reporte,
+            delivery.observaciones AS entrega_observaciones,
+            delivery.fecha_ejecucion AS fecha_entrega
+       FROM public.mantenimientos_programados_participantes mp
+       LEFT JOIN LATERAL (
+         SELECT a.id AS actividad_id
+           FROM public.actividades_operativas_mantenimientos am
+           JOIN public.actividades_operativas a ON a.id = am.actividad_id
+          WHERE am.mantenimiento_programado_id = mp.mantenimiento_id
+          ORDER BY a.created_at DESC
+          LIMIT 1
+       ) linked ON true
+       LEFT JOIN LATERAL (
+         SELECT ap.id AS participante_id
+           FROM public.actividades_operativas_participantes ap
+          WHERE ap.actividad_id = linked.actividad_id
+            AND ap.tecnico_id = mp.usuario_id
+          ORDER BY ap.created_at
+          LIMIT 1
+       ) activity_participant ON true
+       LEFT JOIN LATERAL (
+         SELECT d.id, d.estado, d.observaciones, d.fecha_ejecucion
+           FROM public.actividades_operativas_entregas d
+          WHERE d.actividad_id = linked.actividad_id
+            AND d.participante_id = activity_participant.participante_id
+          LIMIT 1
+       ) delivery ON true
+      WHERE mp.mantenimiento_id = $1
+        AND mp.estado = 'activo'
+      ORDER BY mp.rol_participacion = 'principal' DESC, mp.created_at`,
+    [maintenanceId],
+  );
+  return rows;
+}
+
+async function enrichMaintenance(row: any) {
+  const maintenance = mapMaintenance(row);
+  maintenance.participantes = await getMaintenanceParticipantRows(row.id);
+  return maintenance;
 }
 
 function requestedUserRole(payload: Payload): string | undefined {
@@ -648,6 +796,15 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "periods.close": { await requireAdmin(user); const { rows } = await dbQuery("UPDATE public.periodos_liquidacion SET estado = 'cerrado', fecha_cierre = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id]); return mapPeriod(rows[0]); }
     case "periods.delete": { await requireAdmin(user); await dbQuery("DELETE FROM public.periodos_liquidacion WHERE id = $1", [payload.id]); return true; }
 
+    case "permissions.canReport": {
+      if (!payload.grupoId) return false;
+      const { rows } = await dbQuery(
+        "SELECT public.usuario_puede_reportar_grupo($1::uuid, $2::uuid, COALESCE($3::date, (now() AT TIME ZONE 'America/Bogota')::date)) AS permitido",
+        [user.id, payload.grupoId, dateOnly(payload.fecha) || null],
+      );
+      return Boolean(rows[0]?.permitido);
+    }
+
     case "contracts.list": {
       const { rows } = await dbQuery("SELECT * FROM public.contratos_mantenimiento ORDER BY anio DESC, created_at DESC");
       const ids = rows.map((row) => row.id);
@@ -660,18 +817,49 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "contracts.delete": { await requireAdmin(user); await dbQuery("UPDATE public.contratos_mantenimiento SET estado = 'cancelado', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
 
     case "maintenances.list": {
-      // The administrator calls this action without a usuarioId and needs the
-      // complete agenda. The mobile app always sends usuarioId, so scope that
-      // response to direct assignments or maintenance assigned to the user's
-      // group leadership. An unassigned maintenance must never become visible
-      // to every employee or to all members of a group by accident.
-      const hasUserScope = Boolean(payload.usuarioId);
+      const hasUserScope = Boolean(payload.usuarioId) || !["admin", "supervisor"].includes(user.rol);
       const values = hasUserScope ? [user.id] : [];
       const scope = hasUserScope
-        ? `WHERE m.tecnico_principal_id = $1
-             OR g.lider_id = $1`
+        ? `WHERE (
+             m.tecnico_principal_id = $1
+             OR g.lider_id = $1
+             OR EXISTS (
+               SELECT 1 FROM public.mantenimientos_programados_participantes mp_scope
+                WHERE mp_scope.mantenimiento_id = m.id
+                  AND mp_scope.usuario_id = $1
+                  AND mp_scope.estado = 'activo'
+             )
+           )`
         : "";
-      const { rows } = await dbQuery(`SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id
+      const { rows } = await dbQuery(`SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id,
+        COALESCE((SELECT json_agg(json_build_object(
+          'id', mp.id,
+          'usuario_id', mp.usuario_id,
+          'rol_participacion', mp.rol_participacion,
+          'porcentaje', mp.porcentaje,
+          'valor_calculado', mp.valor_ganado,
+          'estado', mp.estado,
+          'estado_reporte', COALESCE((
+            SELECT d.estado
+              FROM public.actividades_operativas_mantenimientos am2
+              JOIN public.actividades_operativas_participantes ap2 ON ap2.actividad_id = am2.actividad_id AND ap2.tecnico_id = mp.usuario_id
+              JOIN public.actividades_operativas_entregas d ON d.actividad_id = ap2.actividad_id AND d.participante_id = ap2.id
+             WHERE am2.mantenimiento_programado_id = m.id
+             ORDER BY d.updated_at DESC
+             LIMIT 1
+          ), 'pendiente'),
+          'entrega_id', (
+            SELECT d.id
+              FROM public.actividades_operativas_mantenimientos am2
+              JOIN public.actividades_operativas_participantes ap2 ON ap2.actividad_id = am2.actividad_id AND ap2.tecnico_id = mp.usuario_id
+              JOIN public.actividades_operativas_entregas d ON d.actividad_id = ap2.actividad_id AND d.participante_id = ap2.id
+             WHERE am2.mantenimiento_programado_id = m.id
+             ORDER BY d.updated_at DESC
+             LIMIT 1
+          )
+        ) ORDER BY mp.rol_participacion = 'principal' DESC, mp.created_at)
+          FROM public.mantenimientos_programados_participantes mp
+         WHERE mp.mantenimiento_id = m.id AND mp.estado = 'activo'), '[]'::json) AS participantes
         FROM public.mantenimientos_programados m
         JOIN public.clientes c ON c.id = m.cliente_id
         LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
@@ -681,15 +869,22 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       return rows.map(mapMaintenance);
     }
     case "maintenances.get": {
+      if (!["admin", "supervisor"].includes(user.rol)) {
+        const { rows: permissionRows } = await dbQuery(
+          "SELECT public.usuario_puede_reportar_mantenimiento($1::uuid, $2::uuid) AS permitido",
+          [user.id, payload.id],
+        );
+        if (!permissionRows[0]?.permitido) return null;
+      }
       const { rows } = await dbQuery("SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id FROM public.mantenimientos_programados m JOIN public.clientes c ON c.id = m.cliente_id LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id WHERE m.id = $1", [payload.id]);
       if (!rows[0]) return null;
-      const maintenance = mapMaintenance(rows[0]);
+      const maintenance = await enrichMaintenance(rows[0]);
       const { rows: activityRowsForMaintenance } = await dbQuery("SELECT actividad_id AS id FROM public.actividades_operativas_mantenimientos WHERE mantenimiento_programado_id = $1", [payload.id]);
       if (activityRowsForMaintenance[0]) {
         const activityId = activityRowsForMaintenance[0].id;
-        const { rows: participantRows } = await dbQuery("SELECT actividad_id, tecnico_id AS usuario_id, porcentaje, valor_ganado AS valor_calculado, created_at AS fecha_creacion FROM public.actividades_operativas_participantes WHERE actividad_id = $1 ORDER BY created_at", [activityId]);
-        const { rows: evidenceRows } = await dbQuery("SELECT id, actividad_id, tipo, url, orden, created_at AS fecha_subida FROM public.actividades_operativas_evidencias WHERE actividad_id = $1 ORDER BY tipo, orden", [activityId]);
-        maintenance.participantes = participantRows;
+        const { rows: participantRows } = await dbQuery("SELECT p.id, p.actividad_id, p.tecnico_id AS usuario_id, p.porcentaje, p.valor_ganado AS valor_calculado, p.rol_participacion, p.created_at AS fecha_creacion, d.id AS entrega_id, d.estado AS estado_reporte, d.observaciones AS entrega_observaciones, d.fecha_ejecucion AS fecha_entrega FROM public.actividades_operativas_participantes p LEFT JOIN public.actividades_operativas_entregas d ON d.actividad_id = p.actividad_id AND d.participante_id = p.id WHERE p.actividad_id = $1 ORDER BY p.rol_participacion = 'principal' DESC, p.created_at", [activityId]);
+        const { rows: evidenceRows } = await dbQuery("SELECT id, actividad_id, tipo, participante_id, url, orden, created_at AS fecha_subida FROM public.actividades_operativas_evidencias WHERE actividad_id = $1 ORDER BY tipo, orden", [activityId]);
+        if (participantRows.length) maintenance.participantes = participantRows;
         maintenance.fotos_antes = evidenceRows.filter((item) => item.tipo === "antes");
         maintenance.fotos_despues = evidenceRows.filter((item) => item.tipo === "despues");
       }
@@ -708,19 +903,45 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       if (!current) throw new Error("No se encontró el mantenimiento que intentas actualizar.");
 
       const isPrivileged = ["admin", "supervisor"].includes(user.rol);
-      const targetTechnicianId = payload.tecnicoId || current.tecnico_principal_id;
-      const isAssignedTechnician = current.tecnico_principal_id === user.id || targetTechnicianId === user.id;
-      const isGroupLeader = current.mantenimiento_lider_id === user.id;
-      if (!isPrivileged && !isAssignedTechnician && !isGroupLeader) {
+      const { rows: permissionRows } = await dbQuery(
+        "SELECT public.usuario_puede_reportar_mantenimiento($1::uuid, $2::uuid) AS permitido",
+        [user.id, payload.id],
+      );
+      if (!isPrivileged && !permissionRows[0]?.permitido) {
         throw new Error("No tienes permisos para actualizar este mantenimiento.");
+      }
+      if (payload.participantes !== undefined && !isPrivileged) {
+        throw new Error("Solo un administrador o supervisor puede cambiar los técnicos asignados.");
       }
 
       const normalizedState = ["realizado", "completado"].includes(String(payload.estado)) ? "ejecutado" : payload.estado;
       const scheduledDate = dateOnly(payload.fechaProgramada || current.fecha_programada);
-      if (normalizedState === "ejecutado" && scheduledDate !== bogotaClock().date) {
-        throw new Error(`Este mantenimiento solo se puede llenar y completar el día programado (${scheduledDate || "sin fecha"}).`);
+      if (normalizedState === "ejecutado" && scheduledDate && scheduledDate > bogotaClock().date) {
+        throw new Error(`Este mantenimiento estará disponible desde el ${scheduledDate}.`);
       }
-      const { rows } = await dbQuery("UPDATE public.mantenimientos_programados SET cliente_id = COALESCE($2,cliente_id), sede_id = COALESCE($3,sede_id), fecha_programada = COALESCE($4,fecha_programada), hora_programada = COALESCE($5,hora_programada), tecnico_principal_id = COALESCE($6,tecnico_principal_id), grupo_id = COALESCE($7,grupo_id), estado = COALESCE($8,estado), fecha_realizado = CASE WHEN $8 = 'ejecutado' THEN COALESCE(fecha_realizado,current_date) ELSE $9 END, observaciones = COALESCE($10,observaciones), tipo_pendiente = $11, descripcion_pendiente = $12, updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id, payload.clienteId, payload.sedeId, payload.fechaProgramada, payload.horaProgramada, payload.tecnicoId, payload.grupoId, normalizedState, payload.fechaCierre, payload.observaciones, payload.tipoPendiente, payload.descripcionPendiente]); return rows[0] ? mapMaintenance(rows[0]) : null;
+      await withTransaction(async (client) => {
+        if (payload.participantes !== undefined) await replaceMaintenanceParticipants(client, payload.id, payload, user.id);
+        const editable = isPrivileged;
+        await client.query(
+          `UPDATE public.mantenimientos_programados
+              SET cliente_id = CASE WHEN $2::boolean THEN COALESCE($3, cliente_id) ELSE cliente_id END,
+                  sede_id = CASE WHEN $2::boolean THEN COALESCE($4, sede_id) ELSE sede_id END,
+                  fecha_programada = CASE WHEN $2::boolean THEN COALESCE($5, fecha_programada) ELSE fecha_programada END,
+                  hora_programada = CASE WHEN $2::boolean THEN COALESCE($6, hora_programada) ELSE hora_programada END,
+                  tecnico_principal_id = CASE WHEN $2::boolean THEN COALESCE($7, tecnico_principal_id) ELSE tecnico_principal_id END,
+                  grupo_id = CASE WHEN $2::boolean THEN COALESCE($8, grupo_id) ELSE grupo_id END,
+                  estado = COALESCE($9, estado),
+                  fecha_realizado = CASE WHEN $9 = 'ejecutado' THEN COALESCE($10::date, (now() AT TIME ZONE 'America/Bogota')::date) ELSE COALESCE($10::date, fecha_realizado) END,
+                  observaciones = COALESCE($11, observaciones),
+                  tipo_pendiente = $12,
+                  descripcion_pendiente = $13,
+                  updated_at = clock_timestamp()
+            WHERE id = $1`,
+          [payload.id, editable, payload.clienteId || null, payload.sedeId || null, payload.fechaProgramada || null, payload.horaProgramada || null, payload.tecnicoId || null, payload.grupoId || null, normalizedState || null, dateOnly(payload.fechaCierre) || null, payload.observaciones, payload.tipoPendiente || null, payload.descripcionPendiente || null],
+        );
+      });
+      const { rows } = await dbQuery("SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id FROM public.mantenimientos_programados m JOIN public.clientes c ON c.id = m.cliente_id LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id WHERE m.id = $1", [payload.id]);
+      return rows[0] ? enrichMaintenance(rows[0]) : null;
     }
     case "maintenances.delete": { await requireAdmin(user); await dbQuery("UPDATE public.mantenimientos_programados SET estado = 'cancelado', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
     case "maintenances.reports": {
@@ -729,6 +950,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     }
 
     case "activities.create": return createOperationalActivity(payload, user);
+    case "maintenances.submitParticipant": return submitMaintenanceParticipant(payload, user);
     case "activities.addParticipant": return addOperationalParticipant(payload, user);
     case "activities.update": return updateOperationalActivity(payload, user);
     case "activities.finalize": return finalizeOperationalActivity(payload);
@@ -992,7 +1214,29 @@ async function insertContractMaintenances(client: any, contractId: string, paylo
   });
   for (let index = 0; index < list.length; index += 1) {
     const item = list[index];
-    await client.query("INSERT INTO public.mantenimientos_programados (contrato_id, cliente_id, numero, fecha_programada, tecnico_principal_id, estado, valor_recaudado) VALUES ($1,$2,$3,$4,$5,$6,$7)", [contractId, payload.clienteId, number(item.mes, index + 1), item.fechaProgramada, item.tecnicoId || null, item.estado === "realizado" ? "ejecutado" : item.estado || "pendiente", number(item.valorRecaudado)]);
+    const { rows } = await client.query(
+      `INSERT INTO public.mantenimientos_programados
+        (contrato_id, cliente_id, numero, fecha_programada, tecnico_principal_id,
+         costo_tecnico_presupuestado, estado, valor_recaudado, clave_idempotencia)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       ON CONFLICT (contrato_id, numero) DO UPDATE SET
+         fecha_programada = EXCLUDED.fecha_programada,
+         tecnico_principal_id = EXCLUDED.tecnico_principal_id,
+         costo_tecnico_presupuestado = EXCLUDED.costo_tecnico_presupuestado,
+         estado = EXCLUDED.estado,
+         valor_recaudado = EXCLUDED.valor_recaudado,
+         updated_at = clock_timestamp()
+       RETURNING id`,
+      [contractId, payload.clienteId, number(item.mes, index + 1), item.fechaProgramada, item.tecnicoId || null, number(item.costoTecnicoTotal || payload.costoPorMantenimiento), item.estado === "realizado" ? "ejecutado" : item.estado || "pendiente", number(item.valorRecaudado), `contrato:${contractId}:mantenimiento:${number(item.mes, index + 1)}`],
+    );
+    if (item.tecnicoId || jsonArray(item.participantes).length) {
+      await replaceMaintenanceParticipants(client, rows[0].id, {
+        ...item,
+        tecnicoId: item.tecnicoId || undefined,
+        costoTecnicoTotal: number(item.costoTecnicoTotal || payload.costoPorMantenimiento),
+        participantes: item.participantes,
+      }, undefined);
+    }
   }
 }
 
@@ -1009,8 +1253,274 @@ async function updateContract(payload: Payload) {
 async function createMaintenance(payload: Payload, user: UserContext) {
   const clientId = payload.clienteId;
   if (!clientId || !payload.fechaProgramada) throw new Error("El mantenimiento requiere cliente y fecha.");
-  const { rows } = await dbQuery("INSERT INTO public.mantenimientos_programados (contrato_id, cliente_id, sede_id, numero, fecha_programada, hora_programada, grupo_id, tecnico_principal_id, costo_tecnico_presupuestado, estado, observaciones, tipo_pendiente, descripcion_pendiente, valor_recaudado) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *", [payload.contratoId || null, clientId, payload.sedeId || null, number(payload.numero, 1), payload.fechaProgramada, payload.horaProgramada || null, payload.grupoId || null, payload.tecnicoId || user.id, number(payload.costoTecnicoTotal || payload.costoActividad), payload.estado === "realizado" ? "ejecutado" : payload.estado || "pendiente", payload.observaciones || null, payload.tipoPendiente || null, payload.descripcionPendiente || null, number(payload.valorRecaudado)]);
-  return mapMaintenance(rows[0]);
+  const id = await withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO public.mantenimientos_programados
+        (contrato_id, cliente_id, sede_id, numero, fecha_programada, hora_programada,
+         grupo_id, tecnico_principal_id, costo_tecnico_presupuestado, estado,
+         observaciones, tipo_pendiente, descripcion_pendiente, valor_recaudado, clave_idempotencia)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+       RETURNING id`,
+      [
+        payload.contratoId || null,
+        clientId,
+        payload.sedeId || null,
+        number(payload.numero, 1),
+        payload.fechaProgramada,
+        payload.horaProgramada || null,
+        payload.grupoId || null,
+        payload.tecnicoId || user.id,
+        number(payload.costoTecnicoTotal || payload.costoActividad),
+        payload.estado === "realizado" ? "ejecutado" : payload.estado || "pendiente",
+        payload.observaciones || null,
+        payload.tipoPendiente || null,
+        payload.descripcionPendiente || null,
+        number(payload.valorRecaudado),
+        payload.claveIdempotencia || null,
+      ],
+    );
+    await replaceMaintenanceParticipants(client, rows[0].id, payload, user.id);
+    return rows[0].id;
+  });
+  const { rows } = await dbQuery("SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id FROM public.mantenimientos_programados m JOIN public.clientes c ON c.id = m.cliente_id LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id WHERE m.id = $1", [id]);
+  return rows[0] ? enrichMaintenance(rows[0]) : null;
+}
+
+async function submitMaintenanceParticipant(payload: Payload, user: UserContext) {
+  const maintenanceId = String(payload.mantenimientoId || payload.maintenanceId || payload.id || "").trim();
+  if (!maintenanceId) throw new Error("El reporte requiere un mantenimiento válido.");
+  const executionDate = dateOnly(payload.fechaEjecucion || payload.fechaOperacion) || bogotaClock().date;
+  const today = bogotaClock().date;
+  if (executionDate > today) throw new Error(`La fecha de ejecución no puede ser futura (${executionDate}).`);
+
+  const result = await withTransaction(async (client) => {
+    const { rows: maintenanceRows } = await client.query(
+      `SELECT m.*, g.lider_id AS mantenimiento_lider_id
+         FROM public.mantenimientos_programados m
+         LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+        WHERE m.id = $1
+        FOR UPDATE`,
+      [maintenanceId],
+    );
+    const maintenance = maintenanceRows[0];
+    if (!maintenance) throw new Error("No se encontró el mantenimiento.");
+    const scheduledDate = dateOnly(maintenance.fecha_programada);
+    if (scheduledDate && scheduledDate > today) {
+      throw new Error(`Este mantenimiento estará disponible desde el ${scheduledDate}.`);
+    }
+
+    const { rows: permissionRows } = await client.query(
+      "SELECT public.usuario_puede_reportar_mantenimiento($1::uuid, $2::uuid) AS permitido",
+      [user.id, maintenanceId],
+    );
+    if (!permissionRows[0]?.permitido) {
+      throw new Error("No tienes este mantenimiento asignado para reportarlo.");
+    }
+
+    const { rows: assignmentRows } = await client.query(
+      `SELECT id, usuario_id, rol_participacion, porcentaje, valor_ganado
+         FROM public.mantenimientos_programados_participantes
+        WHERE mantenimiento_id = $1 AND estado = 'activo'
+        ORDER BY rol_participacion = 'principal' DESC, created_at`,
+      [maintenanceId],
+    );
+    const assignment = assignmentRows.find((row: any) => String(row.usuario_id) === String(user.id));
+    if (!assignment && !["admin", "supervisor"].includes(user.rol)) {
+      throw new Error("No estás incluido como participante de este mantenimiento.");
+    }
+    const selectedAssignment = assignment || assignmentRows[0];
+    if (!selectedAssignment) throw new Error("El mantenimiento no tiene técnicos asignados.");
+    if (!maintenance.grupo_id || !maintenance.sede_id) throw new Error("El mantenimiento debe tener grupo y sede antes de poder reportarse.");
+
+    const { rows: linkedRows } = await client.query(
+      `SELECT a.id, a.codigo, a.grupo_id, a.cliente_id, a.sede_id, a.valor_base, a.valor_aplicado,
+              a.descripcion, a.observaciones, a.estado
+         FROM public.actividades_operativas_mantenimientos am
+         JOIN public.actividades_operativas a ON a.id = am.actividad_id
+        WHERE am.mantenimiento_programado_id = $1
+        ORDER BY a.created_at DESC
+        LIMIT 1
+        FOR UPDATE OF a`,
+      [maintenanceId],
+    );
+    let activity = linkedRows[0];
+    const key = `mantenimiento:${maintenanceId}`;
+    if (!activity) {
+      const { rows: existingByKey } = await client.query(
+        `SELECT id, codigo, grupo_id, cliente_id, sede_id, valor_base, valor_aplicado,
+                descripcion, observaciones, estado
+           FROM public.actividades_operativas
+          WHERE clave_idempotencia = $1
+          LIMIT 1
+          FOR UPDATE`,
+        [key],
+      );
+      activity = existingByKey[0];
+    }
+    if (!activity) {
+      const { rows: insertedRows } = await client.query(
+        `INSERT INTO public.actividades_operativas
+          (codigo, clave_idempotencia, origen, tipo, estado, cliente_id, sede_id, grupo_id,
+           creado_por_id, fecha_operacion, descripcion, observaciones, valor_base, valor_aplicado,
+           costo_administrable, metadata)
+         VALUES (COALESCE($1, public.new_activity_code()), $2, 'app', 'mantenimiento', 'en_progreso',
+                 $3, $4, $5, $6, $7, $8, $9, $10, $10, false, $11::jsonb)
+         ON CONFLICT (clave_idempotencia) DO UPDATE SET updated_at = clock_timestamp()
+         RETURNING id, codigo, grupo_id, cliente_id, sede_id, valor_base, valor_aplicado, descripcion, observaciones, estado`,
+        [
+          payload.codigo || null,
+          key,
+          maintenance.cliente_id,
+          maintenance.sede_id,
+          maintenance.grupo_id,
+          user.id,
+          executionDate,
+          payload.actividades || payload.descripcion || maintenance.titulo || "Mantenimiento preventivo",
+          payload.observaciones || maintenance.observaciones || null,
+          number(maintenance.costo_tecnico_presupuestado),
+          JSON.stringify({ mantenimientoId: maintenanceId, fechaProgramada: scheduledDate, extemporaneo: Boolean(scheduledDate && scheduledDate < executionDate) }),
+        ],
+      );
+      activity = insertedRows[0];
+    }
+
+    await client.query(
+      `INSERT INTO public.actividades_operativas_mantenimientos
+        (actividad_id, mantenimiento_programado_id, titulo, tipo_pendiente, descripcion_pendiente, receptor_nombre, firmado)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (actividad_id) DO UPDATE SET
+         titulo = COALESCE(EXCLUDED.titulo, actividades_operativas_mantenimientos.titulo),
+         tipo_pendiente = EXCLUDED.tipo_pendiente,
+         descripcion_pendiente = EXCLUDED.descripcion_pendiente,
+         receptor_nombre = COALESCE(EXCLUDED.receptor_nombre, actividades_operativas_mantenimientos.receptor_nombre),
+         firmado = EXCLUDED.firmado`,
+      [activity.id, maintenanceId, payload.titulo || maintenance.titulo || null, payload.tipoPendiente || maintenance.tipo_pendiente || null, payload.descripcionPendiente || maintenance.descripcion_pendiente || null, payload.receptorNombre || null, Boolean(payload.firmado)],
+    );
+    for (const item of assignmentRows) {
+      const valueBase = number(maintenance.costo_tecnico_presupuestado);
+      const valueEarned = item.valor_ganado == null ? roundCurrency(valueBase * number(item.porcentaje) / 100) : number(item.valor_ganado);
+      await client.query(
+        `INSERT INTO public.actividades_operativas_participantes
+          (actividad_id, tecnico_id, rol_participacion, porcentaje, valor_base, valor_ganado)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (actividad_id, tecnico_id) DO NOTHING`,
+        [activity.id, item.usuario_id, item.rol_participacion, item.porcentaje, valueBase, valueEarned],
+      );
+    }
+
+    const { rows: activityParticipants } = await client.query(
+      `SELECT id, tecnico_id, porcentaje, valor_base, valor_ganado
+         FROM public.actividades_operativas_participantes
+        WHERE actividad_id = $1
+        ORDER BY rol_participacion = 'principal' DESC, created_at`,
+      [activity.id],
+    );
+    const currentParticipant = activityParticipants.find((row: any) => String(row.tecnico_id) === String(user.id)) || activityParticipants[0];
+    if (!currentParticipant) throw new Error("No se pudo crear el participante del reporte.");
+
+    const leaderId = maintenance.mantenimiento_lider_id || user.id;
+    for (const item of activityParticipants) {
+      await client.query(
+        `INSERT INTO public.actividades_operativas_aprobaciones (actividad_id, participante_id, revisor_id, estado)
+         VALUES ($1,$2,$3,'pendiente')
+         ON CONFLICT (actividad_id, participante_id) DO NOTHING`,
+        [activity.id, item.id, leaderId],
+      );
+    }
+
+    const periodDate = executionDate;
+    const { rows: periodRows } = await client.query(
+      `SELECT id FROM public.periodos_liquidacion
+        WHERE fecha_inicio <= $1::date AND fecha_fin >= $1::date
+        ORDER BY fecha_inicio DESC LIMIT 1`,
+      [periodDate],
+    );
+    if (periodRows[0]) {
+      for (const item of activityParticipants) {
+        await client.query(
+          `INSERT INTO public.liquidacion_items
+            (periodo_id, actividad_id, participante_id, tecnico_id, fecha_operacion, tipo, porcentaje,
+             valor_base, valor_ganado, valor_ganado_original, estado, descripcion_snapshot, sede_snapshot)
+           VALUES ($1,$2,$3,$4,$5,'mantenimiento',$6,$7,$8,$8,'pendiente',$9,$10)
+           ON CONFLICT (periodo_id, actividad_id, participante_id) DO NOTHING`,
+          [periodRows[0].id, activity.id, item.id, item.tecnico_id, periodDate, item.porcentaje, item.valor_base, item.valor_ganado, activity.descripcion, maintenance.sede_id],
+        );
+      }
+    }
+
+    await client.query(
+      `INSERT INTO public.actividades_operativas_entregas
+        (actividad_id, participante_id, estado, observaciones, fecha_ejecucion, enviado_por_id, enviado_en)
+       VALUES ($1,$2,'enviada',$3,$4,$5,clock_timestamp())
+       ON CONFLICT (actividad_id, participante_id) DO UPDATE SET
+         estado = 'enviada', observaciones = EXCLUDED.observaciones,
+         fecha_ejecucion = EXCLUDED.fecha_ejecucion,
+         enviado_por_id = EXCLUDED.enviado_por_id, enviado_en = clock_timestamp()`,
+      [activity.id, currentParticipant.id, payload.observaciones || null, executionDate, user.id],
+    );
+
+    for (const evidence of jsonArray(payload.evidencias)) {
+      if (!evidence?.key && !evidence?.url) continue;
+      await client.query(
+        `INSERT INTO public.actividades_operativas_evidencias
+          (actividad_id, participante_id, tipo, storage_bucket, storage_key, url, orden, subido_por_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (storage_bucket, storage_key) DO UPDATE SET
+           url = EXCLUDED.url, actividad_id = EXCLUDED.actividad_id,
+           participante_id = EXCLUDED.participante_id, subido_por_id = EXCLUDED.subido_por_id`,
+        [activity.id, currentParticipant.id, evidence.tipo || "general", evidence.bucket || "fotos-mantenimientos", evidence.key || evidence.url, evidence.url || null, number(evidence.orden), user.id],
+      );
+    }
+
+    const { rows: deliveryCount } = await client.query(
+      `SELECT COUNT(*) FILTER (WHERE d.estado IN ('enviada','aprobada'))::int AS enviados,
+              COUNT(*)::int AS total
+         FROM public.actividades_operativas_participantes p
+         JOIN public.mantenimientos_programados_participantes mp
+           ON mp.mantenimiento_id = $1
+          AND mp.usuario_id = p.tecnico_id
+          AND mp.estado = 'activo'
+         LEFT JOIN public.actividades_operativas_entregas d ON d.actividad_id = p.actividad_id AND d.participante_id = p.id
+        WHERE p.actividad_id = $1`,
+      [activity.id],
+    );
+    const complete = number(deliveryCount[0]?.total) > 0 && number(deliveryCount[0]?.enviados) >= number(deliveryCount[0]?.total);
+    const nextActivityState = complete ? "pendiente_aprobacion" : "en_progreso";
+    await client.query(
+      `UPDATE public.actividades_operativas
+          SET estado = $2,
+              observaciones = COALESCE($3, observaciones),
+              fecha_operacion = CASE WHEN estado = 'borrador' THEN $4::date ELSE fecha_operacion END,
+              metadata = metadata || $5::jsonb,
+              updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [activity.id, nextActivityState, payload.observaciones || null, executionDate, JSON.stringify({ ultimaEntregaPorUsuario: user.id, ultimaEntregaEn: new Date().toISOString(), fechaProgramada: scheduledDate, extemporaneo: Boolean(scheduledDate && scheduledDate < executionDate) })],
+    );
+    await client.query(
+      `UPDATE public.mantenimientos_programados
+          SET estado = CASE WHEN $2::boolean THEN 'ejecutado' ELSE 'asignado' END,
+              fecha_realizado = CASE WHEN $2::boolean THEN COALESCE(fecha_realizado, $3::date) ELSE fecha_realizado END,
+              observaciones = COALESCE($4, observaciones),
+              tipo_pendiente = COALESCE($5, tipo_pendiente),
+              descripcion_pendiente = COALESCE($6, descripcion_pendiente),
+              updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [maintenanceId, complete, executionDate, payload.observaciones || null, payload.tipoPendiente || null, payload.descripcionPendiente || null],
+    );
+
+    return {
+      mantenimientoId: maintenanceId,
+      actividadId: activity.id,
+      codigo: activity.codigo,
+      participanteId: currentParticipant.id,
+      estado: "enviada",
+      completo: complete,
+      extemporaneo: Boolean(scheduledDate && scheduledDate < executionDate),
+      fechaEjecucion: executionDate,
+    };
+  });
+  await syncActivityAttendanceDiscounts(result.actividadId);
+  return result;
 }
 
 async function updateActivityValues(payload: Payload) {
@@ -1108,6 +1618,14 @@ async function createOperationalActivity(payload: Payload, user: UserContext) {
       grupoId = rows[0]?.grupo_id || null;
     }
     if (!grupoId) throw new Error("La actividad requiere un grupo de trabajo.");
+
+    const { rows: permissionRows } = await client.query(
+      "SELECT public.usuario_puede_reportar_grupo($1::uuid, $2::uuid, $3::date) AS permitido",
+      [user.id, grupoId, dateOnly(payload.fechaOperacion) || bogotaClock().date],
+    );
+    if (!permissionRows[0]?.permitido) {
+      throw new Error("No tienes permiso para reportar actividades en este grupo.");
+    }
 
     const { rows: groupRowsForLeader } = await client.query("SELECT lider_id FROM public.grupos_trabajo WHERE id = $1", [grupoId]);
     const leaderId = groupRowsForLeader[0]?.lider_id || user.id;
@@ -1271,7 +1789,32 @@ async function finalizeOperationalActivity(payload: Payload) {
 
 async function saveEvidence(payload: Payload, user: UserContext) {
   const activityId = canonicalActivityId(payload.actividadId || payload.id);
-  await dbQuery("INSERT INTO public.actividades_operativas_evidencias (actividad_id, tipo, storage_bucket, storage_key, url, orden, subido_por_id) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (storage_bucket,storage_key) DO UPDATE SET url=EXCLUDED.url, actividad_id=EXCLUDED.actividad_id", [activityId, payload.tipo || "general", payload.bucket, payload.key, payload.url || null, number(payload.orden), user.id]);
+  const participantId = payload.participanteId || payload.participantId || null;
+  const { rows: activityRowsResult } = await dbQuery(
+    "SELECT id, grupo_id, fecha_operacion FROM public.actividades_operativas WHERE id = $1",
+    [activityId],
+  );
+  if (!activityRowsResult[0]) throw new Error("No se encontró la actividad para guardar la evidencia.");
+  if (participantId) {
+    const { rows: participantRows } = await dbQuery(
+      "SELECT id, tecnico_id FROM public.actividades_operativas_participantes WHERE id = $1 AND actividad_id = $2",
+      [participantId, activityId],
+    );
+    if (!participantRows[0]) throw new Error("La evidencia no pertenece a un participante válido.");
+    if (participantRows[0].tecnico_id !== user.id && !["admin", "supervisor"].includes(user.rol)) {
+      throw new Error("Solo puedes cargar evidencias de tu propia entrega.");
+    }
+  }
+  await dbQuery(
+    `INSERT INTO public.actividades_operativas_evidencias
+      (actividad_id, participante_id, tipo, storage_bucket, storage_key, url, orden, subido_por_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     ON CONFLICT (storage_bucket,storage_key) DO UPDATE SET
+       url=EXCLUDED.url, actividad_id=EXCLUDED.actividad_id,
+       participante_id=COALESCE(EXCLUDED.participante_id, actividades_operativas_evidencias.participante_id),
+       subido_por_id=EXCLUDED.subido_por_id`,
+    [activityId, participantId, payload.tipo || "general", payload.bucket, payload.key, payload.url || null, number(payload.orden), user.id],
+  );
 }
 
 function mapArrival(row: any): any {

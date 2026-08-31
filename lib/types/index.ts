@@ -69,6 +69,10 @@ export interface MaintenanceParticipant {
   usuarioId: string;
   porcentaje: number;
   valorCalculado: number;
+  rol?: "principal" | "acompanante";
+  estado?: "activo" | "retirado";
+  estadoReporte?: "pendiente" | "enviada" | "aprobada" | "rechazada";
+  entregaId?: string;
 }
 
 export interface Maintenance {
