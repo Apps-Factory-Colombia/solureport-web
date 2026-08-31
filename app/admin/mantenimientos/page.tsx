@@ -364,16 +364,21 @@ export default function MantenimientosPage() {
     const requestId = ++maintenanceRequestRef.current;
     setMaintenancePageLoading(true);
     setMaintenancePageError(null);
+    const activeSearch = targetTab === "vencidos" ? overdueSearch : search;
+    const searchingProgramados = targetTab === "programados" && Boolean(activeSearch.trim());
 
     try {
       const result = await getMantenimientosAdminPage({
         view,
         page: requestedPage,
         pageSize: 20,
-        search: targetTab === "vencidos" ? overdueSearch : search,
+        search: activeSearch,
         status: targetTab === "lista" && statusFilter !== "todos" ? statusFilter : undefined,
         month: targetTab === "programados"
-          ? monthOverride || programadosMonthFilter || undefined
+          // Al buscar un código, cliente o técnico se consulta todo el
+          // universo de programados. El selector mensual sigue funcionando
+          // cuando no hay búsqueda activa.
+          ? searchingProgramados ? undefined : monthOverride || programadosMonthFilter || undefined
           : targetTab === "vencidos"
             ? vencidosMonthFilter || undefined
             : targetTab === "calendario"
@@ -559,12 +564,16 @@ export default function MantenimientosPage() {
       return [];
     }
 
-    if (programadosMonthFilter) {
+    // La búsqueda del encabezado ya viene filtrada por la API y debe poder
+    // encontrar programados de cualquier mes, aunque el selector conserve
+    // visualmente el mes por defecto.
+    if (programadosMonthFilter && !search.trim()) {
       return scheduledMaintenances.filter((m) => m.fechaProgramada.startsWith(programadosMonthFilter));
     }
 
     return scheduledMaintenances;
-  }, [maintenances, programadosMonthFilter]);
+  }, [maintenances, programadosMonthFilter, search]);
+  const programadosSearchActive = Boolean(search.trim());
 
   const vencidos = useMemo(() => {
     return overdueMaintenances;
@@ -818,9 +827,9 @@ export default function MantenimientosPage() {
       ]),
       summary: [
         { label: "Programados", value: String(programados.length) },
-        { label: "Mes", value: programadosMonthFilter || "Todos" },
+        { label: programadosSearchActive ? "Consulta" : "Mes", value: programadosSearchActive ? "Todos los meses" : programadosMonthFilter || "Todos" },
       ],
-      fileName: `mantenimientos_programados${programadosMonthFilter ? `_${programadosMonthFilter}` : ""}`,
+      fileName: `mantenimientos_programados${programadosSearchActive ? "_busqueda" : programadosMonthFilter ? `_${programadosMonthFilter}` : ""}`,
     });
   };
 
@@ -1303,7 +1312,7 @@ export default function MantenimientosPage() {
                       Mantenimientos Programados
                     </CardTitle>
                     <p className="mt-2 text-sm text-muted-foreground">
-                      Muestra los mantenimientos programados del mes actual. Puedes cambiar el mes o consultar todos.
+                      Muestra los mantenimientos programados del mes seleccionado. La búsqueda por código, cliente o técnico consulta todos los meses.
                     </p>
                   </div>
                   <div className="flex flex-col gap-3 sm:items-end">

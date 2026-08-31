@@ -4,6 +4,8 @@ import { getAuthenticatedUser, hashPassword, renewSession } from "@/lib/db/auth"
 import { dbQuery, withTransaction } from "@/lib/db/postgres";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type UserContext = NonNullable<Awaited<ReturnType<typeof getAuthenticatedUser>>>;
 type Payload = Record<string, any>;
@@ -419,18 +421,38 @@ async function activityRows(payload: Payload = {}) {
               'id', p.id, 'tecnicoId', p.tecnico_id, 'rol', p.rol_participacion,
               'porcentaje', p.porcentaje, 'valorBase', p.valor_base, 'valorGanado', p.valor_ganado,
               'estadoReporte', COALESCE((SELECT d.estado FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1), 'pendiente'),
-              'entregaId', (SELECT d.id FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1)
+              'entregaId', (SELECT d.id FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1),
+              'entregaObservaciones', (SELECT d.observaciones FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
+              'entregaActividadesRealizadas', (SELECT d.actividades_realizadas FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
+              'entregaTipoPendiente', (SELECT d.tipo_pendiente FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
+              'entregaDescripcionPendiente', (SELECT d.descripcion_pendiente FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
+              'entregaReceptorNombre', (SELECT d.receptor_nombre FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
+              'entregaFirmado', COALESCE((SELECT d.firmado FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1), false),
+              'entregaFirmaReceptorUrl', (SELECT d.firma_receptor_url FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
+              'entregaFotoBitacoraUrl', (SELECT d.foto_bitacora_url FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
+              'entregaEnviadoPorId', (SELECT d.enviado_por_id FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
+              'entregaEvidencias', COALESCE((SELECT json_agg(json_build_object(
+                'id', e.id, 'participanteId', e.participante_id, 'tipo', e.tipo,
+                'bucket', e.storage_bucket, 'key', e.storage_key, 'url', e.url,
+                'orden', e.orden, 'subidoPorId', e.subido_por_id, 'fechaSubida', e.created_at
+              ) ORDER BY e.tipo, e.orden, e.created_at)
+                FROM public.actividades_operativas_evidencias e
+               WHERE e.actividad_id = p.actividad_id AND e.participante_id = p.id), '[]'::json)
             ) ORDER BY p.created_at) FROM public.actividades_operativas_participantes p WHERE p.actividad_id = a.id), '[]'::json) AS participantes,
             COALESCE((SELECT json_agg(json_build_object(
               'id', ap.id, 'participanteId', ap.participante_id, 'revisorId', ap.revisor_id,
               'estado', ap.estado, 'comentario', ap.comentario, 'revisadoEn', ap.revisado_en
             ) ORDER BY ap.created_at) FROM public.actividades_operativas_aprobaciones ap WHERE ap.actividad_id = a.id), '[]'::json) AS aprobaciones,
             COALESCE((SELECT json_agg(json_build_object(
-              'id', e.id, 'participanteId', e.participante_id, 'tipo', e.tipo, 'bucket', e.storage_bucket, 'key', e.storage_key, 'url', e.url, 'orden', e.orden
+              'id', e.id, 'participanteId', e.participante_id, 'tipo', e.tipo, 'bucket', e.storage_bucket, 'key', e.storage_key, 'url', e.url, 'orden', e.orden, 'subidoPorId', e.subido_por_id
             ) ORDER BY e.tipo, e.orden) FROM public.actividades_operativas_evidencias e WHERE e.actividad_id = a.id), '[]'::json) AS evidencias,
             COALESCE((SELECT json_agg(json_build_object(
               'id', d.id, 'participanteId', d.participante_id, 'estado', d.estado,
               'observaciones', d.observaciones, 'fechaEjecucion', d.fecha_ejecucion,
+              'actividadesRealizadas', d.actividades_realizadas, 'tipoPendiente', d.tipo_pendiente,
+              'descripcionPendiente', d.descripcion_pendiente, 'receptorNombre', d.receptor_nombre,
+              'firmado', d.firmado, 'firmaReceptorUrl', d.firma_receptor_url,
+              'fotoBitacoraUrl', d.foto_bitacora_url, 'enviadoPorId', d.enviado_por_id,
               'enviadoEn', d.enviado_en
             ) ORDER BY d.created_at) FROM public.actividades_operativas_entregas d WHERE d.actividad_id = a.id), '[]'::json) AS entregas,
             COALESCE((SELECT json_agg(json_build_object(
@@ -459,7 +481,24 @@ async function activityRows(payload: Payload = {}) {
 
 function mapReport(row: any, participant: any, index: number): any {
   const type = row.tipo === "actividad" ? "actividad_grupal" : row.tipo === "mantenimiento" ? "mantenimiento_preventivo" : row.tipo;
-  const evidence = jsonArray(row.evidencias);
+  const isMaintenance = row.tipo === "mantenimiento";
+  const allEvidence = jsonArray(row.evidencias);
+  const deliveries = jsonArray(row.entregas);
+  const participantDelivery = isMaintenance && participant?.id
+    ? deliveries.find((item) => item?.participanteId === participant.id)
+    : undefined;
+  const canUseLegacyMaintenanceFields = Boolean(
+    isMaintenance
+      && participantDelivery
+      && participantDelivery.enviadoPorId
+      && (!participant?.tecnicoId || participantDelivery.enviadoPorId === participant.tecnicoId),
+  );
+  const evidence = isMaintenance && participant
+    ? (jsonArray(participant.entregaEvidencias).length
+      ? jsonArray(participant.entregaEvidencias)
+      : allEvidence.filter((item) => item?.participanteId === participant.id
+        || (!item?.participanteId && item?.subidoPorId && item.subidoPorId === participant.tecnicoId)))
+    : allEvidence;
   const ofType = (kind: string) => evidence.filter((item) => item.tipo === kind).sort((a, b) => number(a.orden) - number(b.orden)).map((item) => item.url || item.key).filter(Boolean);
   const liquidation = jsonArray(row.liquidaciones).find((item) => item.participanteId === participant?.id || item.tecnicoId === participant?.tecnicoId);
   const approval = jsonArray(row.aprobaciones).find((item) => item.participanteId === participant?.id) || jsonArray(row.aprobaciones)[0];
@@ -489,16 +528,28 @@ function mapReport(row: any, participant: any, index: number): any {
     fecha: dateOnly(row.fecha_operacion) || "",
     clienteId: row.cliente_id,
     descripcion: row.descripcion || row.catalogo_nombre || "",
-    actividadesRealizadas: metadata.actividadesRealizadas || row.catalogo_nombre || undefined,
+    actividadesRealizadas: isMaintenance
+      ? participantDelivery?.actividadesRealizadas || (canUseLegacyMaintenanceFields ? metadata.actividadesRealizadas : undefined)
+      : metadata.actividadesRealizadas || row.catalogo_nombre || undefined,
     especificacion: row.especificacion || metadata.especificacion || undefined,
-    observaciones: row.observaciones || undefined,
+    observaciones: isMaintenance
+      ? participantDelivery?.observaciones || (canUseLegacyMaintenanceFields ? row.observaciones : undefined)
+      : row.observaciones || undefined,
     fotoEvidencia: ofType("general")[0],
     fotosAntes: ofType("antes"),
     fotosDespues: ofType("despues"),
-    firmaReceptor: ofType("firma")[0],
-    datosReceptor: metadata.datosReceptor || (row.visita_receptor ? { nombre: row.visita_receptor, cedula: row.receptor_cedula || "", cargo: row.receptor_cargo || "" } : undefined),
-    bitacora: ofType("bitacora").length > 0,
-    fotoBitacora: ofType("bitacora")[0],
+    firmaReceptor: isMaintenance
+      ? participantDelivery?.firmaReceptorUrl || ofType("firma")[0]
+      : ofType("firma")[0],
+    datosReceptor: isMaintenance
+      ? (participantDelivery?.receptorNombre ? { nombre: participantDelivery.receptorNombre, cedula: "", cargo: "" } : (canUseLegacyMaintenanceFields ? metadata.datosReceptor : undefined))
+      : metadata.datosReceptor || (row.visita_receptor ? { nombre: row.visita_receptor, cedula: row.receptor_cedula || "", cargo: row.receptor_cargo || "" } : undefined),
+    bitacora: isMaintenance
+      ? Boolean(participantDelivery?.fotoBitacoraUrl || ofType("bitacora").length > 0)
+      : ofType("bitacora").length > 0,
+    fotoBitacora: isMaintenance
+      ? participantDelivery?.fotoBitacoraUrl || ofType("bitacora")[0]
+      : ofType("bitacora")[0],
     puntoPartida: row.punto_partida,
     puntoLlegada: row.punto_llegada,
     tipoRecorrido: row.tipo_recorrido === "con_herramienta" ? "con_herramienta" : row.tipo_recorrido === "normal" ? "normal" : undefined,
@@ -522,7 +573,7 @@ function mapReport(row: any, participant: any, index: number): any {
     liquidacionDescuentoTardanza: liquidation ? number(liquidation.descuentoTardanza) : undefined,
     liquidacionPorcentajeDescuentoTardanza: liquidation ? number(liquidation.porcentajeDescuentoTardanza) : undefined,
     costoAdministrable: Boolean(row.costo_administrable),
-    firmado: row.tipo === "visita_tecnica" ? Boolean(row.visita_firmado) : row.tipo === "mantenimiento" ? Boolean(row.mantenimiento_firmado) : false,
+    firmado: row.tipo === "visita_tecnica" ? Boolean(row.visita_firmado) : row.tipo === "mantenimiento" ? Boolean(participantDelivery?.firmado || participantDelivery?.firmaReceptorUrl || (canUseLegacyMaintenanceFields && row.mantenimiento_firmado)) : false,
     correoEnviado: Boolean(metadata.correoEnviado),
     fechaUltimoEnvioCorreo: metadata.fechaUltimoEnvioCorreo || undefined,
     periodoId: row.periodo_id || metadata.periodoId || "",
@@ -592,29 +643,75 @@ async function dashboardMetrics(payload: Payload = {}) {
 
   if (startDate > endDate) throw new Error("El rango de métricas no es válido.");
 
+  // These predicates are shared by the dashboard counters and the
+  // maintenance inbox. A maintenance report is an operational delivery,
+  // even when the scheduled row has not yet been moved to `ejecutado`.
+  // Counting the canonical maintenance id prevents one multi-technician
+  // delivery from inflating the dashboard.
+  const submittedMaintenanceDelivery = `EXISTS (
+    SELECT 1
+      FROM public.actividades_operativas_mantenimientos am_metric
+      JOIN public.actividades_operativas_participantes ap_metric
+        ON ap_metric.actividad_id = am_metric.actividad_id
+      JOIN public.actividades_operativas_entregas d_metric
+        ON d_metric.actividad_id = ap_metric.actividad_id
+       AND d_metric.participante_id = ap_metric.id
+     WHERE am_metric.mantenimiento_programado_id = m.id
+       AND d_metric.estado IN ('enviada', 'aprobada')
+  )`;
+  const submittedMaintenanceDeliveryInRange = `EXISTS (
+    SELECT 1
+      FROM public.actividades_operativas_mantenimientos am_metric
+      JOIN public.actividades_operativas_participantes ap_metric
+        ON ap_metric.actividad_id = am_metric.actividad_id
+      JOIN public.actividades_operativas_entregas d_metric
+        ON d_metric.actividad_id = ap_metric.actividad_id
+       AND d_metric.participante_id = ap_metric.id
+     WHERE am_metric.mantenimiento_programado_id = m.id
+       AND d_metric.estado IN ('enviada', 'aprobada')
+       AND COALESCE(d_metric.fecha_ejecucion, m.fecha_realizado, m.fecha_programada)
+           BETWEEN $1::date AND $2::date
+  )`;
+  const completedMaintenanceInRange = `(m.estado IN ('ejecutado', 'completado')
+    AND COALESCE(m.fecha_realizado, m.fecha_programada) BETWEEN $1::date AND $2::date
+    OR ${submittedMaintenanceDeliveryInRange})`;
+
   const { rows } = await dbQuery(
     `SELECT
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
          WHERE m.fecha_programada BETWEEN $1::date AND $2::date
-           AND m.estado IN ('programado', 'asignado')) AS programados,
+           AND m.estado IN ('programado', 'asignado')
+           AND NOT (${submittedMaintenanceDelivery})) AS programados,
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
          WHERE m.fecha_programada BETWEEN $1::date AND $2::date
            AND m.estado IN ('en_ejecucion', 'en_progreso')) AS en_ejecucion,
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
-         WHERE m.fecha_programada BETWEEN $1::date AND $2::date
-           AND m.estado IN ('ejecutado', 'completado')) AS mantenimientos_agenda_realizados,
+         WHERE m.estado <> 'cancelado'
+           AND (${completedMaintenanceInRange})) AS mantenimientos_agenda_realizados,
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
          WHERE m.fecha_programada <= $2::date
-           AND m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')) AS pendientes,
+           AND m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+           AND NOT (${submittedMaintenanceDelivery})) AS pendientes,
        (SELECT COUNT(*)::int
-          FROM public.actividades_operativas a
-         WHERE a.fecha_operacion BETWEEN $1::date AND $2::date
-           AND a.tipo = 'mantenimiento'
-           AND a.estado IN ('completada', 'aprobada')) AS mantenimientos_reportados,
+          FROM (
+            SELECT DISTINCT COALESCE(am_metric.mantenimiento_programado_id::text, 'actividad:' || a_metric.id::text) AS canonical_id
+              FROM public.actividades_operativas a_metric
+              LEFT JOIN public.actividades_operativas_mantenimientos am_metric
+                ON am_metric.actividad_id = a_metric.id
+             WHERE a_metric.tipo = 'mantenimiento'
+               AND a_metric.estado IN ('pendiente_aprobacion', 'completada', 'aprobada', 'ejecutado')
+               AND a_metric.fecha_operacion BETWEEN $1::date AND $2::date
+            UNION
+            SELECT m_metric.id::text AS canonical_id
+              FROM public.mantenimientos_programados m_metric
+             WHERE m_metric.estado IN ('ejecutado', 'completado')
+               AND COALESCE(m_metric.fecha_realizado, m_metric.fecha_programada) BETWEEN $1::date AND $2::date
+          ) reported_maintenance
+        ) AS mantenimientos_reportados,
        (SELECT COUNT(DISTINCT a.id)::int
           FROM public.actividades_operativas a
          WHERE a.fecha_operacion BETWEEN $1::date AND $2::date
@@ -625,7 +722,8 @@ async function dashboardMetrics(payload: Payload = {}) {
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
          WHERE m.fecha_programada < (now() AT TIME ZONE 'America/Bogota')::date
-           AND m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')) AS vencidos
+           AND m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+           AND NOT (${submittedMaintenanceDelivery})) AS vencidos
     `,
     [startDate, endDate],
   );
@@ -651,6 +749,17 @@ async function overdueMaintenanceRows(payload: Payload = {}) {
   const filters = [
     "m.fecha_programada < $1::date",
     "m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')",
+    `NOT (EXISTS (
+      SELECT 1
+        FROM public.actividades_operativas_mantenimientos am_overdue
+        JOIN public.actividades_operativas_participantes ap_overdue
+          ON ap_overdue.actividad_id = am_overdue.actividad_id
+        JOIN public.actividades_operativas_entregas d_overdue
+          ON d_overdue.actividad_id = ap_overdue.actividad_id
+         AND d_overdue.participante_id = ap_overdue.id
+       WHERE am_overdue.mantenimiento_programado_id = m.id
+         AND d_overdue.estado IN ('enviada', 'aprobada')
+    ))`,
   ];
   if (payload.clienteId) {
     values.push(payload.clienteId);
@@ -1044,7 +1153,16 @@ async function getMaintenanceParticipantRows(maintenanceId: string) {
             mp.created_at AS fecha_creacion,
             delivery.id AS entrega_id, delivery.estado AS estado_reporte,
             delivery.observaciones AS entrega_observaciones,
-            delivery.fecha_ejecucion AS fecha_entrega
+            delivery.fecha_ejecucion AS fecha_entrega,
+            delivery.actividades_realizadas AS entrega_actividades_realizadas,
+            delivery.tipo_pendiente AS entrega_tipo_pendiente,
+            delivery.descripcion_pendiente AS entrega_descripcion_pendiente,
+            delivery.receptor_nombre AS entrega_receptor_nombre,
+            delivery.firmado AS entrega_firmado,
+            delivery.firma_receptor_url AS entrega_firma_receptor_url,
+            delivery.foto_bitacora_url AS entrega_foto_bitacora_url,
+            delivery.enviado_por_id AS entrega_enviado_por_id,
+            COALESCE(delivery.evidencias, '[]'::json) AS entrega_evidencias
        FROM public.mantenimientos_programados_participantes mp
        LEFT JOIN LATERAL (
          SELECT a.id AS actividad_id
@@ -1063,7 +1181,20 @@ async function getMaintenanceParticipantRows(maintenanceId: string) {
           LIMIT 1
        ) activity_participant ON true
        LEFT JOIN LATERAL (
-         SELECT d.id, d.estado, d.observaciones, d.fecha_ejecucion
+         SELECT d.id, d.estado, d.observaciones, d.fecha_ejecucion,
+                d.actividades_realizadas, d.tipo_pendiente,
+                d.descripcion_pendiente, d.receptor_nombre, d.firmado,
+                d.firma_receptor_url, d.foto_bitacora_url, d.enviado_por_id,
+                (SELECT json_agg(json_build_object(
+                   'id', e.id, 'participanteId', e.participante_id,
+                   'tipo', e.tipo, 'bucket', e.storage_bucket,
+                   'key', e.storage_key, 'url', e.url, 'orden', e.orden,
+                   'subidoPorId', e.subido_por_id,
+                   'fechaSubida', e.created_at
+                 ) ORDER BY e.tipo, e.orden, e.created_at)
+                   FROM public.actividades_operativas_evidencias e
+                  WHERE e.actividad_id = d.actividad_id
+                    AND e.participante_id = d.participante_id) AS evidencias
            FROM public.actividades_operativas_entregas d
            WHERE d.actividad_id = linked.actividad_id
              AND d.participante_id = activity_participant.participante_id
@@ -1078,9 +1209,41 @@ async function getMaintenanceParticipantRows(maintenanceId: string) {
   return rows;
 }
 
-async function enrichMaintenance(row: any) {
+function applyOwnMaintenanceDelivery(maintenance: any, participants: any[], userId: string) {
+  const ownParticipant = participants.find((participant) => String(participant.usuario_id) === String(userId));
+  if (!ownParticipant || !ownParticipant.entrega_id) return maintenance;
+
+  const evidence = jsonArray(ownParticipant.entrega_evidencias).map((item) => ({
+    id: item.id,
+    mantenimiento_id: maintenance.id,
+    tipo: item.tipo,
+    url: item.url || item.key,
+    orden: number(item.orden),
+    participante_id: item.participanteId || ownParticipant.id,
+    fecha_subida: item.fechaSubida || "",
+  }));
+
+  maintenance.actividadesRealizadas = ownParticipant.entrega_actividades_realizadas || undefined;
+  maintenance.observaciones = ownParticipant.entrega_observaciones || undefined;
+  maintenance.tipoPendiente = ownParticipant.entrega_tipo_pendiente || undefined;
+  maintenance.descripcionPendiente = ownParticipant.entrega_descripcion_pendiente || undefined;
+  maintenance.nombreReceptor = ownParticipant.entrega_receptor_nombre || undefined;
+  maintenance.firmado = Boolean(ownParticipant.entrega_firmado);
+  maintenance.firmaReceptorUrl = ownParticipant.entrega_firma_receptor_url || undefined;
+  maintenance.fotoBitacoraUrl = ownParticipant.entrega_foto_bitacora_url
+    || evidence.find((item) => item.tipo === "bitacora")?.url
+    || undefined;
+  maintenance.tieneBitacora = Boolean(maintenance.fotoBitacoraUrl);
+  maintenance.fotos_antes = evidence.filter((item) => item.tipo === "antes");
+  maintenance.fotos_despues = evidence.filter((item) => item.tipo === "despues");
+  return maintenance;
+}
+
+async function enrichMaintenance(row: any, userId?: string) {
   const maintenance = mapMaintenance(row);
-  maintenance.participantes = await getMaintenanceParticipantRows(row.id);
+  const participants = await getMaintenanceParticipantRows(row.id);
+  maintenance.participantes = participants;
+  if (userId) applyOwnMaintenanceDelivery(maintenance, participants, userId);
   return maintenance;
 }
 
@@ -1262,7 +1425,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     )) LIKE ${searchParam}`);
   }
 
-  if (adminView && payload.month && view !== "calendario") {
+  if (adminView && payload.month && view !== "calendario" && !(view === "programados" && search)) {
     const range = monthRange(payload.month, today);
     values.push(range.start, range.end);
     filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
@@ -1371,7 +1534,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
         COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
           AND m.fecha_programada < $1::date
           AND NOT (${anySubmittedDelivery}))::int AS vencidos,
-        COUNT(*) FILTER (WHERE ${realizedFilter})::int AS realizados
+        COUNT(*) FILTER (WHERE m.estado <> 'cancelado' AND ${realizedFilter})::int AS realizados
        FROM public.mantenimientos_programados m`,
       countValues,
     );
@@ -1787,16 +1950,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       }
       const { rows } = await dbQuery("SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id FROM public.mantenimientos_programados m JOIN public.clientes c ON c.id = m.cliente_id LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id WHERE m.id = $1", [payload.id]);
       if (!rows[0]) return null;
-      const maintenance = await enrichMaintenance(rows[0]);
-      const { rows: activityRowsForMaintenance } = await dbQuery("SELECT actividad_id AS id FROM public.actividades_operativas_mantenimientos WHERE mantenimiento_programado_id = $1", [payload.id]);
-      if (activityRowsForMaintenance[0]) {
-        const activityId = activityRowsForMaintenance[0].id;
-        const { rows: participantRows } = await dbQuery("SELECT p.id, p.actividad_id, p.tecnico_id AS usuario_id, p.porcentaje, p.valor_ganado AS valor_calculado, p.rol_participacion, p.created_at AS fecha_creacion, d.id AS entrega_id, d.estado AS estado_reporte, d.observaciones AS entrega_observaciones, d.fecha_ejecucion AS fecha_entrega FROM public.actividades_operativas_participantes p LEFT JOIN public.actividades_operativas_entregas d ON d.actividad_id = p.actividad_id AND d.participante_id = p.id WHERE p.actividad_id = $1 ORDER BY p.rol_participacion = 'principal' DESC, p.created_at", [activityId]);
-        const { rows: evidenceRows } = await dbQuery("SELECT id, actividad_id, tipo, participante_id, url, orden, created_at AS fecha_subida FROM public.actividades_operativas_evidencias WHERE actividad_id = $1 ORDER BY tipo, orden", [activityId]);
-        if (participantRows.length) maintenance.participantes = participantRows;
-        maintenance.fotos_antes = evidenceRows.filter((item) => item.tipo === "antes");
-        maintenance.fotos_despues = evidenceRows.filter((item) => item.tipo === "despues");
-      }
+      const maintenance = await enrichMaintenance(rows[0], user.id);
       return maintenance;
     }
     case "maintenances.create": { await requireAdmin(user); return createMaintenance(payload, user); }
@@ -1855,7 +2009,24 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "maintenances.delete": { await requireAdmin(user); await dbQuery("UPDATE public.mantenimientos_programados SET estado = 'cancelado', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
     case "maintenances.reports": {
       const rows = await activityRows({});
-      return rows.filter((row) => row.tipo === "mantenimiento").map((row) => ({ id: row.id, codigoRegistro: row.codigo, mantenimientoId: row.mantenimiento_programado_id, tecnicoId: jsonArray(row.participantes)[0]?.tecnicoId || row.creado_por_id, clienteId: row.cliente_id, fotosAntes: jsonArray(row.evidencias).filter((e) => e.tipo === "antes").map((e) => e.url || e.key), fotosDespues: jsonArray(row.evidencias).filter((e) => e.tipo === "despues").map((e) => e.url || e.key), observaciones: row.observaciones || "", fechaGeneracion: row.created_at, enviado: false }));
+      return rows.filter((row) => row.tipo === "mantenimiento").flatMap((row) => {
+        const participants = jsonArray(row.participantes);
+        return (participants.length ? participants : [null]).map((participant, index) => {
+          const report = mapReport(row, participant, index);
+          return {
+            id: report.id,
+            codigoRegistro: report.codigoRegistro,
+            mantenimientoId: report.mantenimientoId,
+            tecnicoId: report.tecnicoId,
+            clienteId: report.clienteId,
+            fotosAntes: report.fotosAntes || [],
+            fotosDespues: report.fotosDespues || [],
+            observaciones: report.observaciones || "",
+            fechaGeneracion: row.created_at,
+            enviado: Boolean(participant?.entregaId),
+          };
+        });
+      });
     }
 
     case "activities.create": return createOperationalActivity(payload, user);
@@ -2533,6 +2704,9 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
     );
     const maintenance = maintenanceRows[0];
     if (!maintenance) throw new Error("No se encontró el mantenimiento.");
+    const sharedMaintenanceTitle = String(
+      payload.titulo || maintenance.titulo || maintenance.descripcion_pendiente || "Mantenimiento preventivo",
+    ).trim();
     const scheduledDate = dateOnly(maintenance.fecha_programada);
     if (scheduledDate && scheduledDate > today) {
       throw new Error(`Este mantenimiento estará disponible desde el ${scheduledDate}.`);
@@ -2655,8 +2829,8 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
           reportGroupId,
           user.id,
           executionDate,
-          payload.actividades || payload.descripcion || maintenance.titulo || "Mantenimiento preventivo",
-          payload.observaciones || maintenance.observaciones || null,
+          sharedMaintenanceTitle,
+          maintenance.observaciones || null,
           number(maintenance.costo_tecnico_presupuestado),
           JSON.stringify({ mantenimientoId: maintenanceId, fechaProgramada: scheduledDate, extemporaneo: Boolean(scheduledDate && scheduledDate < executionDate) }),
         ],
@@ -2670,11 +2844,9 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
        VALUES ($1,$2,$3,$4,$5,$6,$7)
        ON CONFLICT (actividad_id) DO UPDATE SET
          titulo = COALESCE(EXCLUDED.titulo, actividades_operativas_mantenimientos.titulo),
-         tipo_pendiente = EXCLUDED.tipo_pendiente,
-         descripcion_pendiente = EXCLUDED.descripcion_pendiente,
-         receptor_nombre = COALESCE(EXCLUDED.receptor_nombre, actividades_operativas_mantenimientos.receptor_nombre),
-         firmado = EXCLUDED.firmado`,
-      [activity.id, maintenanceId, payload.titulo || maintenance.titulo || null, payload.tipoPendiente || maintenance.tipo_pendiente || null, payload.descripcionPendiente || maintenance.descripcion_pendiente || null, payload.receptorNombre || null, Boolean(payload.firmado)],
+         tipo_pendiente = COALESCE(actividades_operativas_mantenimientos.tipo_pendiente, EXCLUDED.tipo_pendiente),
+         descripcion_pendiente = COALESCE(actividades_operativas_mantenimientos.descripcion_pendiente, EXCLUDED.descripcion_pendiente)`,
+      [activity.id, maintenanceId, sharedMaintenanceTitle, maintenance.tipo_pendiente || null, maintenance.descripcion_pendiente || null, null, false],
     );
     for (const item of assignmentRows) {
       const valueBase = number(maintenance.costo_tecnico_presupuestado);
@@ -2731,13 +2903,52 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
 
     await client.query(
       `INSERT INTO public.actividades_operativas_entregas
-        (actividad_id, participante_id, estado, observaciones, fecha_ejecucion, enviado_por_id, enviado_en)
-       VALUES ($1,$2,'enviada',$3,$4,$5,clock_timestamp())
+        (actividad_id, participante_id, estado, actividades_realizadas, observaciones,
+         tipo_pendiente, descripcion_pendiente, receptor_nombre, firmado,
+         firma_receptor_url, foto_bitacora_url, fecha_ejecucion, enviado_por_id, enviado_en)
+       VALUES ($1,$2,'enviada',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,clock_timestamp())
        ON CONFLICT (actividad_id, participante_id) DO UPDATE SET
-         estado = 'enviada', observaciones = EXCLUDED.observaciones,
+         estado = 'enviada', actividades_realizadas = EXCLUDED.actividades_realizadas,
+         observaciones = EXCLUDED.observaciones,
+         tipo_pendiente = EXCLUDED.tipo_pendiente,
+         descripcion_pendiente = EXCLUDED.descripcion_pendiente,
+         receptor_nombre = EXCLUDED.receptor_nombre,
+         firmado = EXCLUDED.firmado,
+         firma_receptor_url = EXCLUDED.firma_receptor_url,
+         foto_bitacora_url = EXCLUDED.foto_bitacora_url,
          fecha_ejecucion = EXCLUDED.fecha_ejecucion,
-         enviado_por_id = EXCLUDED.enviado_por_id, enviado_en = clock_timestamp()`,
-      [activity.id, currentParticipant.id, payload.observaciones || null, executionDate, user.id],
+         enviado_por_id = EXCLUDED.enviado_por_id,
+         enviado_en = clock_timestamp(),
+         updated_at = clock_timestamp()`,
+      [
+        activity.id,
+        currentParticipant.id,
+        payload.actividades || null,
+        payload.observaciones || null,
+        payload.tipoPendiente || null,
+        payload.descripcionPendiente || null,
+        payload.receptorNombre || null,
+        Boolean(payload.firmado),
+        payload.firmaReceptorUrl || null,
+        payload.bitacoraUrl || null,
+        executionDate,
+        user.id,
+      ],
+    );
+
+    await client.query(
+      `UPDATE public.actividades_operativas_participantes
+          SET estado_reporte = 'enviada', updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [currentParticipant.id],
+    );
+
+    // Una reentrega reemplaza solo las evidencias de este técnico. Las
+    // evidencias de los demás participantes nunca se modifican.
+    await client.query(
+      `DELETE FROM public.actividades_operativas_evidencias
+        WHERE actividad_id = $1 AND participante_id = $2`,
+      [activity.id, currentParticipant.id],
     );
 
     for (const evidence of jsonArray(payload.evidencias)) {
@@ -2748,7 +2959,9 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (storage_bucket, storage_key) DO UPDATE SET
            url = EXCLUDED.url, actividad_id = EXCLUDED.actividad_id,
-           participante_id = EXCLUDED.participante_id, subido_por_id = EXCLUDED.subido_por_id`,
+           participante_id = EXCLUDED.participante_id, subido_por_id = EXCLUDED.subido_por_id
+         WHERE actividades_operativas_evidencias.participante_id IS NULL
+            OR actividades_operativas_evidencias.participante_id = EXCLUDED.participante_id`,
         [activity.id, currentParticipant.id, evidence.tipo || "general", evidence.bucket || "fotos-mantenimientos", evidence.key || evidence.url, evidence.url || null, number(evidence.orden), user.id],
       );
     }
@@ -2770,23 +2983,19 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
     await client.query(
       `UPDATE public.actividades_operativas
           SET estado = $2,
-              observaciones = COALESCE($3, observaciones),
-              fecha_operacion = CASE WHEN estado = 'borrador' THEN $4::date ELSE fecha_operacion END,
-              metadata = metadata || $5::jsonb,
+              fecha_operacion = CASE WHEN estado = 'borrador' THEN $3::date ELSE fecha_operacion END,
+              metadata = metadata || $4::jsonb,
               updated_at = clock_timestamp()
         WHERE id = $1`,
-      [activity.id, nextActivityState, payload.observaciones || null, executionDate, JSON.stringify({ ultimaEntregaPorUsuario: user.id, ultimaEntregaEn: new Date().toISOString(), fechaProgramada: scheduledDate, extemporaneo: Boolean(scheduledDate && scheduledDate < executionDate) })],
+      [activity.id, nextActivityState, executionDate, JSON.stringify({ ultimaEntregaPorUsuario: user.id, ultimaEntregaEn: new Date().toISOString(), fechaProgramada: scheduledDate, extemporaneo: Boolean(scheduledDate && scheduledDate < executionDate) })],
     );
     await client.query(
       `UPDATE public.mantenimientos_programados
           SET estado = CASE WHEN $2::boolean THEN 'ejecutado' ELSE 'asignado' END,
               fecha_realizado = CASE WHEN $2::boolean THEN COALESCE(fecha_realizado, $3::date) ELSE fecha_realizado END,
-              observaciones = COALESCE($4, observaciones),
-              tipo_pendiente = COALESCE($5, tipo_pendiente),
-              descripcion_pendiente = COALESCE($6, descripcion_pendiente),
               updated_at = clock_timestamp()
         WHERE id = $1`,
-      [maintenanceId, complete, executionDate, payload.observaciones || null, payload.tipoPendiente || null, payload.descripcionPendiente || null],
+      [maintenanceId, complete, executionDate],
     );
 
     return {
@@ -2832,7 +3041,37 @@ async function updateApproval(payload: Payload, user: UserContext) {
      ON CONFLICT (actividad_id, participante_id) DO UPDATE SET revisor_id=EXCLUDED.revisor_id, estado=EXCLUDED.estado, comentario=EXCLUDED.comentario, revisado_en=EXCLUDED.revisado_en, updated_at=clock_timestamp()`,
     [activityId, participant.id, user.id, state, payload.comentario || null],
   );
-  await dbQuery("UPDATE public.actividades_operativas SET estado = CASE WHEN $2 = 'aprobada' THEN 'aprobada' WHEN $2 = 'rechazada' THEN 'rechazada' ELSE 'pendiente_aprobacion' END, updated_at = clock_timestamp() WHERE id = $1", [activityId, state]);
+  await dbQuery(
+    `UPDATE public.actividades_operativas_entregas
+        SET estado = $3, updated_at = clock_timestamp()
+      WHERE actividad_id = $1 AND participante_id = $2`,
+    [activityId, participant.id, state === "aprobada" ? "aprobada" : state === "rechazada" ? "rechazada" : "enviada"],
+  );
+  await dbQuery(
+    `UPDATE public.actividades_operativas_participantes
+        SET estado_reporte = $3, updated_at = clock_timestamp()
+      WHERE actividad_id = $1 AND id = $2`,
+    [activityId, participant.id, state === "aprobada" ? "aprobada" : state === "rechazada" ? "rechazada" : "enviada"],
+  );
+  const { rows: approvalSummary } = await dbQuery(
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE ap.estado = 'aprobada')::int AS aprobadas,
+            COUNT(*) FILTER (WHERE ap.estado = 'rechazada')::int AS rechazadas
+       FROM public.actividades_operativas_participantes p
+       LEFT JOIN public.actividades_operativas_aprobaciones ap
+         ON ap.actividad_id = p.actividad_id AND ap.participante_id = p.id
+      WHERE p.actividad_id = $1`,
+    [activityId],
+  );
+  const totalApprovals = number(approvalSummary[0]?.total);
+  const approvedApprovals = number(approvalSummary[0]?.aprobadas);
+  const rejectedApprovals = number(approvalSummary[0]?.rechazadas);
+  const activityState = rejectedApprovals > 0
+    ? "rechazada"
+    : totalApprovals > 0 && approvedApprovals === totalApprovals
+      ? "aprobada"
+      : "pendiente_aprobacion";
+  await dbQuery("UPDATE public.actividades_operativas SET estado = $2, updated_at = clock_timestamp() WHERE id = $1", [activityId, activityState]);
   await dbQuery("UPDATE public.liquidacion_items SET estado = CASE WHEN $2 = 'aprobada' THEN 'aprobado' WHEN $2 = 'rechazada' THEN 'anulado' ELSE 'pendiente' END, updated_at = clock_timestamp() WHERE actividad_id = $1 AND participante_id = $3", [activityId, state, participant.id]);
   return true;
 }
@@ -3101,12 +3340,24 @@ async function finalizeOperationalActivity(payload: Payload) {
 
 async function saveEvidence(payload: Payload, user: UserContext) {
   const activityId = canonicalActivityId(payload.actividadId || payload.id);
-  const participantId = payload.participanteId || payload.participantId || null;
   const { rows: activityRowsResult } = await dbQuery(
-    "SELECT id, grupo_id, fecha_operacion FROM public.actividades_operativas WHERE id = $1",
+    "SELECT id, tipo, grupo_id, fecha_operacion FROM public.actividades_operativas WHERE id = $1",
     [activityId],
   );
   if (!activityRowsResult[0]) throw new Error("No se encontró la actividad para guardar la evidencia.");
+  let participantId = payload.participanteId || payload.participantId || null;
+  if (!participantId && activityRowsResult[0].tipo === "mantenimiento") {
+    const { rows: ownParticipants } = await dbQuery(
+      `SELECT p.id
+         FROM public.actividades_operativas_participantes p
+        WHERE p.actividad_id = $1 AND p.tecnico_id = $2
+        ORDER BY p.created_at
+        LIMIT 1`,
+      [activityId, user.id],
+    );
+    participantId = ownParticipants[0]?.id || null;
+    if (!participantId) throw new Error("La evidencia de un mantenimiento requiere un participante asignado.");
+  }
   if (participantId) {
     const { rows: participantRows } = await dbQuery(
       "SELECT id, tecnico_id FROM public.actividades_operativas_participantes WHERE id = $1 AND actividad_id = $2",
@@ -3310,10 +3561,15 @@ async function cleanupExecute(payload: Payload) {
 export async function POST(request: NextRequest) {
   try {
     const user = await getAuthenticatedUser(request);
-    if (!user) return NextResponse.json({ error: "Sesión no válida." }, { status: 401 });
+    if (!user) return NextResponse.json({ error: "Sesión no válida." }, {
+      status: 401,
+      headers: { "Cache-Control": "no-store, max-age=0" },
+    });
     const body = await request.json();
     const data = await execute(String(body?.action || ""), (body?.payload || {}) as Payload, user);
-    const response = NextResponse.json({ data });
+    const response = NextResponse.json({ data }, {
+      headers: { "Cache-Control": "no-store, max-age=0" },
+    });
     try {
       await renewSession(request, response);
     } catch (renewError) {
@@ -3323,6 +3579,9 @@ export async function POST(request: NextRequest) {
   } catch (error: any) {
     console.error("Error en API de datos V2:", error);
     const message = error?.code === "23505" ? "Ya existe un registro con esos datos." : error?.code === "23503" ? "La operación referencia datos inexistentes o protegidos." : error?.code === "23P01" ? "El rango de fechas se cruza con otro registro." : error?.message || "Error interno de datos.";
-    return NextResponse.json({ error: message }, { status: 400 });
+    return NextResponse.json({ error: message }, {
+      status: 400,
+      headers: { "Cache-Control": "no-store, max-age=0" },
+    });
   }
 }

@@ -66,7 +66,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { ActivityReport, User, Client, WorkGroup, CompanySettings, LiquidationPeriod, MaintenanceContract } from "@/lib/types";
-import { deleteReporteActividadAdmin, getReportesActividad, getReportesActividadParaExportar, markReporteActividadEmailSent, updateCostoActividadAdmin, updateCostoClienteVisitaAdmin } from "@/lib/data/services/reportes-actividad";
+import { deleteReporteActividadAdmin, getReportesActividad, markReporteActividadEmailSent, updateCostoActividadAdmin, updateCostoClienteVisitaAdmin } from "@/lib/data/services/reportes-actividad";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getGrupos } from "@/lib/data/services/grupos";
@@ -957,28 +957,23 @@ export default function InformesPage() {
   useEffect(() => {
     if (exportReportType !== "mantenimiento_preventivo" || !preventiveMonthlyMonth) {
       setMonthlyExportReports([]);
+      setMonthlyExportLoading(false);
       return;
     }
 
-    let cancelled = false;
-    setMonthlyExportLoading(true);
-    getReportesActividadParaExportar({
-      startDate: `${preventiveMonthlyMonth}-01`,
-      endDate: getMonthEndDate(preventiveMonthlyMonth),
-      tipo: "mantenimiento_preventivo",
-    }).then((result) => {
-      if (!cancelled) setMonthlyExportReports(result.items);
-    }).catch((error) => {
-      if (!cancelled) {
-        console.error("Error cargando fuente de exportación preventiva:", error);
-        setMonthlyExportReports([]);
-      }
-    }).finally(() => {
-      if (!cancelled) setMonthlyExportLoading(false);
-    });
-
-    return () => { cancelled = true; };
-  }, [exportReportType, preventiveMonthlyMonth]);
+    // El consolidado mensual debe usar exactamente la misma colección que la
+    // interfaz: así aplica las mismas reglas de participantes, duplicados
+    // semánticos e históricos de contrato y nunca vuelve a contar una fuente
+    // distinta para el PDF.
+    const monthStart = `${preventiveMonthlyMonth}-01`;
+    const monthEnd = getMonthEndDate(preventiveMonthlyMonth);
+    setMonthlyExportReports(reports.filter((report) => (
+      report.tipo === "mantenimiento_preventivo"
+      && report.fecha >= monthStart
+      && report.fecha <= monthEnd
+    )));
+    setMonthlyExportLoading(false);
+  }, [exportReportType, preventiveMonthlyMonth, reports]);
 
   const selectedPeriod = useMemo(
     () => periods.find((period) => period.id === selectedPeriodId),
