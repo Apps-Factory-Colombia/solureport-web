@@ -395,15 +395,17 @@ export default function MantenimientosPage() {
       if (requestId !== maintenanceRequestRef.current) return;
       setMaintenances(result.items);
       setMaintenancePage(result);
-      setMaintenanceTotals((current) => ({
-        ...current,
-        lista: result.counts?.todos ?? current.lista,
-        programados: result.counts?.programados ?? current.programados,
-        proximos: result.counts?.proximos ?? current.proximos,
-        vencidos: result.counts?.vencidos ?? current.vencidos,
-        realizados: result.counts?.realizados ?? current.realizados,
-        [targetTab]: result.total,
-      }));
+      setMaintenanceTotals((current) => {
+        const next = { ...current };
+        if (result.counts) {
+          next.lista = result.counts.todos ?? current.lista;
+          next.programados = result.counts.programados ?? current.programados;
+          next.proximos = result.counts.proximos ?? current.proximos;
+          next.vencidos = result.counts.vencidos ?? current.vencidos;
+          next.realizados = result.counts.realizados ?? current.realizados;
+        }
+        return next;
+      });
       if (targetTab === "vencidos") setOverdueMaintenances(result.items);
     } catch (err) {
       if (requestId !== maintenanceRequestRef.current) return;

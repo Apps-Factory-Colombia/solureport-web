@@ -2282,7 +2282,7 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
          FROM public.mantenimientos_programados m
          LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
         WHERE m.id = $1
-        FOR UPDATE`,
+        FOR UPDATE OF m`,
       [maintenanceId],
     );
     const maintenance = maintenanceRows[0];
