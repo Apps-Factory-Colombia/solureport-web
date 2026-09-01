@@ -2972,14 +2972,14 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
     const { rows: deliveryCount } = await client.query(
       `SELECT COUNT(*) FILTER (WHERE d.estado IN ('enviada','aprobada'))::int AS enviados,
               COUNT(*)::int AS total
-         FROM public.actividades_operativas_participantes p
-         JOIN public.mantenimientos_programados_participantes mp
-           ON mp.mantenimiento_id = $1
-          AND mp.usuario_id = p.tecnico_id
-          AND mp.estado = 'activo'
-         LEFT JOIN public.actividades_operativas_entregas d ON d.actividad_id = p.actividad_id AND d.participante_id = p.id
-        WHERE p.actividad_id = $1`,
-      [activity.id],
+          FROM public.actividades_operativas_participantes p
+          JOIN public.mantenimientos_programados_participantes mp
+            ON mp.mantenimiento_id = $2
+           AND mp.usuario_id = p.tecnico_id
+           AND mp.estado = 'activo'
+          LEFT JOIN public.actividades_operativas_entregas d ON d.actividad_id = p.actividad_id AND d.participante_id = p.id
+         WHERE p.actividad_id = $1`,
+      [activity.id, maintenanceId],
     );
     const complete = number(deliveryCount[0]?.total) > 0 && number(deliveryCount[0]?.enviados) >= number(deliveryCount[0]?.total);
     const nextActivityState = complete ? "pendiente_aprobacion" : "en_progreso";
