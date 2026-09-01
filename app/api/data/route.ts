@@ -1337,11 +1337,14 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
         ON ap_scope.actividad_id = am_scope.actividad_id
       JOIN public.actividades_operativas_entregas d_scope
         ON d_scope.actividad_id = ap_scope.actividad_id
-       AND d_scope.participante_id = ap_scope.id
-     WHERE am_scope.mantenimiento_programado_id = m.id
-       AND ap_scope.tecnico_id = ${userScopeParam}
-       AND d_scope.estado IN ('enviada', 'aprobada')
-  )` : null;
+        AND d_scope.participante_id = ap_scope.id
+      WHERE am_scope.mantenimiento_programado_id = m.id
+        AND (
+          ap_scope.tecnico_id = ${userScopeParam}
+          OR d_scope.enviado_por_id = ${userScopeParam}
+        )
+        AND d_scope.estado IN ('enviada', 'aprobada')
+   )` : null;
   const displayDelivery = adminView ? anySubmittedDelivery : ownSubmittedDelivery;
   const displayStateExpression = displayDelivery
     ? `(CASE WHEN m.estado IN ('ejecutado', 'completado') OR ${displayDelivery} THEN 'ejecutado' ELSE m.estado END)`
