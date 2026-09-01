@@ -626,6 +626,74 @@ function currentMonthRange(referenceDate = bogotaClock().date) {
   };
 }
 
+/**
+ * A scheduled maintenance is globally delivered only after every active
+ * participant has an operational delivery. A single technician's delivery
+ * must never remove the maintenance from the admin's pending/overdue views.
+ */
+function anySubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m") {
+  return `EXISTS (
+    SELECT 1
+      FROM public.actividades_operativas_mantenimientos am_any
+      JOIN public.actividades_operativas_participantes ap_any
+        ON ap_any.actividad_id = am_any.actividad_id
+      JOIN public.actividades_operativas_entregas d_any
+        ON d_any.actividad_id = ap_any.actividad_id
+       AND d_any.participante_id = ap_any.id
+     WHERE am_any.mantenimiento_programado_id = ${scheduleAlias}.id
+       AND d_any.estado IN ('enviada', 'aprobada')
+  )`;
+}
+
+function allSubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m", dateRange?: { start: string; end: string }) {
+  const rangeFilter = dateRange
+    ? `
+         AND COALESCE(d_all.fecha_ejecucion, ${scheduleAlias}.fecha_realizado, ${scheduleAlias}.fecha_programada)
+             BETWEEN ${dateRange.start}::date AND ${dateRange.end}::date`
+    : "";
+  return `EXISTS (
+    SELECT 1
+      FROM public.mantenimientos_programados_participantes mp_all
+     WHERE mp_all.mantenimiento_id = ${scheduleAlias}.id
+       AND mp_all.estado = 'activo'
+  )
+  AND NOT EXISTS (
+    SELECT 1
+      FROM public.mantenimientos_programados_participantes mp_missing
+     WHERE mp_missing.mantenimiento_id = ${scheduleAlias}.id
+       AND mp_missing.estado = 'activo'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM public.actividades_operativas_mantenimientos am_all
+           JOIN public.actividades_operativas_participantes ap_all
+             ON ap_all.actividad_id = am_all.actividad_id
+            AND ap_all.tecnico_id = mp_missing.usuario_id
+           JOIN public.actividades_operativas_entregas d_all
+             ON d_all.actividad_id = ap_all.actividad_id
+            AND d_all.participante_id = ap_all.id
+          WHERE am_all.mantenimiento_programado_id = ${scheduleAlias}.id
+            AND d_all.estado IN ('enviada', 'aprobada')${rangeFilter}
+       )
+  )`;
+}
+
+function partiallySubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m") {
+  const anyDelivery = anySubmittedMaintenanceDeliveryPredicate(scheduleAlias);
+  const allDeliveries = allSubmittedMaintenanceDeliveryPredicate(scheduleAlias);
+  return `((${anyDelivery}) AND NOT (${allDeliveries}))`;
+}
+
+/**
+ * Keeps legacy rows that were already closed without an operational delivery,
+ * but reopens the effective global state of rows that were incorrectly closed
+ * after only one of several participants delivered.
+ */
+function globallyCompletedMaintenancePredicate(scheduleAlias = "m") {
+  const partialDelivery = partiallySubmittedMaintenanceDeliveryPredicate(scheduleAlias);
+  const allDeliveries = allSubmittedMaintenanceDeliveryPredicate(scheduleAlias);
+  return `((${scheduleAlias}.estado IN ('ejecutado', 'completado') AND NOT (${partialDelivery})) OR (${allDeliveries}))`;
+}
+
 async function dashboardMetrics(payload: Payload = {}) {
   const clock = bogotaClock();
   let startDate = dateOnly(payload.startDate) || currentMonthRange(clock.date).startDate;
@@ -644,45 +712,28 @@ async function dashboardMetrics(payload: Payload = {}) {
   if (startDate > endDate) throw new Error("El rango de métricas no es válido.");
 
   // These predicates are shared by the dashboard counters and the
-  // maintenance inbox. A maintenance report is an operational delivery,
-  // even when the scheduled row has not yet been moved to `ejecutado`.
-  // Counting the canonical maintenance id prevents one multi-technician
-  // delivery from inflating the dashboard.
-  const submittedMaintenanceDelivery = `EXISTS (
-    SELECT 1
-      FROM public.actividades_operativas_mantenimientos am_metric
-      JOIN public.actividades_operativas_participantes ap_metric
-        ON ap_metric.actividad_id = am_metric.actividad_id
-      JOIN public.actividades_operativas_entregas d_metric
-        ON d_metric.actividad_id = ap_metric.actividad_id
-       AND d_metric.participante_id = ap_metric.id
-     WHERE am_metric.mantenimiento_programado_id = m.id
-       AND d_metric.estado IN ('enviada', 'aprobada')
-  )`;
-  const submittedMaintenanceDeliveryInRange = `EXISTS (
-    SELECT 1
-      FROM public.actividades_operativas_mantenimientos am_metric
-      JOIN public.actividades_operativas_participantes ap_metric
-        ON ap_metric.actividad_id = am_metric.actividad_id
-      JOIN public.actividades_operativas_entregas d_metric
-        ON d_metric.actividad_id = ap_metric.actividad_id
-       AND d_metric.participante_id = ap_metric.id
-     WHERE am_metric.mantenimiento_programado_id = m.id
-       AND d_metric.estado IN ('enviada', 'aprobada')
-       AND COALESCE(d_metric.fecha_ejecucion, m.fecha_realizado, m.fecha_programada)
-           BETWEEN $1::date AND $2::date
-  )`;
-  const completedMaintenanceInRange = `(m.estado IN ('ejecutado', 'completado')
+  // maintenance inbox. A multi-technician maintenance is complete only when
+  // every active participant has sent a delivery. This prevents one delivery
+  // from hiding the maintenance from pending/overdue views or inflating the
+  // completed counters.
+  const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate();
+  const partiallySubmittedMaintenanceDelivery = partiallySubmittedMaintenanceDeliveryPredicate();
+  const allSubmittedMaintenanceDeliveryInRange = allSubmittedMaintenanceDeliveryPredicate("m", { start: "$1", end: "$2" });
+  const globallyCompletedMaintenanceForMetric = globallyCompletedMaintenancePredicate("m_metric");
+  const globallyCompletedMaintenanceForActivity = globallyCompletedMaintenancePredicate("m_report");
+  const completedMaintenanceInRange = `(
+    (${globallyCompletedMaintenance})
     AND COALESCE(m.fecha_realizado, m.fecha_programada) BETWEEN $1::date AND $2::date
-    OR ${submittedMaintenanceDeliveryInRange})`;
+    OR ${allSubmittedMaintenanceDeliveryInRange}
+  )`;
 
   const { rows } = await dbQuery(
     `SELECT
        (SELECT COUNT(*)::int
-          FROM public.mantenimientos_programados m
+           FROM public.mantenimientos_programados m
          WHERE m.fecha_programada BETWEEN $1::date AND $2::date
            AND m.estado IN ('programado', 'asignado')
-           AND NOT (${submittedMaintenanceDelivery})) AS programados,
+           AND NOT (${globallyCompletedMaintenance})) AS programados,
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
          WHERE m.fecha_programada BETWEEN $1::date AND $2::date
@@ -694,21 +745,36 @@ async function dashboardMetrics(payload: Payload = {}) {
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
          WHERE m.fecha_programada <= $2::date
-           AND m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
-           AND NOT (${submittedMaintenanceDelivery})) AS pendientes,
+           AND (
+             m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+             OR (${partiallySubmittedMaintenanceDelivery})
+           )
+           AND NOT (${globallyCompletedMaintenance})) AS pendientes,
        (SELECT COUNT(*)::int
           FROM (
-            SELECT DISTINCT COALESCE(am_metric.mantenimiento_programado_id::text, 'actividad:' || a_metric.id::text) AS canonical_id
+            SELECT DISTINCT am_metric.mantenimiento_programado_id::text AS canonical_id
+              FROM public.actividades_operativas a_metric
+              JOIN public.actividades_operativas_mantenimientos am_metric
+                ON am_metric.actividad_id = a_metric.id
+              JOIN public.mantenimientos_programados m_report
+                ON m_report.id = am_metric.mantenimiento_programado_id
+             WHERE a_metric.tipo = 'mantenimiento'
+               AND a_metric.estado IN ('pendiente_aprobacion', 'completada', 'aprobada', 'ejecutado')
+               AND a_metric.fecha_operacion BETWEEN $1::date AND $2::date
+               AND ${globallyCompletedMaintenanceForActivity}
+            UNION
+            SELECT DISTINCT 'actividad:' || a_metric.id::text AS canonical_id
               FROM public.actividades_operativas a_metric
               LEFT JOIN public.actividades_operativas_mantenimientos am_metric
                 ON am_metric.actividad_id = a_metric.id
              WHERE a_metric.tipo = 'mantenimiento'
+               AND am_metric.mantenimiento_programado_id IS NULL
                AND a_metric.estado IN ('pendiente_aprobacion', 'completada', 'aprobada', 'ejecutado')
                AND a_metric.fecha_operacion BETWEEN $1::date AND $2::date
             UNION
             SELECT m_metric.id::text AS canonical_id
               FROM public.mantenimientos_programados m_metric
-             WHERE m_metric.estado IN ('ejecutado', 'completado')
+             WHERE ${globallyCompletedMaintenanceForMetric}
                AND COALESCE(m_metric.fecha_realizado, m_metric.fecha_programada) BETWEEN $1::date AND $2::date
           ) reported_maintenance
         ) AS mantenimientos_reportados,
@@ -722,8 +788,11 @@ async function dashboardMetrics(payload: Payload = {}) {
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
          WHERE m.fecha_programada < (now() AT TIME ZONE 'America/Bogota')::date
-           AND m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
-           AND NOT (${submittedMaintenanceDelivery})) AS vencidos
+           AND (
+             m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+             OR (${partiallySubmittedMaintenanceDelivery})
+           )
+           AND NOT (${globallyCompletedMaintenance})) AS vencidos
     `,
     [startDate, endDate],
   );
@@ -746,20 +815,15 @@ async function dashboardMetrics(payload: Payload = {}) {
 
 async function overdueMaintenanceRows(payload: Payload = {}) {
   const values: unknown[] = [bogotaClock().date];
+  const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate();
+  const partiallySubmittedMaintenanceDelivery = partiallySubmittedMaintenanceDeliveryPredicate();
   const filters = [
     "m.fecha_programada < $1::date",
-    "m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')",
-    `NOT (EXISTS (
-      SELECT 1
-        FROM public.actividades_operativas_mantenimientos am_overdue
-        JOIN public.actividades_operativas_participantes ap_overdue
-          ON ap_overdue.actividad_id = am_overdue.actividad_id
-        JOIN public.actividades_operativas_entregas d_overdue
-          ON d_overdue.actividad_id = ap_overdue.actividad_id
-         AND d_overdue.participante_id = ap_overdue.id
-       WHERE am_overdue.mantenimiento_programado_id = m.id
-         AND d_overdue.estado IN ('enviada', 'aprobada')
-    ))`,
+    `(
+      m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+      OR (${partiallySubmittedMaintenanceDelivery})
+    )`,
+    `NOT (${globallyCompletedMaintenance})`,
   ];
   if (payload.clienteId) {
     values.push(payload.clienteId);
@@ -1239,10 +1303,30 @@ function applyOwnMaintenanceDelivery(maintenance: any, participants: any[], user
   return maintenance;
 }
 
+function reconcileMaintenanceDisplayState(maintenance: any, participants: any[]) {
+  const activeParticipants = participants.filter((participant) => participant.estado === "activo");
+  const anySubmitted = activeParticipants.some((participant) => ["enviada", "aprobada"].includes(String(participant.estado_reporte)));
+  const allSubmitted = activeParticipants.length > 0
+    && activeParticipants.every((participant) => ["enviada", "aprobada"].includes(String(participant.estado_reporte)));
+
+  // If an old row was closed after only one participant delivered, expose its
+  // effective state as pending so the remaining technicians can report. Keep
+  // historical rows with no delivery untouched; those can be legacy/manual
+  // closures and must not change financial history implicitly.
+  if (anySubmitted && !allSubmitted && ["ejecutado", "completado", "realizado"].includes(String(maintenance.estado))) {
+    maintenance.estado = "programado";
+    maintenance.fechaCierre = undefined;
+  } else if (allSubmitted) {
+    maintenance.estado = "realizado";
+  }
+  return maintenance;
+}
+
 async function enrichMaintenance(row: any, userId?: string) {
   const maintenance = mapMaintenance(row);
   const participants = await getMaintenanceParticipantRows(row.id);
   maintenance.participantes = participants;
+  reconcileMaintenanceDisplayState(maintenance, participants);
   if (userId) applyOwnMaintenanceDelivery(maintenance, participants, userId);
   return maintenance;
 }
@@ -1303,17 +1387,8 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   const hasUserScope = !adminView && (Boolean(payload.usuarioId) || !privileged);
   const values: unknown[] = [];
   const filters: string[] = ["m.estado <> 'cancelado'"];
-  const anySubmittedDelivery = `EXISTS (
-    SELECT 1
-      FROM public.actividades_operativas_mantenimientos am_scope
-      JOIN public.actividades_operativas_participantes ap_scope
-        ON ap_scope.actividad_id = am_scope.actividad_id
-      JOIN public.actividades_operativas_entregas d_scope
-        ON d_scope.actividad_id = ap_scope.actividad_id
-       AND d_scope.participante_id = ap_scope.id
-     WHERE am_scope.mantenimiento_programado_id = m.id
-       AND d_scope.estado IN ('enviada', 'aprobada')
-  )`;
+  const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate();
+  const partiallySubmittedMaintenanceDelivery = partiallySubmittedMaintenanceDeliveryPredicate();
   let userScopeParam: string | null = null;
 
   if (hasUserScope) {
@@ -1345,27 +1420,35 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
         )
         AND d_scope.estado IN ('enviada', 'aprobada')
    )` : null;
-  const displayDelivery = adminView ? anySubmittedDelivery : ownSubmittedDelivery;
-  const displayStateExpression = displayDelivery
-    ? `(CASE WHEN m.estado IN ('ejecutado', 'completado') OR ${displayDelivery} THEN 'ejecutado' ELSE m.estado END)`
-    : "m.estado";
+  // Admin lists represent the state of the whole maintenance. A technician
+  // can complete only their own delivery, but the global row remains pending
+  // until every active participant has delivered.
+  const displayDelivery = adminView ? globallyCompletedMaintenance : ownSubmittedDelivery;
+  const displayStateExpression = adminView
+    ? `(CASE WHEN ${globallyCompletedMaintenance} THEN 'ejecutado' ELSE m.estado END)`
+    : displayDelivery
+      ? `(CASE WHEN ${globallyCompletedMaintenance} OR ${displayDelivery} THEN 'ejecutado' ELSE m.estado END)`
+      : "m.estado";
 
   if (adminView) {
     if (view === "programados") {
       filters.push("m.estado IN ('programado', 'asignado', 'en_ejecucion', 'en_progreso')");
-      filters.push(`NOT (${anySubmittedDelivery})`);
+      filters.push(`NOT (${globallyCompletedMaintenance})`);
     } else if (view === "proximos") {
       values.push(today, addCalendarDays(today, 3));
       filters.push(`m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')`);
       filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
-      filters.push(`NOT (${anySubmittedDelivery})`);
+      filters.push(`NOT (${globallyCompletedMaintenance})`);
     } else if (view === "vencidos") {
       values.push(today);
-      filters.push("m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')");
       filters.push(`m.fecha_programada < $${values.length}::date`);
-      filters.push(`NOT (${anySubmittedDelivery})`);
+      filters.push(`(
+        m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+        OR (${partiallySubmittedMaintenanceDelivery})
+      )`);
+      filters.push(`NOT (${globallyCompletedMaintenance})`);
     } else if (view === "realizados") {
-      filters.push(`(m.estado IN ('ejecutado', 'completado') OR ${anySubmittedDelivery})`);
+      filters.push(`${globallyCompletedMaintenance}`);
       if (payload.periodoId) {
         values.push(payload.periodoId);
         filters.push(`EXISTS (
@@ -1382,23 +1465,26 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
       const status = String(payload.status);
       if (status === "vencido") {
         values.push(today);
-        filters.push("m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')");
         filters.push(`m.fecha_programada < $${values.length}::date`);
-        filters.push(`NOT (${anySubmittedDelivery})`);
+        filters.push(`(
+          m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+          OR (${partiallySubmittedMaintenanceDelivery})
+        )`);
+        filters.push(`NOT (${globallyCompletedMaintenance})`);
       } else if (status === "realizado" || status === "completado") {
-        filters.push(`(m.estado IN ('ejecutado', 'completado') OR ${anySubmittedDelivery})`);
+        filters.push(`${globallyCompletedMaintenance}`);
       } else if (["pendiente", "programado", "asignado", "en_ejecucion", "en_progreso"].includes(status)) {
         values.push(status);
         filters.push(`m.estado = $${values.length}`);
-        filters.push(`NOT (${anySubmittedDelivery})`);
+        filters.push(`NOT (${globallyCompletedMaintenance})`);
       }
     }
   } else if (category === "historial") {
     filters.push(ownSubmittedDelivery
-      ? `(m.estado IN ('ejecutado', 'completado') OR ${ownSubmittedDelivery})`
-      : "m.estado IN ('ejecutado', 'completado')");
+      ? `(${globallyCompletedMaintenance} OR ${ownSubmittedDelivery})`
+      : `${globallyCompletedMaintenance}`);
   } else {
-    filters.push("m.estado NOT IN ('ejecutado', 'completado')");
+    filters.push(`NOT (${globallyCompletedMaintenance})`);
     if (ownSubmittedDelivery) filters.push(`NOT (${ownSubmittedDelivery})`);
     if (category === "esta_semana") {
       values.push(week.start, week.end);
@@ -1517,7 +1603,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   let adminCounts: { todos: number; programados: number; proximos: number; vencidos: number; realizados: number } | undefined;
   if (adminView && payload.includeCounts === true) {
     const countValues: unknown[] = [today];
-    let realizedFilter = `(m.estado IN ('ejecutado', 'completado') OR ${anySubmittedDelivery})`;
+    let realizedFilter = globallyCompletedMaintenance;
     if (payload.periodoId) {
       countValues.push(payload.periodoId);
       realizedFilter += ` AND EXISTS (
@@ -1530,13 +1616,16 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
       `SELECT
         COUNT(*) FILTER (WHERE m.estado <> 'cancelado')::int AS todos,
         COUNT(*) FILTER (WHERE m.estado IN ('programado', 'asignado', 'en_ejecucion', 'en_progreso')
-          AND NOT (${anySubmittedDelivery}))::int AS programados,
+          AND NOT (${globallyCompletedMaintenance}))::int AS programados,
         COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
           AND m.fecha_programada BETWEEN $1::date AND ($1::date + INTERVAL '3 days')::date
-          AND NOT (${anySubmittedDelivery}))::int AS proximos,
-        COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+          AND NOT (${globallyCompletedMaintenance}))::int AS proximos,
+        COUNT(*) FILTER (WHERE (
+            m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
+            OR (${partiallySubmittedMaintenanceDelivery})
+          )
           AND m.fecha_programada < $1::date
-          AND NOT (${anySubmittedDelivery}))::int AS vencidos,
+          AND NOT (${globallyCompletedMaintenance}))::int AS vencidos,
         COUNT(*) FILTER (WHERE m.estado <> 'cancelado' AND ${realizedFilter})::int AS realizados
        FROM public.mantenimientos_programados m`,
       countValues,
@@ -1582,15 +1671,21 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
          AND ap_scope.tecnico_id = ${statusUserParam}
          AND d_scope.estado IN ('enviada', 'aprobada')
     )` : null;
+    const statusGloballyCompleted = globallyCompletedMaintenancePredicate();
+    const statusPartiallySubmitted = partiallySubmittedMaintenanceDeliveryPredicate();
+    const statusPendingBase = `(
+      m.estado IN ('pendiente', 'programado', 'asignado')
+      OR (${statusPartiallySubmitted})
+    )`;
     const statusPendingFilter = statusOwnSubmittedDelivery
-      ? `m.estado IN ('pendiente', 'programado', 'asignado') AND NOT (${statusOwnSubmittedDelivery})`
-      : "m.estado IN ('pendiente', 'programado', 'asignado')";
+      ? `${statusPendingBase} AND NOT (${statusOwnSubmittedDelivery})`
+      : statusPendingBase;
     const statusInProgressFilter = statusOwnSubmittedDelivery
       ? `m.estado IN ('en_progreso', 'en_ejecucion') AND NOT (${statusOwnSubmittedDelivery})`
       : "m.estado IN ('en_progreso', 'en_ejecucion')";
     const statusCompletedFilter = statusOwnSubmittedDelivery
-      ? `(m.estado IN ('ejecutado', 'completado') OR ${statusOwnSubmittedDelivery})`
-      : "m.estado IN ('ejecutado', 'completado')";
+      ? `(${statusGloballyCompleted} OR ${statusOwnSubmittedDelivery})`
+      : statusGloballyCompleted;
     const { rows: counts } = await dbQuery(
       `SELECT
         COUNT(*) FILTER (WHERE ${statusPendingFilter})::int AS pendientes,
@@ -2970,15 +3065,21 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
     }
 
     const { rows: deliveryCount } = await client.query(
-      `SELECT COUNT(*) FILTER (WHERE d.estado IN ('enviada','aprobada'))::int AS enviados,
-              COUNT(*)::int AS total
-          FROM public.actividades_operativas_participantes p
-          JOIN public.mantenimientos_programados_participantes mp
-            ON mp.mantenimiento_id = $2
-           AND mp.usuario_id = p.tecnico_id
-           AND mp.estado = 'activo'
-          LEFT JOIN public.actividades_operativas_entregas d ON d.actividad_id = p.actividad_id AND d.participante_id = p.id
-         WHERE p.actividad_id = $1`,
+      `SELECT
+          COUNT(DISTINCT mp.usuario_id)::int AS total,
+          COUNT(DISTINCT mp.usuario_id) FILTER (WHERE EXISTS (
+            SELECT 1
+              FROM public.actividades_operativas_participantes p_check
+              JOIN public.actividades_operativas_entregas d_check
+                ON d_check.actividad_id = p_check.actividad_id
+               AND d_check.participante_id = p_check.id
+             WHERE p_check.actividad_id = $1
+               AND p_check.tecnico_id = mp.usuario_id
+               AND d_check.estado IN ('enviada', 'aprobada')
+          ))::int AS enviados
+          FROM public.mantenimientos_programados_participantes mp
+         WHERE mp.mantenimiento_id = $2
+           AND mp.estado = 'activo'`,
       [activity.id, maintenanceId],
     );
     const complete = number(deliveryCount[0]?.total) > 0 && number(deliveryCount[0]?.enviados) >= number(deliveryCount[0]?.total);
@@ -2994,8 +3095,16 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
     );
     await client.query(
       `UPDATE public.mantenimientos_programados
-          SET estado = CASE WHEN $2::boolean THEN 'ejecutado' ELSE 'asignado' END,
-              fecha_realizado = CASE WHEN $2::boolean THEN COALESCE(fecha_realizado, $3::date) ELSE fecha_realizado END,
+          SET estado = CASE
+            WHEN $2::boolean THEN 'ejecutado'
+            WHEN estado IN ('ejecutado', 'completado') THEN 'asignado'
+            ELSE estado
+          END,
+              fecha_realizado = CASE
+                WHEN $2::boolean THEN COALESCE(fecha_realizado, $3::date)
+                WHEN estado IN ('ejecutado', 'completado') THEN NULL
+                ELSE fecha_realizado
+              END,
               updated_at = clock_timestamp()
         WHERE id = $1`,
       [maintenanceId, complete, executionDate],
