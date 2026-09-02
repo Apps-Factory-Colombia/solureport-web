@@ -968,7 +968,10 @@ export default function InformesPage() {
       setSelectedPeriodId((current) => {
         if (current === ALL_PERIODS_VALUE) return current;
         if (current && historicalData.periods.some((period) => period.id === current)) return current;
-        return getLatestPeriodId(historicalData.periods);
+        // Use the configured liquidation periods as the source of truth, just
+        // like Aprobaciones. Synthetic historical periods are only for manual
+        // navigation and must not change the default to an old/future record.
+        return getLatestPeriodId(p.length > 0 ? p : historicalData.periods);
       });
       hasLoadedDataRef.current = true;
     } finally {
