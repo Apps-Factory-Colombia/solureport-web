@@ -909,51 +909,70 @@ export default function InformesPage() {
     grupales: 1,
   });
   const reportsRequestRef = useRef(0);
+  const hasLoadedDataRef = useRef(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const loadData = useCallback(async () => {
     const requestId = ++reportsRequestRef.current;
-    setLoading(true);
-    Promise.allSettled([getReportesActividad(), getUsuarios(), getClientes(), getGrupos(), getConfiguracion(), getContratos(), getPeriodos()])
-      .then(([reportsResult, usersResult, clientsResult, groupsResult, settingsResult, contractsResult, periodsResult]) => {
-        const r = reportsResult.status === "fulfilled" ? reportsResult.value : [];
-        const u = usersResult.status === "fulfilled" ? usersResult.value : [];
-        const c = clientsResult.status === "fulfilled" ? clientsResult.value : [];
-        const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
-        const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
-        const ct = contractsResult.status === "fulfilled" ? contractsResult.value : [];
-        const p = periodsResult.status === "fulfilled" ? periodsResult.value : [];
+    const isInitialLoad = !hasLoadedDataRef.current;
+    if (isInitialLoad) setLoading(true);
+    else setRefreshing(true);
 
-        if (reportsResult.status === "rejected") console.error("Error cargando reportes en informes:", reportsResult.reason);
-        if (usersResult.status === "rejected") console.error("Error cargando usuarios en informes:", usersResult.reason);
-        if (clientsResult.status === "rejected") console.error("Error cargando clientes en informes:", clientsResult.reason);
-        if (groupsResult.status === "rejected") console.error("Error cargando grupos en informes:", groupsResult.reason);
-        if (settingsResult.status === "rejected") console.error("Error cargando configuración en informes:", settingsResult.reason);
-        if (contractsResult.status === "rejected") console.error("Error cargando contratos en informes:", contractsResult.reason);
-        if (periodsResult.status === "rejected") console.error("Error cargando períodos en informes:", periodsResult.reason);
+    try {
+      const [reportsResult, usersResult, clientsResult, groupsResult, settingsResult, contractsResult, periodsResult] = await Promise.allSettled([
+        getReportesActividad(),
+        getUsuarios(),
+        getClientes(),
+        getGrupos(),
+        getConfiguracion(),
+        getContratos(),
+        getPeriodos(),
+      ]);
+      const r = reportsResult.status === "fulfilled" ? reportsResult.value : [];
+      const u = usersResult.status === "fulfilled" ? usersResult.value : [];
+      const c = clientsResult.status === "fulfilled" ? clientsResult.value : [];
+      const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
+      const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
+      const ct = contractsResult.status === "fulfilled" ? contractsResult.value : [];
+      const p = periodsResult.status === "fulfilled" ? periodsResult.value : [];
 
-        if (requestId !== reportsRequestRef.current) return;
-        const normalizedReports = normalizeSharedVisitRowsForUi(r);
-        const reportsWithContractHistory = mergeContractMaintenanceHistory(normalizedReports, ct);
-        const historicalData = resolveHistoricalReportPeriods(reportsWithContractHistory, p);
-        setReports(historicalData.reports); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setContracts(ct); setPeriods(historicalData.periods);
-        setSelectedPeriodId((current) => {
-          if (current === ALL_PERIODS_VALUE) return current;
-          if (current && historicalData.periods.some((period) => period.id === current)) return current;
+      if (reportsResult.status === "rejected") console.error("Error cargando reportes en informes:", reportsResult.reason);
+      if (usersResult.status === "rejected") console.error("Error cargando usuarios en informes:", usersResult.reason);
+      if (clientsResult.status === "rejected") console.error("Error cargando clientes en informes:", clientsResult.reason);
+      if (groupsResult.status === "rejected") console.error("Error cargando grupos en informes:", groupsResult.reason);
+      if (settingsResult.status === "rejected") console.error("Error cargando configuración en informes:", settingsResult.reason);
+      if (contractsResult.status === "rejected") console.error("Error cargando contratos en informes:", contractsResult.reason);
+      if (periodsResult.status === "rejected") console.error("Error cargando períodos en informes:", periodsResult.reason);
 
-          const currentPeriod = p.find((period) => today >= period.fechaInicio && today <= period.fechaFin);
-          return currentPeriod?.id || historicalData.periods[0]?.id || ALL_PERIODS_VALUE;
-        });
-      })
-      .finally(() => {
-        if (requestId === reportsRequestRef.current) setLoading(false);
+      if (requestId !== reportsRequestRef.current) return;
+      const normalizedReports = normalizeSharedVisitRowsForUi(r);
+      const reportsWithContractHistory = mergeContractMaintenanceHistory(normalizedReports, ct);
+      const historicalData = resolveHistoricalReportPeriods(reportsWithContractHistory, p);
+      setReports(historicalData.reports);
+      setUsers(u);
+      setClients(c);
+      setGroups(g);
+      setCompanySettings(s);
+      setContracts(ct);
+      setPeriods(historicalData.periods);
+      setSelectedPeriodId((current) => {
+        if (current === ALL_PERIODS_VALUE) return current;
+        if (current && historicalData.periods.some((period) => period.id === current)) return current;
+
+        const currentPeriod = p.find((period) => today >= period.fechaInicio && today <= period.fechaFin);
+        return currentPeriod?.id || historicalData.periods[0]?.id || ALL_PERIODS_VALUE;
       });
+      hasLoadedDataRef.current = true;
+    } finally {
+      if (requestId === reportsRequestRef.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    }
   }, [today]);
 
   useEffect(() => {
-    loadData();
-    const onFocus = () => { void loadData(); };
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    void loadData();
   }, [loadData]);
 
   useEffect(() => {
@@ -2888,6 +2907,12 @@ export default function InformesPage() {
                   ? "Selecciona un período"
                   : "No hay períodos disponibles"}
           </Badge>
+          {refreshing && (
+            <span role="status" className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Actualizando datos...
+            </span>
+          )}
         </div>
 
         {hasSelectedPeriod && (
