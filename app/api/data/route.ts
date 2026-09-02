@@ -435,7 +435,17 @@ function canonicalParticipantId(id: unknown): string | null {
 
 async function activityRows(payload: Payload = {}) {
   const values: unknown[] = [];
-  const filters: string[] = [];
+  const filters: string[] = [
+    // During the legacy migration, scheduled maintenance rows were copied to
+    // actividades_operativas so the old screens could still find them. They
+    // are planning records, not technical reports, and must never appear in
+    // approvals, reports or financial exports as completed work.
+    `NOT (
+      a.tipo = 'mantenimiento'
+      AND COALESCE(a.metadata->>'migrated_from', '') = 'mantenimientos'
+      AND COALESCE(a.metadata->>'legacy_estado', '') IN ('programado', 'pendiente')
+    )`,
+  ];
   if (payload.startDate) { values.push(payload.startDate); filters.push(`a.fecha_operacion >= $${values.length}`); }
   if (payload.endDate) { values.push(payload.endDate); filters.push(`a.fecha_operacion <= $${values.length}`); }
   if (payload.periodoId) {

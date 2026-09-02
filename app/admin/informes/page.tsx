@@ -683,7 +683,11 @@ function getMaintenanceClientCost(report: ActivityReport, contracts: Maintenance
   return matchingMaintenance?.valorRecaudado || report.costoCliente || 0;
 }
 
-function mergeContractMaintenanceHistory(reports: ActivityReport[], contracts: MaintenanceContract[]) {
+function mergeContractMaintenanceHistory(
+  reports: ActivityReport[],
+  contracts: MaintenanceContract[],
+  referenceDate = getTodayDateString(),
+) {
   const existingMaintenanceIds = new Set(
     reports
       .filter((report) => report.tipo === "mantenimiento_preventivo" && report.mantenimientoId)
@@ -701,7 +705,7 @@ function mergeContractMaintenanceHistory(reports: ActivityReport[], contracts: M
       .filter((maintenance) => maintenance.estado === "realizado" || Boolean(maintenance.fechaRealizado) || maintenance.valorRecaudado > 0)
       .forEach((maintenance) => {
         const maintenanceDate = maintenance.fechaRealizado || maintenance.fechaProgramada;
-        if (!maintenanceDate || existingMaintenanceIds.has(maintenance.id)) return;
+        if (!maintenanceDate || maintenanceDate > referenceDate || existingMaintenanceIds.has(maintenance.id)) return;
 
         const dateKey = `${contract.clienteId}|${maintenanceDate}`;
         if (existingMaintenanceDateKeys.has(dateKey)) return;
@@ -946,7 +950,7 @@ export default function InformesPage() {
 
       if (requestId !== reportsRequestRef.current) return;
       const normalizedReports = normalizeSharedVisitRowsForUi(r);
-      const reportsWithContractHistory = mergeContractMaintenanceHistory(normalizedReports, ct);
+      const reportsWithContractHistory = mergeContractMaintenanceHistory(normalizedReports, ct, today);
       const historicalData = resolveHistoricalReportPeriods(reportsWithContractHistory, p);
       setReports(historicalData.reports);
       setUsers(u);
@@ -992,9 +996,10 @@ export default function InformesPage() {
       report.tipo === "mantenimiento_preventivo"
       && report.fecha >= monthStart
       && report.fecha <= monthEnd
+      && report.fecha <= today
     )));
     setMonthlyExportLoading(false);
-  }, [exportReportType, preventiveMonthlyMonth, reports]);
+  }, [exportReportType, preventiveMonthlyMonth, reports, today]);
 
   const selectedPeriod = useMemo(
     () => periods.find((period) => period.id === selectedPeriodId),
@@ -1771,6 +1776,7 @@ export default function InformesPage() {
   const renderActionButtons = (report: ActivityReport, detailReports?: ActivityReport[]) => (
     <div className="flex items-center gap-1">
       <Button
+        type="button"
         variant="ghost"
         size="icon"
         className="h-8 w-8 text-muted-foreground hover:text-foreground"
@@ -1783,6 +1789,7 @@ export default function InformesPage() {
       </Button>
       {canSendReportEmail(report) && (
         <Button
+          type="button"
           variant="ghost"
           size="icon"
           className="h-8 w-8 text-muted-foreground hover:text-cyan-neon"
@@ -1800,17 +1807,20 @@ export default function InformesPage() {
         </Button>
       )}
       <Button
+        type="button"
         variant="ghost"
         size="icon"
         className="h-8 w-8 text-muted-foreground hover:text-gold"
         onClick={(event) => {
+          event.preventDefault();
           event.stopPropagation();
-          handleDownloadPDF(report);
+          void handleDownloadPDF(report);
         }}
       >
         <Download className="h-4 w-4" />
       </Button>
       <Button
+        type="button"
         variant="ghost"
         size="icon"
         className="h-8 w-8 text-muted-foreground hover:text-destructive"
@@ -3102,7 +3112,9 @@ export default function InformesPage() {
                             </SelectContent>
                           </Select>
                           <p className="text-[11px] text-muted-foreground">
-                            {monthlyExportLoading ? "Cargando fuente consolidada..." : `Reporte mensual completo: ${preventiveMonthlyRangeLabel}.`}
+                            {monthlyExportLoading
+                              ? "Cargando fuente consolidada..."
+                              : `Reporte mensual de informes entregados hasta hoy: ${preventiveMonthlyRangeLabel}.`}
                           </p>
                         </div>
                       )}
@@ -3223,29 +3235,29 @@ export default function InformesPage() {
                       <span className="px-2 text-xs font-medium text-muted-foreground">Acciones:</span>
                     {exportReportType === "mantenimiento_preventivo" ? (
                       <>
-                        <Button type="button" size="sm" className="h-9 gap-2 rounded-lg bg-cyan-neon px-3 font-semibold text-black shadow-sm shadow-cyan-neon/20 hover:bg-cyan-neon/90" onClick={handleExportPreventiveCutClientSummary} disabled={exportingPreventiveCutClientSummary}>
+                        <Button type="button" size="sm" className="h-9 gap-2 rounded-lg bg-cyan-neon px-3 font-semibold text-black shadow-sm shadow-cyan-neon/20 hover:bg-cyan-neon/90" onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleExportPreventiveCutClientSummary(); }} disabled={exportingPreventiveCutClientSummary}>
                           {exportingPreventiveCutClientSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <DollarSign className="h-4 w-4" />}
                           Cobro del corte
                           <span className="hidden border-l border-black/20 pl-2 text-xs font-normal sm:inline">{formatCurrency(selectedPreventiveClientTotal)}</span>
                         </Button>
-                        <Button type="button" size="sm" variant="outline" className="h-9 gap-2 rounded-lg border-gold/40 bg-gold/5 px-3 text-gold hover:bg-gold/10 hover:text-gold" onClick={handleExportPreventiveMonthlySummary} disabled={exportingPreventiveMonthlySummary || monthlyExportLoading}>
+                        <Button type="button" size="sm" variant="outline" className="h-9 gap-2 rounded-lg border-gold/40 bg-gold/5 px-3 text-gold hover:bg-gold/10 hover:text-gold" onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleExportPreventiveMonthlySummary(); }} disabled={exportingPreventiveMonthlySummary || monthlyExportLoading}>
                           {exportingPreventiveMonthlySummary || monthlyExportLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                           Reporte mensual
                           <span className="hidden border-l border-gold/30 pl-2 text-xs font-normal sm:inline">{preventiveMonthlyRangeLabel}</span>
                         </Button>
-                        <Button type="button" size="sm" variant="outline" className="h-9 gap-2 rounded-lg border-border/70 bg-secondary/30 px-3 text-foreground hover:bg-secondary/70" onClick={handleExportPreventiveAnnualSummary} disabled={exportingPreventiveAnnualSummary}>
+                        <Button type="button" size="sm" variant="outline" className="h-9 gap-2 rounded-lg border-border/70 bg-secondary/30 px-3 text-foreground hover:bg-secondary/70" onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleExportPreventiveAnnualSummary(); }} disabled={exportingPreventiveAnnualSummary}>
                           {exportingPreventiveAnnualSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4 text-gold" />}
                           Resumen anual
                         </Button>
                       </>
                     ) : (
-                      <Button type="button" size="sm" className="h-9 gap-2 rounded-lg bg-gold px-3 font-semibold text-black hover:bg-gold/90" onClick={handleExportTechnicalSummary} disabled={exportingTechnicalSummary}>
+                      <Button type="button" size="sm" className="h-9 gap-2 rounded-lg bg-gold px-3 font-semibold text-black hover:bg-gold/90" onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleExportTechnicalSummary(); }} disabled={exportingTechnicalSummary}>
                         {exportingTechnicalSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                         Generar {exportReportType === "visita_tecnica" ? "costos técnicos" : getExportTitleLabel(exportReportType).toLowerCase()}
                       </Button>
                     )}
                     {exportReportType === "visita_tecnica" && (
-                      <Button type="button" size="sm" variant="outline" className="h-9 gap-2 rounded-lg border-cyan-neon/40 bg-cyan-neon/5 px-3 text-cyan-neon hover:bg-cyan-neon/10 hover:text-cyan-neon" onClick={handleExportClientSummary} disabled={exportingClientSummary}>
+                      <Button type="button" size="sm" variant="outline" className="h-9 gap-2 rounded-lg border-cyan-neon/40 bg-cyan-neon/5 px-3 text-cyan-neon hover:bg-cyan-neon/10 hover:text-cyan-neon" onClick={(event) => { event.preventDefault(); event.stopPropagation(); handleExportClientSummary(); }} disabled={exportingClientSummary}>
                         {exportingClientSummary ? <Loader2 className="h-4 w-4 animate-spin" /> : <DollarSign className="h-4 w-4" />}
                         Cobro cliente
                       </Button>
