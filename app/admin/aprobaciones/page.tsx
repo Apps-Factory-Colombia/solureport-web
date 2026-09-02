@@ -1593,9 +1593,10 @@ export default function AprobacionesPage() {
           ? applySharedGroupBaseToReport(report, nextCost)
           : { ...report, costoActividad: nextCost };
       }
-      const approvalTargets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
-      await Promise.all(approvalTargets.map(async (item) => {
-        await updateEstadoAprobacion(item.id, "aprobado");
+      const notificationTargets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
+      const approvalTargets = report.tipo === "mantenimiento_preventivo" ? [report] : notificationTargets;
+      await Promise.all(approvalTargets.map((item) => updateEstadoAprobacion(item.id, "aprobado")));
+      await Promise.all(notificationTargets.map(async (item) => {
         try {
           await sendApprovalEmail(item);
         } catch (emailErr) {
@@ -1609,8 +1610,8 @@ export default function AprobacionesPage() {
           tipo: "aprobacion",
           datos: { reporteId: item.id, estado: "aprobado" },
         });
-        updateReportStatusInState(item.id, "aprobado");
       }));
+      notificationTargets.forEach((item) => updateReportStatusInState(item.id, "aprobado"));
       setDetailOpen(false);
       setSelectedReport(null);
     } catch (err) {
@@ -1647,9 +1648,10 @@ export default function AprobacionesPage() {
           ? applySharedGroupBaseToReport(report, nextCost)
           : { ...report, costoActividad: nextCost };
       }
-      const rejectTargets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
-      await Promise.all(rejectTargets.map(async (item) => {
-        await updateEstadoAprobacion(item.id, "rechazado");
+      const notificationTargets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
+      const rejectTargets = report.tipo === "mantenimiento_preventivo" ? [report] : notificationTargets;
+      await Promise.all(rejectTargets.map((item) => updateEstadoAprobacion(item.id, "rechazado")));
+      await Promise.all(notificationTargets.map(async (item) => {
         const tipo = getTipoConfig(String(item.tipo));
         await createNotificacion({
           usuarioId: item.tecnicoId,
@@ -1658,8 +1660,8 @@ export default function AprobacionesPage() {
           tipo: "aprobacion",
           datos: { reporteId: item.id, estado: "rechazado" },
         });
-        updateReportStatusInState(item.id, "rechazado");
       }));
+      notificationTargets.forEach((item) => updateReportStatusInState(item.id, "rechazado"));
       setDetailOpen(false);
       setSelectedReport(null);
     } catch (err) {
@@ -1674,7 +1676,11 @@ export default function AprobacionesPage() {
     setProcessing(true);
     setProcessingLabel("Revirtiendo aprobación..." );
     try {
-      const targets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
+      const targets = report.tipo === "mantenimiento_preventivo"
+        ? [report]
+        : usesSharedBasePricing(report)
+          ? getSharedReportsForReport(report)
+          : [report];
       await Promise.all(targets.map(async (item) => {
         await updateEstadoAprobacion(item.id, "pendiente");
         updateReportStatusInState(item.id, "pendiente");
@@ -1697,7 +1703,11 @@ export default function AprobacionesPage() {
     setProcessing(true);
     setProcessingLabel("Eliminando actividad..." );
     try {
-      const targets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
+      const targets = report.tipo === "mantenimiento_preventivo"
+        ? [report]
+        : usesSharedBasePricing(report)
+          ? getSharedReportsForReport(report)
+          : [report];
       for (const item of targets) {
         await deleteReporteActividadAdmin(item.id);
       }

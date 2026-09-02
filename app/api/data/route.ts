@@ -3213,14 +3213,6 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
 
     const { rows: reportGroupRows } = await client.query("SELECT lider_id FROM public.grupos_trabajo WHERE id = $1", [reportGroupId]);
     const leaderId = reportGroupRows[0]?.lider_id || maintenance.mantenimiento_lider_id || user.id;
-    for (const item of activityParticipants) {
-      await client.query(
-        `INSERT INTO public.actividades_operativas_aprobaciones (actividad_id, participante_id, revisor_id, estado)
-         VALUES ($1,$2,$3,'pendiente')
-         ON CONFLICT (actividad_id, participante_id) DO NOTHING`,
-        [activity.id, item.id, leaderId],
-      );
-    }
 
     const periodDate = executionDate;
     const { rows: periodRows } = await client.query(
@@ -3327,6 +3319,32 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
     );
     const complete = number(deliveryCount[0]?.total) > 0 && number(deliveryCount[0]?.enviados) >= number(deliveryCount[0]?.total);
     const nextActivityState = complete ? "pendiente_aprobacion" : "en_progreso";
+    if (complete) {
+      await client.query(
+        `INSERT INTO public.actividades_operativas_aprobaciones
+          (actividad_id, participante_id, revisor_id, estado)
+         SELECT $1, NULL, $2, 'pendiente'
+          WHERE NOT EXISTS (
+            SELECT 1
+              FROM public.actividades_operativas_aprobaciones
+             WHERE actividad_id = $1 AND participante_id IS NULL
+          )`,
+        [activity.id, leaderId],
+      );
+      await client.query(
+        `UPDATE public.actividades_operativas_aprobaciones
+            SET estado = 'pendiente', revisado_en = NULL, updated_at = clock_timestamp()
+          WHERE actividad_id = $1 AND participante_id IS NULL`,
+        [activity.id],
+      );
+    } else {
+      await client.query(
+        `UPDATE public.actividades_operativas_aprobaciones
+            SET estado = 'pendiente', revisado_en = NULL, updated_at = clock_timestamp()
+          WHERE actividad_id = $1 AND participante_id IS NULL AND estado <> 'pendiente'`,
+        [activity.id],
+      );
+    }
     await client.query(
       `UPDATE public.actividades_operativas
           SET estado = $2,
@@ -3383,8 +3401,105 @@ async function updateActivityValues(payload: Payload) {
   return true;
 }
 
+async function updateMaintenanceApproval(activityId: string, state: "aprobada" | "rechazada" | "pendiente", comment: string | null, user: UserContext) {
+  return withTransaction(async (client) => {
+    const { rows: activityRows } = await client.query(
+      `SELECT a.id, a.tipo, a.grupo_id, g.lider_id
+         FROM public.actividades_operativas a
+         LEFT JOIN public.grupos_trabajo g ON g.id = a.grupo_id
+        WHERE a.id = $1 AND a.tipo = 'mantenimiento'
+        FOR UPDATE OF a`,
+      [activityId],
+    );
+    const activity = activityRows[0];
+    if (!activity) throw new Error("No se encontró el mantenimiento para aprobar.");
+
+    const reviewerId = user.id || activity.lider_id;
+    const { rows: existingApprovals } = await client.query(
+      `SELECT id, participante_id
+         FROM public.actividades_operativas_aprobaciones
+        WHERE actividad_id = $1
+        ORDER BY participante_id NULLS FIRST, updated_at DESC NULLS LAST, id`,
+      [activityId],
+    );
+    const existingGlobal = existingApprovals.find((item: any) => item.participante_id == null);
+    let globalApprovalId = existingGlobal?.id;
+
+    if (globalApprovalId) {
+      await client.query(
+        `UPDATE public.actividades_operativas_aprobaciones
+            SET revisor_id = $2,
+                estado = $3,
+                comentario = $4,
+                revisado_en = CASE WHEN $3 = 'pendiente' THEN NULL ELSE clock_timestamp() END,
+                updated_at = clock_timestamp()
+          WHERE id = $1`,
+        [globalApprovalId, reviewerId, state, comment],
+      );
+    } else {
+      const { rows } = await client.query(
+        `INSERT INTO public.actividades_operativas_aprobaciones
+          (actividad_id, participante_id, revisor_id, estado, comentario, revisado_en)
+         VALUES ($1, NULL, $2, $3, $4, CASE WHEN $3 = 'pendiente' THEN NULL ELSE clock_timestamp() END)
+         RETURNING id`,
+        [activityId, reviewerId, state, comment],
+      );
+      globalApprovalId = rows[0]?.id;
+    }
+
+    const legacyApprovalIds = existingApprovals
+      .filter((item: any) => item.participante_id != null && item.id !== globalApprovalId)
+      .map((item: any) => item.id);
+    if (legacyApprovalIds.length > 0 && globalApprovalId) {
+      await client.query(
+        `INSERT INTO public.lote_aprobacion_items (lote_id, aprobacion_id)
+         SELECT DISTINCT lote_id, $1
+           FROM public.lote_aprobacion_items
+          WHERE aprobacion_id = ANY($2::uuid[])
+         ON CONFLICT DO NOTHING`,
+        [globalApprovalId, legacyApprovalIds],
+      );
+      await client.query("DELETE FROM public.lote_aprobacion_items WHERE aprobacion_id = ANY($1::uuid[])", [legacyApprovalIds]);
+      await client.query("DELETE FROM public.actividades_operativas_aprobaciones WHERE id = ANY($1::uuid[])", [legacyApprovalIds]);
+    }
+
+    await client.query(
+      `UPDATE public.actividades_operativas_entregas
+          SET estado = $2, updated_at = clock_timestamp()
+        WHERE actividad_id = $1`,
+      [activityId, state === "aprobada" ? "aprobada" : state === "rechazada" ? "rechazada" : "enviada"],
+    );
+    await client.query(
+      `UPDATE public.actividades_operativas_participantes
+          SET estado_reporte = $2, updated_at = clock_timestamp()
+        WHERE actividad_id = $1`,
+      [activityId, state === "aprobada" ? "aprobada" : state === "rechazada" ? "rechazada" : "enviada"],
+    );
+    await client.query(
+      `UPDATE public.liquidacion_items
+          SET estado = CASE WHEN $2 = 'aprobada' THEN 'aprobado' WHEN $2 = 'rechazada' THEN 'anulado' ELSE 'pendiente' END,
+              updated_at = clock_timestamp()
+        WHERE actividad_id = $1`,
+      [activityId, state],
+    );
+    await client.query(
+      `UPDATE public.actividades_operativas
+          SET estado = $2, updated_at = clock_timestamp(), version = version + 1
+        WHERE id = $1`,
+      [activityId, state === "aprobada" ? "aprobada" : state === "rechazada" ? "rechazada" : "pendiente_aprobacion"],
+    );
+
+    return true;
+  });
+}
+
 async function updateApproval(payload: Payload, user: UserContext) {
   const activityId = canonicalActivityId(payload.id || payload.actividadOperativaId);
+  const { rows: activityTypeRows } = await dbQuery("SELECT tipo FROM public.actividades_operativas WHERE id = $1", [activityId]);
+  if (activityTypeRows[0]?.tipo === "mantenimiento") {
+    const state = payload.estado === "aprobado" ? "aprobada" : payload.estado === "rechazado" ? "rechazada" : "pendiente";
+    return updateMaintenanceApproval(activityId, state, payload.comentario || null, user);
+  }
   const participantId = payload.participanteId || canonicalParticipantId(payload.id);
   const { rows: participantRows } = await dbQuery("SELECT id FROM public.actividades_operativas_participantes WHERE actividad_id = $1 AND ($2::uuid IS NULL OR id = $2::uuid) ORDER BY rol_participacion = 'principal' DESC LIMIT 1", [activityId, participantId || null]);
   const participant = participantRows[0];
