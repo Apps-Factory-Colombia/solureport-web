@@ -19,6 +19,14 @@ const numberToDay = ["", "lunes", "martes", "miercoles", "jueves", "viernes", "s
 // (normalmente UTC), por lo que CURRENT_DATE no es seguro para permisos de
 // grupos ni para vigencia de sus miembros.
 const BOGOTA_DATE_SQL = "(now() AT TIME ZONE 'America/Bogota')::date";
+const BOGOTA_NOW_SQL = "(now() AT TIME ZONE 'America/Bogota')";
+
+// La fecha de vencimiento operativa incluye la hora programada. Cuando una
+// fila histórica no tiene hora, se considera vigente hasta el final de ese
+// día, que conserva el comportamiento anterior basado únicamente en fecha.
+function maintenanceDueAtSql(scheduleAlias = "m") {
+  return `(${scheduleAlias}.fecha_programada::timestamp + COALESCE(${scheduleAlias}.hora_programada, TIME '23:59:59'))`;
+}
 
 function number(value: unknown, fallback = 0): number {
   const parsed = Number(value);
@@ -748,6 +756,7 @@ function globallyCompletedMaintenancePredicate(scheduleAlias = "m") {
 
 async function dashboardMetrics(payload: Payload = {}) {
   const clock = bogotaClock();
+  const maintenanceDueAt = maintenanceDueAtSql();
   let startDate = dateOnly(payload.startDate) || currentMonthRange(clock.date).startDate;
   let endDate = dateOnly(payload.endDate) || currentMonthRange(clock.date).endDate;
 
@@ -782,8 +791,9 @@ async function dashboardMetrics(payload: Payload = {}) {
   const { rows } = await dbQuery(
     `SELECT
        (SELECT COUNT(*)::int
-           FROM public.mantenimientos_programados m
+         FROM public.mantenimientos_programados m
          WHERE m.fecha_programada BETWEEN $1::date AND $2::date
+           AND ${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}
            AND m.estado IN ('programado', 'asignado')
            AND NOT (${globallyCompletedMaintenance})) AS programados,
        (SELECT COUNT(*)::int
@@ -838,8 +848,8 @@ async function dashboardMetrics(payload: Payload = {}) {
           FROM public.usuarios u
          WHERE u.rol = 'tecnico' AND u.estado = 'activo') AS tecnicos_activos,
        (SELECT COUNT(*)::int
-          FROM public.mantenimientos_programados m
-         WHERE m.fecha_programada < (now() AT TIME ZONE 'America/Bogota')::date
+         FROM public.mantenimientos_programados m
+         WHERE ${maintenanceDueAt} < ${BOGOTA_NOW_SQL}
            AND (
              m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
              OR (${partiallySubmittedMaintenanceDelivery})
@@ -866,11 +876,13 @@ async function dashboardMetrics(payload: Payload = {}) {
 }
 
 async function overdueMaintenanceRows(payload: Payload = {}) {
-  const values: unknown[] = [bogotaClock().date];
+  const today = bogotaClock().date;
+  const values: unknown[] = [];
   const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate();
   const partiallySubmittedMaintenanceDelivery = partiallySubmittedMaintenanceDeliveryPredicate();
+  const maintenanceDueAt = maintenanceDueAtSql();
   const filters = [
-    "m.fecha_programada < $1::date",
+    `${maintenanceDueAt} < ${BOGOTA_NOW_SQL}`,
     `(
       m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
       OR (${partiallySubmittedMaintenanceDelivery})
@@ -903,11 +915,11 @@ async function overdueMaintenanceRows(payload: Payload = {}) {
        LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
        LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
       WHERE ${filters.join(" AND ")}
-      ORDER BY m.fecha_programada ASC, m.created_at ASC` ,
+      ORDER BY ${maintenanceDueAt} DESC, m.created_at DESC` ,
     values,
   );
   return {
-    today: values[0],
+    today,
     generatedAt: new Date().toISOString(),
     total: rows.length,
     items: rows.map(mapMaintenance),
@@ -1604,6 +1616,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   const filters: string[] = ["m.estado <> 'cancelado'"];
   const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate();
   const partiallySubmittedMaintenanceDelivery = partiallySubmittedMaintenanceDeliveryPredicate();
+  const maintenanceDueAt = maintenanceDueAtSql();
   let userScopeParam: string | null = null;
 
   if (hasUserScope) {
@@ -1648,15 +1661,16 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   if (adminView) {
     if (view === "programados") {
       filters.push("m.estado IN ('programado', 'asignado', 'en_ejecucion', 'en_progreso')");
+      filters.push(`${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}`);
       filters.push(`NOT (${globallyCompletedMaintenance})`);
     } else if (view === "proximos") {
       values.push(today, addCalendarDays(today, 3));
       filters.push(`m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')`);
       filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+      filters.push(`${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}`);
       filters.push(`NOT (${globallyCompletedMaintenance})`);
     } else if (view === "vencidos") {
-      values.push(today);
-      filters.push(`m.fecha_programada < $${values.length}::date`);
+      filters.push(`${maintenanceDueAt} < ${BOGOTA_NOW_SQL}`);
       filters.push(`(
         m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
         OR (${partiallySubmittedMaintenanceDelivery})
@@ -1679,8 +1693,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     } else if (payload.status) {
       const status = String(payload.status);
       if (status === "vencido") {
-        values.push(today);
-        filters.push(`m.fecha_programada < $${values.length}::date`);
+        filters.push(`${maintenanceDueAt} < ${BOGOTA_NOW_SQL}`);
         filters.push(`(
           m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
           OR (${partiallySubmittedMaintenanceDelivery})
@@ -1704,12 +1717,12 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     if (category === "esta_semana") {
       values.push(week.start, week.end);
       filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+      filters.push(`${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}`);
     } else if (category === "proximos") {
       values.push(week.end);
       filters.push(`m.fecha_programada > $${values.length}::date`);
     } else {
-      values.push(today);
-      filters.push(`m.fecha_programada < $${values.length}::date`);
+      filters.push(`${maintenanceDueAt} < ${BOGOTA_NOW_SQL}`);
     }
   }
 
@@ -1753,16 +1766,15 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     ? view === "vencidos" || view === "realizados"
       ? view === "realizados"
         ? "COALESCE(m.fecha_realizado, m.fecha_programada) DESC NULLS LAST, m.created_at DESC, m.id DESC"
-        : "m.fecha_programada DESC NULLS LAST, m.created_at DESC, m.id DESC"
+        : `${maintenanceDueAt} DESC NULLS LAST, m.created_at DESC, m.id DESC`
       : view === "calendario"
         ? "m.fecha_programada ASC NULLS LAST, m.created_at ASC, m.id ASC"
-        : `CASE WHEN m.fecha_programada >= (now() AT TIME ZONE 'America/Bogota')::date THEN 0 ELSE 1 END,
-           CASE WHEN m.fecha_programada >= (now() AT TIME ZONE 'America/Bogota')::date THEN m.fecha_programada END ASC NULLS LAST,
-           CASE WHEN m.fecha_programada < (now() AT TIME ZONE 'America/Bogota')::date THEN m.fecha_programada END DESC NULLS LAST,
-           m.created_at DESC, m.id DESC`
-    : category === "vencidos" || category === "historial"
-      ? "m.fecha_programada DESC NULLS LAST, m.created_at DESC, m.id DESC"
-      : "m.fecha_programada ASC NULLS LAST, m.created_at ASC, m.id ASC";
+        : `${maintenanceDueAt} ASC NULLS LAST, m.created_at ASC, m.id ASC`
+    : category === "vencidos"
+      ? `${maintenanceDueAt} DESC NULLS LAST, m.created_at DESC, m.id DESC`
+      : category === "historial"
+        ? "COALESCE(m.fecha_realizado, m.fecha_programada) DESC NULLS LAST, m.created_at DESC, m.id DESC"
+        : `${maintenanceDueAt} ASC NULLS LAST, m.created_at ASC, m.id ASC`;
 
   const pageValues = [...values, pageSize, offset];
   const limitParam = pageValues.length - 1;
@@ -1831,15 +1843,17 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
       `SELECT
         COUNT(*) FILTER (WHERE m.estado <> 'cancelado')::int AS todos,
         COUNT(*) FILTER (WHERE m.estado IN ('programado', 'asignado', 'en_ejecucion', 'en_progreso')
+          AND ${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}
           AND NOT (${globallyCompletedMaintenance}))::int AS programados,
         COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
           AND m.fecha_programada BETWEEN $1::date AND ($1::date + INTERVAL '3 days')::date
+          AND ${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}
           AND NOT (${globallyCompletedMaintenance}))::int AS proximos,
         COUNT(*) FILTER (WHERE (
             m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
             OR (${partiallySubmittedMaintenanceDelivery})
           )
-          AND m.fecha_programada < $1::date
+          AND ${maintenanceDueAt} < ${BOGOTA_NOW_SQL}
           AND NOT (${globallyCompletedMaintenance}))::int AS vencidos,
         COUNT(*) FILTER (WHERE m.estado <> 'cancelado' AND ${realizedFilter})::int AS realizados
        FROM public.mantenimientos_programados m`,

@@ -144,15 +144,34 @@ function getMonthInputValue(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function getBogotaDateInput() {
+function getBogotaClockInput() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Bogota",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
   }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.year}-${values.month}-${values.day}`;
+  return {
+    date: `${values.year}-${values.month}-${values.day}`,
+    minutes: Number(values.hour) * 60 + Number(values.minute),
+  };
+}
+
+function isMaintenanceDue(dateValue: string, timeValue?: string) {
+  if (!dateValue) return false;
+  const clock = getBogotaClockInput();
+  if (dateValue < clock.date) return true;
+  if (dateValue > clock.date) return false;
+
+  // Sin hora, el vencimiento ocurre al finalizar el día.
+  const match = String(timeValue || "").match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return false;
+  const scheduledMinutes = Number(match[1]) * 60 + Number(match[2]);
+  return scheduledMinutes <= clock.minutes;
 }
 
 interface MiniCalendarProps {
@@ -656,14 +675,18 @@ export default function MantenimientosPage() {
       setScheduleOpen(false);
       setSchedulingMaint(null);
       const scheduledMonth = fecha.slice(0, 7);
+      const scheduledIsOverdue = isMaintenanceDue(fecha, scheduleTime);
       setProgramadosMonthFilter(scheduledMonth);
-      setPageByTab((current) => ({ ...current, programados: 1, proximos: 1, lista: 1 }));
-      setActiveTab("programados");
+      const targetTab: MaintenanceAdminTab = scheduledIsOverdue ? "vencidos" : "programados";
+      setPageByTab((current) => ({ ...current, [targetTab]: 1, programados: 1, proximos: 1, lista: 1 }));
+      setActiveTab(targetTab);
       setNotification({
         type: "success",
-        message: `Mantenimiento programado correctamente. Se actualizó el cronograma del mantenimiento seleccionado y se muestra en Programados (${scheduledMonth}).`,
+        message: scheduledIsOverdue
+          ? `Mantenimiento actualizado correctamente. Como la fecha y hora ya pasaron, se muestra en Vencidos (${scheduledMonth}).`
+          : `Mantenimiento programado correctamente. Se muestra en Programados (${scheduledMonth}).`,
       });
-      await loadMaintenancePage("programados", 1, scheduledMonth);
+      await loadMaintenancePage(targetTab, 1, scheduledMonth);
     } catch (err) {
       console.error("Error programando mantenimiento:", err);
       setNotification({
@@ -924,7 +947,10 @@ export default function MantenimientosPage() {
       const status = String(saved.estado || data.estado || "programado").toLowerCase();
       const isCompleted = status === "realizado" || status === "completado";
       const isOverdue = Boolean(saved.fechaProgramada || data.fechaProgramada)
-        && String(saved.fechaProgramada || data.fechaProgramada) < getBogotaDateInput()
+        && isMaintenanceDue(
+          String(saved.fechaProgramada || data.fechaProgramada),
+          saved.horaProgramada || data.horaProgramada,
+        )
         && !isCompleted;
       const targetTab: MaintenanceAdminTab = isOverdue
         ? "vencidos"
