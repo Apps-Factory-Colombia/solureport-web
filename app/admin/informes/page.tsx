@@ -82,6 +82,12 @@ const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 const TABLE_PAGE_SIZE = 10;
 const ALL_PERIODS_VALUE = "__todos_los_periodos__";
 
+function getLatestPeriodId(periods: LiquidationPeriod[]) {
+  return [...periods]
+    .sort((left, right) => right.fechaFin.localeCompare(left.fechaFin) || right.fechaInicio.localeCompare(left.fechaInicio))[0]?.id
+    || ALL_PERIODS_VALUE;
+}
+
 type ReportTableKey = "preventivos" | "visitas" | "recorridos" | "grupales";
 type PreventiveExportCostMode = "tecnico" | "cliente";
 type GroupedActivityRow = {
@@ -865,7 +871,7 @@ export default function InformesPage() {
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
-  const [selectedPeriodId, setSelectedPeriodId] = useState(ALL_PERIODS_VALUE);
+  const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [monthlyExportReports, setMonthlyExportReports] = useState<ActivityReport[]>([]);
@@ -962,9 +968,7 @@ export default function InformesPage() {
       setSelectedPeriodId((current) => {
         if (current === ALL_PERIODS_VALUE) return current;
         if (current && historicalData.periods.some((period) => period.id === current)) return current;
-
-        const currentPeriod = p.find((period) => today >= period.fechaInicio && today <= period.fechaFin);
-        return currentPeriod?.id || historicalData.periods[0]?.id || ALL_PERIODS_VALUE;
+        return getLatestPeriodId(historicalData.periods);
       });
       hasLoadedDataRef.current = true;
     } finally {
@@ -2837,7 +2841,7 @@ export default function InformesPage() {
             <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Corte / período de trabajo</p>
             <Select value={selectedPeriodId || undefined} onValueChange={setSelectedPeriodId}>
               <SelectTrigger className="w-full bg-secondary/50 border-border/50">
-                <SelectValue placeholder="Todos los períodos" />
+              <SelectValue placeholder="Último período" />
               </SelectTrigger>
               <SelectContent className="bg-card border-border">
                 <SelectItem value={ALL_PERIODS_VALUE}>Todos los períodos</SelectItem>

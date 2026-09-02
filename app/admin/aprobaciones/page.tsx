@@ -87,6 +87,12 @@ import {
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 const ALL_PERIODS_VALUE = "__todos_los_periodos__";
 
+function getLatestPeriodId(periods: LiquidationPeriod[]) {
+  return [...periods]
+    .sort((left, right) => right.fechaFin.localeCompare(left.fechaFin) || right.fechaInicio.localeCompare(left.fechaInicio))[0]?.id
+    || ALL_PERIODS_VALUE;
+}
+
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
     style: "currency",
@@ -641,7 +647,7 @@ export default function AprobacionesPage() {
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
-  const [selectedPeriodId, setSelectedPeriodId] = useState(ALL_PERIODS_VALUE);
+  const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [activeTab, setActiveTab] = useState("preventivos");
   const [search, setSearch] = useState("");
@@ -707,7 +713,7 @@ export default function AprobacionesPage() {
       setSelectedPeriodId((current) => {
         if (current === ALL_PERIODS_VALUE) return current;
         if (current && p.some((period) => period.id === current)) return current;
-        return ALL_PERIODS_VALUE;
+        return getLatestPeriodId(p);
       });
     } finally {
       setLoading(false);
@@ -2290,7 +2296,7 @@ export default function AprobacionesPage() {
           </div>
           <Select value={selectedPeriodId || undefined} onValueChange={setSelectedPeriodId}>
             <SelectTrigger className="w-56 bg-secondary/50 border-border/50">
-              <SelectValue placeholder="Todos los períodos" />
+              <SelectValue placeholder="Último período" />
             </SelectTrigger>
             <SelectContent className="bg-card border-border">
               <SelectItem value={ALL_PERIODS_VALUE}>Todos los períodos</SelectItem>
