@@ -479,6 +479,12 @@ async function activityRows(payload: Payload = {}) {
             ar.inicio_recorrido, ar.fin_recorrido,
             COALESCE((SELECT json_agg(json_build_object(
               'id', p.id, 'tecnicoId', p.tecnico_id, 'rol', p.rol_participacion,
+              'mantenimientoParticipanteId', (SELECT mp.id
+                FROM public.mantenimientos_programados_participantes mp
+               WHERE mp.mantenimiento_id = am.mantenimiento_programado_id
+                 AND mp.usuario_id = p.tecnico_id
+               ORDER BY (mp.estado = 'activo') DESC, mp.created_at DESC
+               LIMIT 1),
               'porcentaje', p.porcentaje, 'valorBase', p.valor_base, 'valorGanado', p.valor_ganado,
               'estadoReporte', COALESCE((SELECT d.estado FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1), 'pendiente'),
               'entregaId', (SELECT d.id FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1),
@@ -561,13 +567,16 @@ function mapReport(row: any, participant: any, index: number): any {
     : allEvidence;
   const ofType = (kind: string) => evidence.filter((item) => item.tipo === kind).sort((a, b) => number(a.orden) - number(b.orden)).map((item) => item.url || item.key).filter(Boolean);
   const liquidation = jsonArray(row.liquidaciones).find((item) => item.participanteId === participant?.id || item.tecnicoId === participant?.tecnicoId);
-  const approval = jsonArray(row.aprobaciones).find((item) => item.participanteId === participant?.id) || jsonArray(row.aprobaciones)[0];
+  const approvals = jsonArray(row.aprobaciones);
+  const approval = approvals.find((item) => item.participanteId === participant?.id)
+    || (participant?.id ? approvals.find((item) => !item.participanteId) : approvals[0]);
   const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
   const reportId = participant?.id ? `${row.id}:${participant.id}` : `${row.id}:${index}`;
   return {
     id: reportId,
     actividadOperativaId: row.id,
     participanteId: participant?.id,
+    mantenimientoParticipanteId: participant?.mantenimientoParticipanteId || participant?.mantenimiento_participante_id || undefined,
     aprobacionId: approval?.id,
     codigoRegistro: row.codigo,
     tipo: type,

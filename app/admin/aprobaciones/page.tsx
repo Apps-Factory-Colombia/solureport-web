@@ -2396,6 +2396,15 @@ export default function AprobacionesPage() {
           </DialogHeader>
           {selectedReport && (() => {
             const modalReports = usesSharedBasePricing(selectedReport) ? getSharedReportsForReport(selectedReport) : [selectedReport];
+            const modalParticipantReports = Array.from(
+              modalReports.reduce((map, report) => {
+                const current = map.get(report.tecnicoId);
+                if (!current || getEvidenceCountForReport(report) > getEvidenceCountForReport(current)) {
+                  map.set(report.tecnicoId, report);
+                }
+                return map;
+              }, new Map<string, ActivityReport>()).values()
+            );
             const modalStatus: ActivityReport["estadoAprobacionLider"] = modalReports.some((item) => item.estadoAprobacionLider === "pendiente")
               ? "pendiente"
               : modalReports.some((item) => item.estadoAprobacionLider === "rechazado")
@@ -2444,6 +2453,7 @@ export default function AprobacionesPage() {
             const hasTechnicianChange = modalSuggestedValue != null || shouldShowValueChange(selectedReport, comparisonReferenceValue, comparisonCurrentValue);
             const costDelta = comparisonCurrentValue - comparisonReferenceValue;
             const isDeleting = deletingReportId === selectedReport.id;
+            const isConsolidatedMaintenance = selectedReport.tipo === "mantenimiento_preventivo" && modalParticipantReports.length > 1;
 
             return (
               <div className="space-y-5">
@@ -2590,7 +2600,150 @@ export default function AprobacionesPage() {
                   </p>
                 </div>
 
-                {getReportServiceDetail(selectedReport) && (
+                {isConsolidatedMaintenance && (
+                  <div
+                    data-testid="approval-consolidated-maintenance-details"
+                    className="rounded-lg border border-blue-400/25 bg-blue-400/5 p-4 space-y-4"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-foreground">Entregas consolidadas del mantenimiento</p>
+                      <p className="text-xs text-muted-foreground">
+                        Este es un solo mantenimiento. Cada técnico conserva su entrega independiente y aquí se muestran juntas todas las evidencias registradas.
+                      </p>
+                    </div>
+
+                    <div className="space-y-3">
+                      {modalParticipantReports.map((participantReport) => {
+                        const participantTech = usersById.get(participantReport.tecnicoId);
+                        const participantApproval = estadoAprobacionConfig[participantReport.estadoAprobacionLider];
+                        const participantDetail = getReportServiceDetail(participantReport);
+                        const participantObservations = getDisplayReportObservations(participantReport);
+                        const participantPhotos = [
+                          ...(participantReport.fotosAntes || []),
+                          ...(participantReport.fotosDespues || []),
+                        ];
+
+                        return (
+                          <div key={participantReport.id} className="rounded-lg border border-border/50 bg-background/40 p-4 space-y-3">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                              <div>
+                                <p className="text-sm font-semibold text-foreground">
+                                  {getParticipantName(participantReport.tecnicoId)}
+                                </p>
+                                {participantTech?.email && (
+                                  <p className="text-xs text-muted-foreground break-all">{participantTech.email}</p>
+                                )}
+                              </div>
+                              <Badge variant="outline" className={cn("text-xs gap-1", participantApproval.color)}>
+                                <participantApproval.icon className="h-3 w-3" />
+                                {participantApproval.label}
+                              </Badge>
+                            </div>
+
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Actividades realizadas</p>
+                                <p className="mt-1 text-sm text-foreground whitespace-pre-wrap">
+                                  {participantDetail || "Sin actividades registradas."}
+                                </p>
+                              </div>
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Observaciones</p>
+                                <p className="mt-1 text-sm text-foreground whitespace-pre-wrap">
+                                  {participantObservations || "Sin observaciones registradas."}
+                                </p>
+                              </div>
+                            </div>
+
+                            {participantReport.especificacion && (
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Especificación reportada</p>
+                                <p className="mt-1 text-sm text-foreground whitespace-pre-wrap">{participantReport.especificacion}</p>
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Receptor</p>
+                                <p className="mt-1 text-sm text-foreground">
+                                  {participantReport.datosReceptor?.nombre || "No registrado"}
+                                </p>
+                                {participantReport.datosReceptor?.cargo && (
+                                  <p className="text-xs text-muted-foreground">{participantReport.datosReceptor.cargo}</p>
+                                )}
+                              </div>
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Bitácora</p>
+                                <p className="mt-1 text-sm font-medium text-foreground">
+                                  {participantReport.bitacora ? "Registrada" : "No registrada"}
+                                </p>
+                              </div>
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Firma</p>
+                                <p className="mt-1 text-sm font-medium text-foreground">
+                                  {participantReport.firmaReceptor || participantReport.firmado ? "Registrada" : "No registrada"}
+                                </p>
+                              </div>
+                            </div>
+
+                            {(participantPhotos.length > 0 || participantReport.fotoBitacora || participantReport.firmaReceptor) && (
+                              <div className="space-y-3">
+                                <p className="text-xs font-semibold uppercase tracking-wide text-foreground/70">
+                                  Evidencias de {getParticipantName(participantReport.tecnicoId)}
+                                </p>
+                                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                                  {participantReport.fotosAntes && participantReport.fotosAntes.length > 0 && (
+                                    <div className="space-y-2">
+                                      <p className="text-xs text-muted-foreground">Fotos antes ({participantReport.fotosAntes.length})</p>
+                                      <div className="grid grid-cols-2 gap-2">
+                                        {participantReport.fotosAntes.map((url, index) => (
+                                          <a key={`${participantReport.id}-antes-${index}`} href={url} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/30">
+                                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                                            <img src={url} alt={`Antes ${index + 1} de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
+                                          </a>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {participantReport.fotosDespues && participantReport.fotosDespues.length > 0 && (
+                                    <div className="space-y-2">
+                                      <p className="text-xs text-muted-foreground">Fotos después ({participantReport.fotosDespues.length})</p>
+                                      <div className="grid grid-cols-2 gap-2">
+                                        {participantReport.fotosDespues.map((url, index) => (
+                                          <a key={`${participantReport.id}-despues-${index}`} href={url} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/30">
+                                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                                            <img src={url} alt={`Después ${index + 1} de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
+                                          </a>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {participantReport.fotoBitacora && (
+                                    <div className="space-y-2">
+                                      <p className="text-xs text-muted-foreground">Foto de bitácora</p>
+                                      <a href={participantReport.fotoBitacora} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/30">
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img src={participantReport.fotoBitacora} alt={`Bitácora de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
+                                      </a>
+                                    </div>
+                                  )}
+                                </div>
+                                {participantReport.firmaReceptor && (
+                                  <a href={participantReport.firmaReceptor} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-xs text-cyan-neon hover:underline">
+                                    <PenLine className="h-3.5 w-3.5" />
+                                    Ver firma de {getParticipantName(participantReport.tecnicoId)}
+                                  </a>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {!isConsolidatedMaintenance && getReportServiceDetail(selectedReport) && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">Actividades realizadas</p>
                     <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50 whitespace-pre-wrap">
@@ -2599,7 +2752,7 @@ export default function AprobacionesPage() {
                   </div>
                 )}
 
-                {selectedReport.especificacion && (
+                {!isConsolidatedMaintenance && selectedReport.especificacion && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">Especificación</p>
                     <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50">
@@ -2608,7 +2761,7 @@ export default function AprobacionesPage() {
                   </div>
                 )}
 
-                {getDisplayReportObservations(selectedReport) && (
+                {!isConsolidatedMaintenance && getDisplayReportObservations(selectedReport) && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">Observaciones</p>
                     <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50 whitespace-pre-wrap">
@@ -2665,7 +2818,7 @@ export default function AprobacionesPage() {
                   </div>
                 )}
 
-                {(selectedReport.tipo === "mantenimiento_preventivo" || selectedReport.tipo === "visita_tecnica") && (
+                {!isConsolidatedMaintenance && (selectedReport.tipo === "mantenimiento_preventivo" || selectedReport.tipo === "visita_tecnica") && (
                   <div className="space-y-3">
                     <p className={cn("text-xs font-semibold uppercase tracking-wide", selectedReport.tipo === "visita_tecnica" ? "text-cyan-neon" : "text-blue-400")}>
                       Datos {selectedReport.tipo === "visita_tecnica" ? "Visita Técnica" : "Mantenimiento Preventivo"}

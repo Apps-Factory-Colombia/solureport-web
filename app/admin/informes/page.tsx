@@ -3897,6 +3897,8 @@ export default function InformesPage() {
             const technicalPreviewValue = isSharedPricing
               ? Math.round(((editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0) * participationPercentage) / 100)
               : (editableTechnicalCost.trim() ? Number(editableTechnicalCost) : 0);
+            const isConsolidatedMaintenance = selectedReport.tipo === "mantenimiento_preventivo" && modalParticipantReports.length > 1;
+            const consolidatedPhotoCount = modalParticipantReports.reduce((total, report) => total + getEvidenceCount(report), 0);
 
             return (
               <div className="space-y-5">
@@ -3947,6 +3949,151 @@ export default function InformesPage() {
                     </div>
                   </div>
                 )}
+
+                {isConsolidatedMaintenance && (
+                  <div
+                    data-testid="technical-report-consolidated-maintenance-details"
+                    className="rounded-lg border border-blue-400/25 bg-blue-400/5 p-4 space-y-4"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-foreground">Entregas consolidadas del mantenimiento</p>
+                      <p className="text-xs text-muted-foreground">
+                        Se muestra un solo mantenimiento administrativo con la entrega independiente de cada técnico.
+                      </p>
+                    </div>
+                    <div className="space-y-3">
+                      {modalParticipantReports.map((participantReport) => {
+                        const participantTech = usersById.get(participantReport.tecnicoId);
+                        const participantDetail = getReportServiceDetail(participantReport);
+                        const participantObservations = getDisplayReportObservations(participantReport);
+                        const participantPhotoCount = getEvidenceCount(participantReport);
+                        const participantPhotos = [
+                          ...(participantReport.fotosAntes || []),
+                          ...(participantReport.fotosDespues || []),
+                        ];
+                        const participantStatus = participantReport.estadoAprobacionLider === "aprobado"
+                          ? "Aprobado"
+                          : participantReport.estadoAprobacionLider === "rechazado"
+                            ? "Rechazado"
+                            : "Pendiente";
+
+                        return (
+                          <div key={participantReport.id} className="rounded-lg border border-border/50 bg-background/40 p-4 space-y-3">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                              <div>
+                                <p className="text-sm font-semibold text-foreground">{getParticipantName(participantReport.tecnicoId)}</p>
+                                {participantTech?.email && (
+                                  <p className="text-xs text-muted-foreground break-all">{participantTech.email}</p>
+                                )}
+                              </div>
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-xs",
+                                  participantStatus === "Aprobado"
+                                    ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                                    : participantStatus === "Rechazado"
+                                      ? "border-red-500/20 bg-red-500/10 text-red-400"
+                                      : "border-amber-500/20 bg-amber-500/10 text-amber-400"
+                                )}
+                              >
+                                {participantStatus}
+                              </Badge>
+                            </div>
+
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Actividades realizadas</p>
+                                <p className="mt-1 text-sm text-foreground whitespace-pre-wrap">{participantDetail || "Sin actividades registradas."}</p>
+                              </div>
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Observaciones</p>
+                                <p className="mt-1 text-sm text-foreground whitespace-pre-wrap">{participantObservations || "Sin observaciones registradas."}</p>
+                              </div>
+                            </div>
+
+                            {participantReport.especificacion && (
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Especificación reportada</p>
+                                <p className="mt-1 text-sm text-foreground whitespace-pre-wrap">{participantReport.especificacion}</p>
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Receptor</p>
+                                <p className="mt-1 text-sm text-foreground">{participantReport.datosReceptor?.nombre || "No registrado"}</p>
+                              </div>
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Bitácora</p>
+                                <p className="mt-1 text-sm font-medium text-foreground">{participantReport.bitacora ? "Registrada" : "No registrada"}</p>
+                              </div>
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Firma</p>
+                                <p className="mt-1 text-sm font-medium text-foreground">{participantReport.firmaReceptor || participantReport.firmado ? "Registrada" : "No registrada"}</p>
+                              </div>
+                              <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
+                                <p className="text-xs text-muted-foreground">Fotos</p>
+                                <p className="mt-1 text-sm font-medium text-foreground">{participantPhotoCount}</p>
+                              </div>
+                            </div>
+
+                            {(participantPhotos.length > 0 || participantReport.fotoBitacora || participantReport.firmaReceptor) && (
+                              <div className="space-y-3">
+                                <p className="text-xs font-semibold uppercase tracking-wide text-foreground/70">Evidencias de {getParticipantName(participantReport.tecnicoId)}</p>
+                                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                                  {participantReport.fotosAntes && participantReport.fotosAntes.length > 0 && (
+                                    <div className="space-y-2">
+                                      <p className="text-xs text-muted-foreground">Fotos antes ({participantReport.fotosAntes.length})</p>
+                                      <div className="grid grid-cols-2 gap-2">
+                                        {participantReport.fotosAntes.map((url, index) => (
+                                          <a key={`${participantReport.id}-antes-${index}`} href={url} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/30">
+                                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                                            <img src={url} alt={`Antes ${index + 1} de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
+                                          </a>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {participantReport.fotosDespues && participantReport.fotosDespues.length > 0 && (
+                                    <div className="space-y-2">
+                                      <p className="text-xs text-muted-foreground">Fotos después ({participantReport.fotosDespues.length})</p>
+                                      <div className="grid grid-cols-2 gap-2">
+                                        {participantReport.fotosDespues.map((url, index) => (
+                                          <a key={`${participantReport.id}-despues-${index}`} href={url} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/30">
+                                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                                            <img src={url} alt={`Después ${index + 1} de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
+                                          </a>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {participantReport.fotoBitacora && (
+                                    <div className="space-y-2">
+                                      <p className="text-xs text-muted-foreground">Foto de bitácora</p>
+                                      <a href={participantReport.fotoBitacora} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/30">
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                                        <img src={participantReport.fotoBitacora} alt={`Bitácora de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
+                                      </a>
+                                    </div>
+                                  )}
+                                </div>
+                                {participantReport.firmaReceptor && (
+                                  <a href={participantReport.firmaReceptor} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-xs text-cyan-neon hover:underline">
+                                    <PenLine className="h-3.5 w-3.5" />
+                                    Ver firma de {getParticipantName(participantReport.tecnicoId)}
+                                  </a>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-muted-foreground">Total de fotos del mantenimiento: {consolidatedPhotoCount}</p>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                     <p className="text-xs text-muted-foreground">Tipo</p>
@@ -4016,26 +4163,26 @@ export default function InformesPage() {
                   )}
                 </div>
 
-                <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
+                {!isConsolidatedMaintenance && <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                   <p className="text-xs text-muted-foreground">Descripción</p>
                   <p className="text-sm text-foreground">{activeDetailReport.descripcion || "—"}</p>
-                </div>
+                </div>}
 
-                {getReportServiceDetail(activeDetailReport) && (
+                {!isConsolidatedMaintenance && getReportServiceDetail(activeDetailReport) && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Actividades realizadas</p>
                     <p className="text-sm text-foreground whitespace-pre-wrap">{getReportServiceDetail(activeDetailReport)}</p>
                   </div>
                 )}
 
-                {activeDetailReport.especificacion && (
+                {!isConsolidatedMaintenance && activeDetailReport.especificacion && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Especificación</p>
                     <p className="text-sm text-foreground">{activeDetailReport.especificacion}</p>
                   </div>
                 )}
 
-                {getDisplayReportObservations(activeDetailReport) && (
+                {!isConsolidatedMaintenance && getDisplayReportObservations(activeDetailReport) && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Observaciones</p>
                     <p className="text-sm text-foreground whitespace-pre-wrap">{getDisplayReportObservations(activeDetailReport)}</p>
@@ -4158,7 +4305,7 @@ export default function InformesPage() {
                   </div>
                 )}
 
-                {activeDetailReport.datosReceptor && (
+                {!isConsolidatedMaintenance && activeDetailReport.datosReceptor && (
                   <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                     <p className="text-xs text-muted-foreground">Receptor</p>
                     <p className="text-sm text-foreground">
@@ -4169,7 +4316,7 @@ export default function InformesPage() {
                   </div>
                 )}
 
-                {(activeDetailReport.tipo === "mantenimiento_preventivo" || activeDetailReport.tipo === "visita_tecnica") && (
+                {!isConsolidatedMaintenance && (activeDetailReport.tipo === "mantenimiento_preventivo" || activeDetailReport.tipo === "visita_tecnica") && (
                   <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                     <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
                       <p className="text-xs text-muted-foreground">Bitácora</p>
@@ -4242,7 +4389,7 @@ export default function InformesPage() {
                   </div>
                 )}
 
-                {totalFotos > 0 && (
+                {!isConsolidatedMaintenance && totalFotos > 0 && (
                   <div className="space-y-3">
                     <p className="text-xs font-semibold text-foreground/80 uppercase tracking-wide">Evidencia fotográfica</p>
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
