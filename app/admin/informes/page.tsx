@@ -80,6 +80,7 @@ import { buildReportMultilineText, formatClientDoorBreakdown, getDisplayReportOb
 
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 const TABLE_PAGE_SIZE = 10;
+const ALL_PERIODS_VALUE = "__todos_los_periodos__";
 
 type ReportTableKey = "preventivos" | "visitas" | "recorridos" | "grupales";
 type PreventiveExportCostMode = "tecnico" | "cliente";
@@ -860,7 +861,7 @@ export default function InformesPage() {
   const [clients, setClients] = useState<Client[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
-  const [selectedPeriodId, setSelectedPeriodId] = useState("");
+  const [selectedPeriodId, setSelectedPeriodId] = useState(ALL_PERIODS_VALUE);
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [monthlyExportReports, setMonthlyExportReports] = useState<ActivityReport[]>([]);
@@ -936,10 +937,11 @@ export default function InformesPage() {
         const historicalData = resolveHistoricalReportPeriods(reportsWithContractHistory, p);
         setReports(historicalData.reports); setUsers(u); setClients(c); setGroups(g); setCompanySettings(s); setContracts(ct); setPeriods(historicalData.periods);
         setSelectedPeriodId((current) => {
+          if (current === ALL_PERIODS_VALUE) return current;
           if (current && historicalData.periods.some((period) => period.id === current)) return current;
 
           const currentPeriod = p.find((period) => today >= period.fechaInicio && today <= period.fechaFin);
-          return currentPeriod?.id || p[0]?.id || historicalData.periods[0]?.id || "";
+          return currentPeriod?.id || historicalData.periods[0]?.id || ALL_PERIODS_VALUE;
         });
       })
       .finally(() => {
@@ -979,7 +981,7 @@ export default function InformesPage() {
     () => periods.find((period) => period.id === selectedPeriodId),
     [periods, selectedPeriodId]
   );
-  const hasSelectedPeriod = !!selectedPeriod;
+  const hasSelectedPeriod = selectedPeriodId === ALL_PERIODS_VALUE || !!selectedPeriod;
 
   useEffect(() => {
     if (!selectedPeriod) {
@@ -1005,7 +1007,11 @@ export default function InformesPage() {
   }, [hasSelectedPeriod, viewRangeEnd, viewRangeStart]);
 
   const periodScopedReports = useMemo(
-    () => selectedPeriodId ? reports.filter((report) => report.periodoId === selectedPeriodId) : [],
+    () => selectedPeriodId === ALL_PERIODS_VALUE
+      ? reports
+      : selectedPeriodId
+        ? reports.filter((report) => report.periodoId === selectedPeriodId)
+        : [],
     [reports, selectedPeriodId]
   );
 
@@ -2801,10 +2807,11 @@ export default function InformesPage() {
           <div className="min-w-56 space-y-1">
             <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Corte / período de trabajo</p>
             <Select value={selectedPeriodId || undefined} onValueChange={setSelectedPeriodId}>
-              <SelectTrigger className="w-full bg-secondary/50 border-border/50" disabled={periods.length === 0}>
-                <SelectValue placeholder="Selecciona un corte" />
+              <SelectTrigger className="w-full bg-secondary/50 border-border/50">
+                <SelectValue placeholder="Todos los períodos" />
               </SelectTrigger>
               <SelectContent className="bg-card border-border">
+                <SelectItem value={ALL_PERIODS_VALUE}>Todos los períodos</SelectItem>
                 {periods.map((period) => (
                   <SelectItem key={period.id} value={period.id}>
                     {formatPeriodLabel(period)}
@@ -2873,7 +2880,13 @@ export default function InformesPage() {
             </SelectContent>
           </Select>
           <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
-            {selectedPeriod ? `Período activo: ${formatPeriodLabel(selectedPeriod)}` : periods.length > 0 ? "Selecciona un período" : "No hay períodos disponibles"}
+            {selectedPeriod
+              ? `Período activo: ${formatPeriodLabel(selectedPeriod)}`
+              : selectedPeriodId === ALL_PERIODS_VALUE
+                ? "Todos los períodos"
+                : periods.length > 0
+                  ? "Selecciona un período"
+                  : "No hay períodos disponibles"}
           </Badge>
         </div>
 
