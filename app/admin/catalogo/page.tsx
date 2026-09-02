@@ -25,6 +25,8 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -43,6 +45,7 @@ import {
   Pencil,
   Trash2,
   History,
+  Loader2,
 } from "lucide-react";
 import { Activity } from "@/lib/types";
 import { getActividades, createActividad, updateActividad, deleteActividad } from "@/lib/data/services/actividades";
@@ -64,6 +67,8 @@ export default function CatalogoPage() {
   const [editingActivity, setEditingActivity] = useState<Activity | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyActivity, setHistoryActivity] = useState<Activity | null>(null);
+  const [activityToDelete, setActivityToDelete] = useState<Activity | null>(null);
+  const [deletingActivityId, setDeletingActivityId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
@@ -111,11 +116,18 @@ export default function CatalogoPage() {
   };
 
   const handleDelete = async (id: string) => {
+    setDeletingActivityId(id);
     try {
-      await deleteActividad(id);
+      const result = await deleteActividad(id);
+      setActivityToDelete(null);
       await loadData();
+      window.alert(result.message);
     } catch (err) {
       console.error("Error eliminando actividad:", err);
+      const message = err instanceof Error ? err.message : "No se pudo eliminar la actividad del catálogo.";
+      window.alert(message);
+    } finally {
+      setDeletingActivityId(null);
     }
   };
 
@@ -247,7 +259,7 @@ export default function CatalogoPage() {
                             <Pencil className="h-4 w-4" /> Editar
                           </DropdownMenuItem>
                           <DropdownMenuItem
-                            onClick={() => handleDelete(activity.id)}
+                            onClick={() => setActivityToDelete(activity)}
                             className="gap-2 text-destructive focus:text-destructive cursor-pointer"
                           >
                             <Trash2 className="h-4 w-4" /> Eliminar
@@ -301,6 +313,42 @@ export default function CatalogoPage() {
         activity={editingActivity}
         onSave={handleSave}
       />
+
+      <Dialog
+        open={!!activityToDelete}
+        onOpenChange={(open) => {
+          if (!open && !deletingActivityId) setActivityToDelete(null);
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Confirmar eliminación de actividad</DialogTitle>
+            <DialogDescription className="text-muted-foreground">
+              ¿Seguro que quieres eliminar definitivamente <strong>{activityToDelete?.codigo}</strong> del catálogo?
+              Se eliminarán también sus precios históricos y no quedará como inactiva.
+              Los reportes operativos ya realizados conservarán su información histórica. Esta acción no se puede deshacer.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setActivityToDelete(null)}
+              disabled={!!deletingActivityId}
+              className="text-muted-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={() => activityToDelete && handleDelete(activityToDelete.id)}
+              disabled={!!deletingActivityId}
+              className="gap-2 bg-red-600 hover:bg-red-700 text-white"
+            >
+              {deletingActivityId ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              {deletingActivityId ? "Eliminando..." : "Sí, eliminar"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
         <DialogContent className="bg-card border-border sm:max-w-md">

@@ -116,9 +116,10 @@ export default function ClientesPage() {
   const handleDelete = async (id: string) => {
     setDeletingClientId(id);
     try {
-      await deleteCliente(id);
+      const result = await deleteCliente(id);
       setClientToDelete(null);
       await loadData();
+      window.alert(result.message);
     } catch (err) {
       console.error("Error eliminando cliente:", err);
       const message = err instanceof Error
@@ -350,7 +351,9 @@ export default function ClientesPage() {
           <DialogHeader>
             <DialogTitle className="text-foreground">Confirmar eliminación</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              ¿Seguro que quieres eliminar el cliente <strong>{clientToDelete?.edificio || clientToDelete?.nombre}</strong>? Esta acción no se puede deshacer.
+              ¿Seguro que quieres eliminar definitivamente el cliente <strong>{clientToDelete?.edificio || clientToDelete?.nombre}</strong>?
+              Se borrarán sus sedes, contratos, mantenimientos, reportes, aprobaciones y liquidaciones relacionadas.
+              No quedará como inactivo y esta acción no se puede deshacer.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

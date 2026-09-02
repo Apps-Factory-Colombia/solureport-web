@@ -132,9 +132,10 @@ export default function UsuariosPage() {
   const handleDeleteGroup = async (id: string) => {
     setDeletingGroupId(id);
     try {
-      await deleteGrupo(id);
+      const result = await deleteGrupo(id);
       setGroupToDelete(null);
       await loadData();
+      window.alert(result.message);
     } catch (err) {
       console.error("Error eliminando grupo:", err);
       const message = err instanceof Error
@@ -642,7 +643,9 @@ export default function UsuariosPage() {
           <DialogHeader>
             <DialogTitle className="text-foreground">Confirmar eliminación de grupo</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              ¿Seguro que quieres eliminar el grupo <strong>{groupToDelete?.nombre}</strong>? Esta acción quitará también sus membresías.
+              ¿Seguro que quieres eliminar definitivamente el grupo <strong>{groupToDelete?.nombre}</strong>?
+              Se borrarán sus membresías, mantenimientos, reportes, aprobaciones y liquidaciones relacionadas.
+              No quedará como inactivo y esta acción no se puede deshacer.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -14,6 +14,11 @@ const dayToNumber: Record<string, number> = {
   lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado: 6, domingo: 7,
 };
 const numberToDay = ["", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"];
+// Todas las fechas operativas de SoluReport pertenecen a la jornada de
+// Colombia. PostgreSQL puede tener una zona horaria de servidor distinta
+// (normalmente UTC), por lo que CURRENT_DATE no es seguro para permisos de
+// grupos ni para vigencia de sus miembros.
+const BOGOTA_DATE_SQL = "(now() AT TIME ZONE 'America/Bogota')::date";
 
 function number(value: unknown, fallback = 0): number {
   const parsed = Number(value);
@@ -318,9 +323,9 @@ async function userRows(where = "", values: unknown[] = []) {
               'activo', ah.activo, 'horaEntrada', left(ah.hora_entrada::text, 5),
               'horaSalida', left(ah.hora_salida::text, 5)
             ) ORDER BY ah.dia_semana) FROM public.asistencia_horarios ah WHERE ah.usuario_id = u.id), '[]'::json) AS horarios,
-            (SELECT gm.grupo_id FROM public.grupo_miembros gm
-              WHERE gm.usuario_id = u.id AND gm.fecha_inicio <= current_date
-                AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= current_date) LIMIT 1) AS grupo_id,
+             (SELECT gm.grupo_id FROM public.grupo_miembros gm
+               WHERE gm.usuario_id = u.id AND gm.fecha_inicio <= ${BOGOTA_DATE_SQL}
+                 AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= ${BOGOTA_DATE_SQL}) LIMIT 1) AS grupo_id,
             EXISTS (SELECT 1 FROM public.grupos_trabajo g WHERE g.lider_id = u.id AND g.estado = 'activo') AS es_lider
        FROM public.usuarios u ${where}
       ORDER BY u.created_at DESC`, values,
@@ -333,14 +338,61 @@ async function groupRows(where = "", values: unknown[] = []) {
     `SELECT g.*,
             COALESCE((SELECT json_agg(gm.usuario_id ORDER BY gm.usuario_id)
               FROM public.grupo_miembros gm WHERE gm.grupo_id = g.id
-                AND gm.fecha_inicio <= current_date AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= current_date)), '[]'::json) AS miembros,
+                 AND gm.fecha_inicio <= ${BOGOTA_DATE_SQL} AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= ${BOGOTA_DATE_SQL})), '[]'::json) AS miembros,
             COALESCE((SELECT json_agg(gr.usuario_id ORDER BY gr.usuario_id)
               FROM public.grupo_reportadores_actividad gr WHERE gr.grupo_id = g.id
-                AND gr.fecha_inicio <= current_date AND (gr.fecha_fin IS NULL OR gr.fecha_fin >= current_date)), '[]'::json) AS reportadores
+                 AND gr.fecha_inicio <= ${BOGOTA_DATE_SQL} AND (gr.fecha_fin IS NULL OR gr.fecha_fin >= ${BOGOTA_DATE_SQL})), '[]'::json) AS reportadores
        FROM public.grupos_trabajo g ${where}
       ORDER BY g.created_at DESC`, values,
   );
   return rows;
+}
+
+async function currentUserGroupContext(userId: string) {
+  const { rows } = await dbQuery(
+    `SELECT g.id AS grupo_id,
+            g.lider_id,
+            COALESCE((SELECT json_agg(gm.usuario_id ORDER BY gm.usuario_id)
+              FROM public.grupo_miembros gm
+             WHERE gm.grupo_id = g.id
+               AND gm.fecha_inicio <= ${BOGOTA_DATE_SQL}
+               AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= ${BOGOTA_DATE_SQL})), '[]'::json) AS miembros,
+            COALESCE((SELECT json_agg(gr.usuario_id ORDER BY gr.usuario_id)
+              FROM public.grupo_reportadores_actividad gr
+             WHERE gr.grupo_id = g.id
+               AND gr.fecha_inicio <= ${BOGOTA_DATE_SQL}
+               AND (gr.fecha_fin IS NULL OR gr.fecha_fin >= ${BOGOTA_DATE_SQL})), '[]'::json) AS reportadores,
+            public.usuario_puede_reportar_grupo($1::uuid, g.id, ${BOGOTA_DATE_SQL}) AS puede_reportar,
+            CASE WHEN g.lider_id = $1::uuid THEN 0 ELSE 1 END AS prioridad_lider,
+            g.created_at
+       FROM public.grupos_trabajo g
+      WHERE COALESCE(g.estado, 'activo') = 'activo'
+        AND (
+          g.lider_id = $1::uuid
+          OR EXISTS (
+            SELECT 1
+              FROM public.grupo_miembros gm
+             WHERE gm.grupo_id = g.id
+               AND gm.usuario_id = $1::uuid
+               AND gm.fecha_inicio <= ${BOGOTA_DATE_SQL}
+               AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= ${BOGOTA_DATE_SQL})
+          )
+        )
+      ORDER BY CASE WHEN public.usuario_puede_reportar_grupo($1::uuid, g.id, ${BOGOTA_DATE_SQL}) THEN 0 ELSE 1 END,
+               prioridad_lider,
+               g.created_at DESC
+      LIMIT 1`,
+    [userId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    grupoId: row.grupo_id,
+    liderId: row.lider_id || "",
+    miembros: jsonArray(row.miembros).map((id) => String(id)),
+    reporterosIds: jsonArray(row.reportadores).map((id) => String(id)),
+    puedeReportar: Boolean(row.puede_reportar),
+  };
 }
 
 async function clientRows(where = "", values: unknown[] = []) {
@@ -1080,6 +1132,169 @@ async function deleteUser(payload: Payload, actor: UserContext) {
   });
 }
 
+async function deleteOperationalActivities(client: any, activityIds: string[]) {
+  if (!activityIds.length) return;
+
+  // These tables use RESTRICT for financial/audit references, so they must
+  // be removed before the operational activity. The transaction guarantees
+  // that a failure rolls back the complete deletion.
+  await client.query(
+    "DELETE FROM public.lote_aprobacion_items WHERE aprobacion_id IN (SELECT id FROM public.actividades_operativas_aprobaciones WHERE actividad_id = ANY($1::uuid[]))",
+    [activityIds],
+  );
+  await client.query("DELETE FROM public.liquidacion_items WHERE actividad_id = ANY($1::uuid[])", [activityIds]);
+  await client.query("DELETE FROM public.actividades_operativas_aprobaciones WHERE actividad_id = ANY($1::uuid[])", [activityIds]);
+  await client.query("DELETE FROM public.notificaciones WHERE entidad_id = ANY($1::uuid[])", [activityIds]);
+  await client.query("DELETE FROM public.envios_correo WHERE entidad_id = ANY($1::uuid[])", [activityIds]);
+  await client.query("DELETE FROM public.operaciones_idempotencia WHERE recurso_id = ANY($1::uuid[])", [activityIds]);
+  await client.query("DELETE FROM public.auditoria_eventos WHERE entidad_id = ANY($1::uuid[])", [activityIds]);
+  await client.query("DELETE FROM public.actividades_operativas WHERE id = ANY($1::uuid[])", [activityIds]);
+}
+
+async function deleteScheduledMaintenances(client: any, maintenanceIds: string[]) {
+  if (!maintenanceIds.length) return;
+
+  await client.query(
+    "DELETE FROM public.notificaciones WHERE entidad_tipo = 'mantenimiento_programado' AND entidad_id = ANY($1::uuid[])",
+    [maintenanceIds],
+  );
+  await client.query("DELETE FROM public.envios_correo WHERE entidad_id = ANY($1::uuid[])", [maintenanceIds]);
+  await client.query("DELETE FROM public.operaciones_idempotencia WHERE recurso_id = ANY($1::uuid[])", [maintenanceIds]);
+  await client.query("DELETE FROM public.auditoria_eventos WHERE entidad_id = ANY($1::uuid[])", [maintenanceIds]);
+  await client.query("DELETE FROM public.actividades_operativas_mantenimientos WHERE mantenimiento_programado_id = ANY($1::uuid[])", [maintenanceIds]);
+  await client.query("DELETE FROM public.mantenimientos_programados WHERE id = ANY($1::uuid[])", [maintenanceIds]);
+}
+
+async function deleteClient(payload: Payload) {
+  const id = String(payload.id || "").trim();
+  if (!id) throw new Error("Debes indicar el cliente que deseas eliminar.");
+
+  return withTransaction(async (client) => {
+    const clientResult = await client.query("SELECT id, nombre FROM public.clientes WHERE id = $1 FOR UPDATE", [id]);
+    const target = clientResult.rows[0];
+    if (!target) throw new Error("No se encontró el cliente que intentas eliminar.");
+
+    const { rows: contractRows } = await client.query(
+      "SELECT id FROM public.contratos_mantenimiento WHERE cliente_id = $1 FOR UPDATE",
+      [id],
+    );
+    const contractIds = contractRows.map((row: any) => row.id);
+    const { rows: maintenanceRows } = await client.query(
+      `SELECT id
+         FROM public.mantenimientos_programados
+        WHERE cliente_id = $1 OR contrato_id = ANY($2::uuid[])
+        FOR UPDATE`,
+      [id, contractIds],
+    );
+    const maintenanceIds = maintenanceRows.map((row: any) => row.id);
+    const { rows: activityRows } = await client.query(
+      `SELECT DISTINCT a.id
+         FROM public.actividades_operativas a
+         LEFT JOIN public.actividades_operativas_mantenimientos am ON am.actividad_id = a.id
+         LEFT JOIN public.mantenimientos_programados m ON m.id = am.mantenimiento_programado_id
+        WHERE a.cliente_id = $1
+           OR a.sede_id IN (SELECT id FROM public.cliente_sedes WHERE cliente_id = $1)
+           OR m.cliente_id = $1
+           OR m.contrato_id = ANY($2::uuid[])`,
+      [id, contractIds],
+    );
+    const activityIds = activityRows.map((row: any) => row.id);
+
+    await deleteOperationalActivities(client, activityIds);
+    await deleteScheduledMaintenances(client, maintenanceIds);
+    if (contractIds.length) {
+      await client.query(
+        "DELETE FROM public.auditoria_eventos WHERE entidad_tipo = 'contrato_mantenimiento' AND entidad_id = ANY($1::uuid[])",
+        [contractIds],
+      );
+      await client.query("DELETE FROM public.contratos_mantenimiento WHERE id = ANY($1::uuid[])", [contractIds]);
+    }
+    await client.query("DELETE FROM public.cliente_sedes WHERE cliente_id = $1", [id]);
+    await client.query("DELETE FROM public.clientes WHERE id = $1", [id]);
+
+    return {
+      id,
+      deleted: true,
+      archived: false,
+      message: `Cliente ${target.nombre || ""} eliminado definitivamente junto con sus sedes, contratos, mantenimientos, reportes, aprobaciones y liquidaciones.`,
+    };
+  });
+}
+
+async function deleteCatalogActivity(payload: Payload) {
+  const id = String(payload.id || "").trim();
+  if (!id) throw new Error("Debes indicar la actividad del catálogo que deseas eliminar.");
+
+  return withTransaction(async (client) => {
+    const activityResult = await client.query(
+      "SELECT id, codigo, nombre FROM public.catalogo_actividades WHERE id = $1 FOR UPDATE",
+      [id],
+    );
+    const target = activityResult.rows[0];
+    if (!target) throw new Error("No se encontró la actividad del catálogo que intentas eliminar.");
+
+    // Operational reports keep their own description/value snapshots. Remove
+    // only the master-data link, so deleting a catalog definition does not
+    // erase already completed field work or financial evidence.
+    await client.query("DELETE FROM public.actividades_operativas_catalogo WHERE catalogo_actividad_id = $1", [id]);
+    await client.query("DELETE FROM public.catalogo_actividad_precios WHERE actividad_id = $1", [id]);
+    await client.query("DELETE FROM public.catalogo_actividades WHERE id = $1", [id]);
+
+    return {
+      id,
+      deleted: true,
+      archived: false,
+      message: `Actividad ${target.codigo || target.nombre || ""} eliminada definitivamente del catálogo y de su historial de precios.`,
+    };
+  });
+}
+
+async function deleteGroup(payload: Payload) {
+  const id = String(payload.id || "").trim();
+  if (!id) throw new Error("Debes indicar el grupo que deseas eliminar.");
+
+  return withTransaction(async (client) => {
+    const groupResult = await client.query("SELECT id, nombre FROM public.grupos_trabajo WHERE id = $1 FOR UPDATE", [id]);
+    const target = groupResult.rows[0];
+    if (!target) throw new Error("No se encontró el grupo que intentas eliminar.");
+
+    const { rows: maintenanceRows } = await client.query(
+      "SELECT id FROM public.mantenimientos_programados WHERE grupo_id = $1 FOR UPDATE",
+      [id],
+    );
+    const maintenanceIds = maintenanceRows.map((row: any) => row.id);
+    const { rows: activityRows } = await client.query(
+      `SELECT DISTINCT a.id
+         FROM public.actividades_operativas a
+         LEFT JOIN public.actividades_operativas_mantenimientos am ON am.actividad_id = a.id
+        WHERE a.grupo_id = $1 OR am.mantenimiento_programado_id = ANY($2::uuid[])`,
+      [id, maintenanceIds],
+    );
+    const activityIds = activityRows.map((row: any) => row.id);
+
+    await deleteOperationalActivities(client, activityIds);
+    await deleteScheduledMaintenances(client, maintenanceIds);
+
+    const { rows: batchRows } = await client.query("SELECT id FROM public.lotes_aprobacion WHERE grupo_id = $1 FOR UPDATE", [id]);
+    const batchIds = batchRows.map((row: any) => row.id);
+    if (batchIds.length) {
+      await client.query("DELETE FROM public.lote_aprobacion_items WHERE lote_id = ANY($1::uuid[])", [batchIds]);
+      await client.query("DELETE FROM public.lotes_aprobacion WHERE id = ANY($1::uuid[])", [batchIds]);
+    }
+    await client.query("DELETE FROM public.auditoria_eventos WHERE entidad_tipo = 'grupo_trabajo' AND entidad_id = $1", [id]);
+    await client.query("DELETE FROM public.grupo_reportadores_actividad WHERE grupo_id = $1", [id]);
+    await client.query("DELETE FROM public.grupo_miembros WHERE grupo_id = $1", [id]);
+    await client.query("DELETE FROM public.grupos_trabajo WHERE id = $1", [id]);
+
+    return {
+      id,
+      deleted: true,
+      archived: false,
+      message: `Grupo ${target.nombre || ""} eliminado definitivamente junto con sus membresías, mantenimientos, reportes, aprobaciones y liquidaciones.`,
+    };
+  });
+}
+
 async function requireAdmin(user: UserContext) {
   if (!["admin", "supervisor"].includes(user.rol)) throw new Error("No tienes permisos para esta operación.");
 }
@@ -1802,8 +2017,8 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
             `SELECT gm.grupo_id
                FROM public.grupo_miembros gm
               WHERE gm.usuario_id = $1
-                AND gm.fecha_inicio <= current_date
-                AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= current_date)
+                AND gm.fecha_inicio <= ${BOGOTA_DATE_SQL}
+                AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= ${BOGOTA_DATE_SQL})
               ORDER BY gm.fecha_inicio DESC
               LIMIT 1`,
             [id],
@@ -1827,6 +2042,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
 
     case "groups.list": return (await groupRows()).map(mapGroup);
     case "groups.get": { const rows = await groupRows("WHERE g.id = $1", [payload.id]); return rows[0] ? mapGroup(rows[0]) : null; }
+    case "groups.currentUserContext": return currentUserGroupContext(user.id);
     case "groups.create": {
       await requireAdmin(user);
       const id = await withTransaction(async (client) => {
@@ -1871,8 +2087,8 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
               `SELECT usuario_id
                  FROM public.grupo_miembros
                 WHERE grupo_id = $1
-                  AND fecha_inicio <= current_date
-                  AND (fecha_fin IS NULL OR fecha_fin >= current_date)`,
+                  AND fecha_inicio <= ${BOGOTA_DATE_SQL}
+                  AND (fecha_fin IS NULL OR fecha_fin >= ${BOGOTA_DATE_SQL})`,
               [payload.id],
             )).rows.map((row: any) => String(row.usuario_id));
           const reporterIds = hasReporters
@@ -1881,8 +2097,8 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
               `SELECT usuario_id
                  FROM public.grupo_reportadores_actividad
                 WHERE grupo_id = $1
-                  AND fecha_inicio <= current_date
-                  AND (fecha_fin IS NULL OR fecha_fin >= current_date)`,
+                  AND fecha_inicio <= ${BOGOTA_DATE_SQL}
+                  AND (fecha_fin IS NULL OR fecha_fin >= ${BOGOTA_DATE_SQL})`,
               [payload.id],
             )).rows.map((row: any) => String(row.usuario_id));
           if (leaderId) memberIds.push(leaderId);
@@ -1891,7 +2107,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       });
       const rows = await groupRows("WHERE g.id = $1", [payload.id]); return mapGroup(rows[0]);
     }
-    case "groups.delete": { await requireAdmin(user); await dbQuery("UPDATE public.grupos_trabajo SET estado = 'inactivo', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
+    case "groups.delete": { await requireAdmin(user); return deleteGroup(payload); }
 
     case "clients.list": return (await clientRows()).map(mapClient);
     case "clients.get": { const rows = await clientRows("WHERE c.id = $1", [payload.id]); return rows[0] ? mapClient(rows[0]) : null; }
@@ -1923,7 +2139,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       });
       const rows = await clientRows("WHERE c.id = $1", [payload.id]); return mapClient(rows[0]);
     }
-    case "clients.delete": { await requireAdmin(user); await dbQuery("UPDATE public.clientes SET estado = 'inactivo', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
+    case "clients.delete": { await requireAdmin(user); return deleteClient(payload); }
 
     case "catalog.list": {
       const { rows } = await dbQuery(`SELECT a.*, p.valor FROM public.catalogo_actividades a LEFT JOIN LATERAL (SELECT valor FROM public.catalogo_actividad_precios WHERE actividad_id = a.id ORDER BY fecha_inicio DESC LIMIT 1) p ON true ORDER BY a.codigo`);
@@ -1933,7 +2149,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       await requireAdmin(user);
       const id = await withTransaction(async (client) => {
         const { rows } = await client.query("INSERT INTO public.catalogo_actividades (codigo, nombre, descripcion, estado) VALUES ($1,$2,$3,$4) RETURNING id", [payload.codigo, payload.descripcion, payload.descripcion, payload.estado || "activo"]);
-        await client.query("INSERT INTO public.catalogo_actividad_precios (actividad_id, valor, fecha_inicio) VALUES ($1,$2,current_date)", [rows[0].id, number(payload.valorEconomico)]);
+        await client.query(`INSERT INTO public.catalogo_actividad_precios (actividad_id, valor, fecha_inicio) VALUES ($1,$2,${BOGOTA_DATE_SQL})`, [rows[0].id, number(payload.valorEconomico)]);
         return rows[0].id;
       });
       return (await execute("catalog.list", {}, user) as any[]).find((item) => item.id === id);
@@ -1944,13 +2160,13 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
         const { rows: current } = await client.query("SELECT valor FROM public.catalogo_actividad_precios WHERE actividad_id = $1 ORDER BY fecha_inicio DESC LIMIT 1", [payload.id]);
         await client.query("UPDATE public.catalogo_actividades SET codigo = COALESCE($2,codigo), nombre = COALESCE($3,nombre), descripcion = COALESCE($3,descripcion), estado = COALESCE($4,estado), updated_at = clock_timestamp() WHERE id = $1", [payload.id, payload.codigo, payload.descripcion, payload.estado]);
         if (payload.valorEconomico !== undefined && number(current[0]?.valor) !== number(payload.valorEconomico)) {
-          await client.query("UPDATE public.catalogo_actividad_precios SET fecha_fin = current_date - 1 WHERE actividad_id = $1 AND fecha_fin IS NULL", [payload.id]);
-          await client.query("INSERT INTO public.catalogo_actividad_precios (actividad_id, valor, fecha_inicio) VALUES ($1,$2,current_date)", [payload.id, number(payload.valorEconomico)]);
+          await client.query(`UPDATE public.catalogo_actividad_precios SET fecha_fin = ${BOGOTA_DATE_SQL} - 1 WHERE actividad_id = $1 AND fecha_fin IS NULL`, [payload.id]);
+          await client.query(`INSERT INTO public.catalogo_actividad_precios (actividad_id, valor, fecha_inicio) VALUES ($1,$2,${BOGOTA_DATE_SQL})`, [payload.id, number(payload.valorEconomico)]);
         }
       });
       return (await execute("catalog.list", {}, user) as any[]).find((item) => item.id === payload.id);
     }
-    case "catalog.delete": { await requireAdmin(user); await dbQuery("UPDATE public.catalogo_actividades SET estado = 'inactivo', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
+    case "catalog.delete": { await requireAdmin(user); return deleteCatalogActivity(payload); }
 
     case "config.get": return getConfig();
     case "config.update": { await requireAdmin(user); return updateConfig(payload); }
@@ -2318,8 +2534,12 @@ function uniqueIds(values: string[]): string[] {
 async function replaceGroupMembers(client: any, groupId: string, memberIds: string[], reporterIds: string[]) {
   await client.query("DELETE FROM public.grupo_miembros WHERE grupo_id = $1", [groupId]);
   await client.query("DELETE FROM public.grupo_reportadores_actividad WHERE grupo_id = $1", [groupId]);
-  for (const id of uniqueIds(memberIds)) await client.query("INSERT INTO public.grupo_miembros (grupo_id, usuario_id) VALUES ($1,$2)", [groupId, id]);
-  for (const id of uniqueIds(reporterIds)) await client.query("INSERT INTO public.grupo_reportadores_actividad (grupo_id, usuario_id) VALUES ($1,$2)", [groupId, id]);
+  for (const id of uniqueIds(memberIds)) {
+    await client.query(`INSERT INTO public.grupo_miembros (grupo_id, usuario_id, fecha_inicio) VALUES ($1,$2,${BOGOTA_DATE_SQL})`, [groupId, id]);
+  }
+  for (const id of uniqueIds(reporterIds)) {
+    await client.query(`INSERT INTO public.grupo_reportadores_actividad (grupo_id, usuario_id, fecha_inicio) VALUES ($1,$2,${BOGOTA_DATE_SQL})`, [groupId, id]);
+  }
 }
 
 function configDefaults(): any {

@@ -43,8 +43,8 @@ export async function POST(request: NextRequest) {
                 'horaSalida', left(ah.hora_salida::text, 5)
               ) ORDER BY ah.dia_semana) FROM public.asistencia_horarios ah WHERE ah.usuario_id = u.id), '[]'::json) AS horarios,
               (SELECT gm.grupo_id FROM public.grupo_miembros gm
-                WHERE gm.usuario_id = u.id AND gm.fecha_inicio <= current_date
-                  AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= current_date) LIMIT 1) AS grupo_id,
+                WHERE gm.usuario_id = u.id AND gm.fecha_inicio <= (now() AT TIME ZONE 'America/Bogota')::date
+                  AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= (now() AT TIME ZONE 'America/Bogota')::date) LIMIT 1) AS grupo_id,
               EXISTS (SELECT 1 FROM public.grupos_trabajo g WHERE g.lider_id = u.id AND g.estado = 'activo') AS es_lider
          FROM public.usuarios u
         WHERE lower(u.email) = $1 OR lower(u.username) = $1

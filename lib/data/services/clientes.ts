@@ -5,4 +5,5 @@ export async function getClientes(): Promise<Client[]> { return dataRequest<Clie
 export async function getClienteById(id: string): Promise<Client | null> { return dataRequest<Client | null>("clients.get", { id }); }
 export async function createCliente(client: Partial<Client>): Promise<Client> { return dataRequest<Client>("clients.create", client); }
 export async function updateCliente(id: string, client: Partial<Client>): Promise<Client> { return dataRequest<Client>("clients.update", { id, ...client }); }
-export async function deleteCliente(id: string): Promise<void> { await dataRequest("clients.delete", { id }); }
+export type ClientDeleteResult = { id: string; deleted: boolean; archived: boolean; message: string };
+export async function deleteCliente(id: string): Promise<ClientDeleteResult> { return dataRequest<ClientDeleteResult>("clients.delete", { id }); }
