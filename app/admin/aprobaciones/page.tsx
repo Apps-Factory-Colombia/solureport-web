@@ -85,6 +85,7 @@ import {
 } from "@/components/ui/pagination";
 
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
+const ALL_PERIODS_VALUE = "__todos_los_periodos__";
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("es-CO", {
@@ -640,7 +641,7 @@ export default function AprobacionesPage() {
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
-  const [selectedPeriodId, setSelectedPeriodId] = useState("");
+  const [selectedPeriodId, setSelectedPeriodId] = useState(ALL_PERIODS_VALUE);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [activeTab, setActiveTab] = useState("preventivos");
   const [search, setSearch] = useState("");
@@ -704,8 +705,9 @@ export default function AprobacionesPage() {
       const normalizedReports = normalizeSharedVisitRowsForUi(r);
       setReports(normalizedReports); setUsers(u); setClients(c); setContracts(ct); setGroups(g); setCompanySettings(s); setPeriods(p);
       setSelectedPeriodId((current) => {
+        if (current === ALL_PERIODS_VALUE) return current;
         if (current && p.some((period) => period.id === current)) return current;
-        return p[0]?.id || "";
+        return ALL_PERIODS_VALUE;
       });
     } finally {
       setLoading(false);
@@ -852,9 +854,13 @@ export default function AprobacionesPage() {
     () => periods.find((period) => period.id === selectedPeriodId),
     [periods, selectedPeriodId]
   );
-  const hasSelectedPeriod = !!selectedPeriod;
+  const hasSelectedPeriod = selectedPeriodId === ALL_PERIODS_VALUE || !!selectedPeriod;
   const periodScopedReports = useMemo(
-    () => selectedPeriodId ? reports.filter((report) => report.periodoId === selectedPeriodId) : [],
+    () => selectedPeriodId === ALL_PERIODS_VALUE
+      ? reports
+      : selectedPeriodId
+        ? reports.filter((report) => report.periodoId === selectedPeriodId)
+        : [],
     [reports, selectedPeriodId]
   );
   const getDefaultCostForReport = useCallback(
@@ -2283,10 +2289,11 @@ export default function AprobacionesPage() {
             />
           </div>
           <Select value={selectedPeriodId || undefined} onValueChange={setSelectedPeriodId}>
-            <SelectTrigger className="w-56 bg-secondary/50 border-border/50" disabled={periods.length === 0}>
-              <SelectValue placeholder="Selecciona un período" />
+            <SelectTrigger className="w-56 bg-secondary/50 border-border/50">
+              <SelectValue placeholder="Todos los períodos" />
             </SelectTrigger>
             <SelectContent className="bg-card border-border">
+              <SelectItem value={ALL_PERIODS_VALUE}>Todos los períodos</SelectItem>
               {periods.map((period) => (
                 <SelectItem key={period.id} value={period.id}>
                   {formatPeriodLabel(period)}
@@ -2331,7 +2338,13 @@ export default function AprobacionesPage() {
             </SelectContent>
           </Select>
           <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold">
-            {selectedPeriod ? `Período actual: ${formatPeriodLabel(selectedPeriod)}` : periods.length > 0 ? "Selecciona un período" : "No hay períodos disponibles"}
+            {selectedPeriod
+              ? `Período actual: ${formatPeriodLabel(selectedPeriod)}`
+              : selectedPeriodId === ALL_PERIODS_VALUE
+                ? "Todos los períodos"
+                : periods.length > 0
+                  ? "Selecciona un período"
+                  : "No hay períodos disponibles"}
           </Badge>
         </div>
 
