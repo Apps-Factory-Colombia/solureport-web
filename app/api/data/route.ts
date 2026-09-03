@@ -721,6 +721,7 @@ function anySubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m") {
        AND d_any.participante_id = ap_any.id
      WHERE am_any.mantenimiento_programado_id = ${scheduleAlias}.id
        AND d_any.estado IN ('enviada', 'aprobada')
+       AND COALESCE(d_any.fecha_ejecucion, ${BOGOTA_DATE_SQL}) <= ${BOGOTA_DATE_SQL}
   )`;
 }
 
@@ -751,9 +752,10 @@ function allSubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m", dateRange
              ON d_all.actividad_id = ap_all.actividad_id
             AND d_all.participante_id = ap_all.id
           WHERE am_all.mantenimiento_programado_id = ${scheduleAlias}.id
-            AND d_all.estado IN ('enviada', 'aprobada')${rangeFilter}
+            AND d_all.estado IN ('enviada', 'aprobada')
+            AND COALESCE(d_all.fecha_ejecucion, ${BOGOTA_DATE_SQL}) <= ${BOGOTA_DATE_SQL}${rangeFilter}
        )
-  )`;
+   )`;
 }
 
 function partiallySubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m") {
