@@ -772,7 +772,12 @@ function partiallySubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m") {
 function globallyCompletedMaintenancePredicate(scheduleAlias = "m") {
   const partialDelivery = partiallySubmittedMaintenanceDeliveryPredicate(scheduleAlias);
   const allDeliveries = allSubmittedMaintenanceDeliveryPredicate(scheduleAlias);
-  return `((${scheduleAlias}.estado IN ('ejecutado', 'completado') AND NOT (${partialDelivery})) OR (${allDeliveries}))`;
+  // A future-dated schedule cannot be completed, even if a legacy/imported
+  // row was stored with estado=ejecutado or contains a delivery timestamp in
+  // the future. Otherwise it disappears from Próximos and is shown as
+  // Historial before its scheduled day.
+  const scheduleHasStarted = `${scheduleAlias}.fecha_programada <= ${BOGOTA_DATE_SQL}`;
+  return `(${scheduleHasStarted} AND (((${scheduleAlias}.estado IN ('ejecutado', 'completado') AND NOT (${partialDelivery})) OR (${allDeliveries}))))`;
 }
 
 async function dashboardMetrics(payload: Payload = {}) {
@@ -1683,6 +1688,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
           OR d_scope.enviado_por_id = ${userScopeParam}
         )
         AND d_scope.estado IN ('enviada', 'aprobada')
+        AND COALESCE(d_scope.fecha_ejecucion, ${BOGOTA_DATE_SQL}) <= ${BOGOTA_DATE_SQL}
    )` : null;
   // Admin lists represent the state of the whole maintenance. A technician
   // can complete only their own delivery, but the global row remains pending
@@ -1926,6 +1932,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
        WHERE am_scope.mantenimiento_programado_id = m.id
          AND ap_scope.tecnico_id = ${statusUserParam}
          AND d_scope.estado IN ('enviada', 'aprobada')
+         AND COALESCE(d_scope.fecha_ejecucion, ${BOGOTA_DATE_SQL}) <= ${BOGOTA_DATE_SQL}
     )` : null;
     const statusGloballyCompleted = globallyCompletedMaintenancePredicate();
     const statusPartiallySubmitted = partiallySubmittedMaintenanceDeliveryPredicate();
