@@ -1609,6 +1609,30 @@ function adminMaintenanceView(payload: Payload): AdminMaintenanceView {
     : "todos";
 }
 
+/**
+ * Returns the authoritative visibility rule for one mobile/web user.
+ *
+ * A maintenance may have one participant or many; the participant count is
+ * never part of the visibility decision. Every active assignment is enough
+ * for that technician to see the maintenance, while a group leader keeps
+ * the group-wide view. The authenticated user parameter is used by callers,
+ * never an arbitrary user id supplied by the client.
+ */
+function maintenanceVisibleToUserPredicate(userParam: string, maintenanceAlias = "m", groupAlias = "g") {
+  return `(
+    ${maintenanceAlias}.tecnico_principal_id = ${userParam}
+    OR ${groupAlias}.lider_id = ${userParam}
+    OR EXISTS (
+      SELECT 1
+        FROM public.mantenimientos_programados_participantes mp_visibility
+       WHERE mp_visibility.mantenimiento_id = ${maintenanceAlias}.id
+         AND mp_visibility.usuario_id = ${userParam}
+         AND COALESCE(mp_visibility.estado, 'activo') = 'activo'
+         AND mp_visibility.fecha_retiro IS NULL
+    )
+  )`;
+}
+
 function monthRange(value: unknown, fallbackDate: string) {
   const candidate = String(value || "");
   const month = /^\d{4}-\d{2}$/.test(candidate) ? candidate : fallbackDate.slice(0, 7);
@@ -1641,16 +1665,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   if (hasUserScope) {
     values.push(user.id);
     userScopeParam = `$${values.length}`;
-    filters.push(`(
-      m.tecnico_principal_id = ${userScopeParam}
-      OR g.lider_id = ${userScopeParam}
-      OR EXISTS (
-        SELECT 1 FROM public.mantenimientos_programados_participantes mp_scope
-         WHERE mp_scope.mantenimiento_id = m.id
-           AND mp_scope.usuario_id = ${userScopeParam}
-           AND mp_scope.estado = 'activo'
-      )
-    )`);
+    filters.push(maintenanceVisibleToUserPredicate(userScopeParam));
   }
   const ownSubmittedDelivery = userScopeParam ? `EXISTS (
     SELECT 1
@@ -1896,16 +1911,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     if (hasUserScope) {
       statusValues.push(user.id);
       statusUserParam = `$${statusValues.length}`;
-      statusFilters.push(`(
-        m.tecnico_principal_id = ${statusUserParam}
-        OR g.lider_id = ${statusUserParam}
-        OR EXISTS (
-          SELECT 1 FROM public.mantenimientos_programados_participantes mp_scope
-           WHERE mp_scope.mantenimiento_id = m.id
-             AND mp_scope.usuario_id = ${statusUserParam}
-             AND mp_scope.estado = 'activo'
-        )
-      )`);
+      statusFilters.push(maintenanceVisibleToUserPredicate(statusUserParam));
     }
     const statusOwnSubmittedDelivery = statusUserParam ? `EXISTS (
       SELECT 1
@@ -2238,16 +2244,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       const hasUserScope = Boolean(payload.usuarioId) || !["admin", "supervisor"].includes(user.rol);
       const values = hasUserScope ? [user.id] : [];
       const scope = hasUserScope
-        ? `WHERE (
-             m.tecnico_principal_id = $1
-             OR g.lider_id = $1
-             OR EXISTS (
-               SELECT 1 FROM public.mantenimientos_programados_participantes mp_scope
-                WHERE mp_scope.mantenimiento_id = m.id
-                  AND mp_scope.usuario_id = $1
-                  AND mp_scope.estado = 'activo'
-             )
-           )`
+        ? `WHERE ${maintenanceVisibleToUserPredicate("$1")}`
         : "";
       const { rows } = await dbQuery(`SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id,
         COALESCE((SELECT json_agg(json_build_object(
