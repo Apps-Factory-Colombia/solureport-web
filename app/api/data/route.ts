@@ -3626,10 +3626,19 @@ async function createOperationalActivity(payload: Payload, user: UserContext) {
     }
     if (!grupoId) throw new Error("La actividad requiere un grupo de trabajo.");
 
-    const { rows: permissionRows } = await client.query(
-      "SELECT public.usuario_puede_reportar_grupo($1::uuid, $2::uuid, $3::date) AS permitido",
-      [user.id, grupoId, dateOnly(payload.fechaOperacion) || bogotaClock().date],
-    );
+    // Recorridos y actividades grupales son permisos independientes. Un
+    // técnico con recorridos habilitados debe poder registrar el recorrido
+    // aunque no figure en grupo_reportadores_actividad; el grupo solo se
+    // conserva como contexto para líder, liquidación y trazabilidad.
+    const permissionQuery = type === "recorrido"
+      ? `SELECT (u.estado = 'activo' AND (COALESCE(u.tiene_recorrido, false) OR COALESCE(u.routes_enabled, false))) AS permitido
+           FROM public.usuarios u
+          WHERE u.id = $1::uuid`
+      : "SELECT public.usuario_puede_reportar_grupo($1::uuid, $2::uuid, $3::date) AS permitido";
+    const permissionValues = type === "recorrido"
+      ? [user.id]
+      : [user.id, grupoId, dateOnly(payload.fechaOperacion) || bogotaClock().date];
+    const { rows: permissionRows } = await client.query(permissionQuery, permissionValues);
     if (!permissionRows[0]?.permitido) {
       throw new Error("No tienes permiso para reportar actividades en este grupo.");
     }
