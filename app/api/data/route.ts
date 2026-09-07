@@ -1896,9 +1896,11 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
       filters.push(`${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}`);
       filters.push(`NOT (${globallyCompletedMaintenance})`);
     } else if (view === "proximos") {
-      values.push(today, addCalendarDays(today, 3));
       filters.push(`m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')`);
-      filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+      // La bandeja administrativa muestra todo lo pendiente del mes actual.
+      // Los elementos anteriores a hoy siguen perteneciendo a Vencidos.
+      filters.push(`m.fecha_programada >= date_trunc('month', ${BOGOTA_DATE_SQL})::date`);
+      filters.push(`m.fecha_programada < (date_trunc('month', ${BOGOTA_DATE_SQL}) + INTERVAL '1 month')::date`);
       filters.push(`${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}`);
       filters.push(`NOT (${globallyCompletedMaintenance})`);
     } else if (view === "vencidos") {
@@ -2078,7 +2080,8 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
           AND ${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}
           AND NOT (${globallyCompletedMaintenance}))::int AS programados,
         COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
-          AND m.fecha_programada BETWEEN $1::date AND ($1::date + INTERVAL '3 days')::date
+          AND m.fecha_programada >= date_trunc('month', $1::date)::date
+          AND m.fecha_programada < (date_trunc('month', $1::date) + INTERVAL '1 month')::date
           AND ${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}
           AND NOT (${globallyCompletedMaintenance}))::int AS proximos,
         COUNT(*) FILTER (WHERE (

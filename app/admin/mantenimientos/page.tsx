@@ -565,14 +565,10 @@ export default function MantenimientosPage() {
   }, []);
 
   const proximosMantenimientos = useMemo(() => {
-    return maintenances.filter((m) => {
-      if (!canScheduleMaintenance(m)) return false;
-      const fecha = parseLocalDate(m.fechaProgramada);
-      const diffTime = fecha.getTime() - todayStart.getTime();
-      const diffDays = diffTime / (1000 * 60 * 60 * 24);
-      return diffDays >= 0 && diffDays <= 3;
-    });
-  }, [canScheduleMaintenance, maintenances, todayStart]);
+    return [...maintenances]
+      .filter(canScheduleMaintenance)
+      .sort((left, right) => left.fechaProgramada.localeCompare(right.fechaProgramada));
+  }, [canScheduleMaintenance, maintenances]);
 
   const programados = useMemo(() => {
     const scheduledMaintenances = maintenances.filter((m) => {
@@ -1281,10 +1277,10 @@ export default function MantenimientosPage() {
               <CardHeader>
                 <CardTitle className="text-lg text-foreground flex items-center gap-2">
                   <Bell className="h-5 w-5 text-amber-400" />
-                  Mantenimientos por Realizar (Próximos 3 días)
+                  Mantenimientos por Realizar (Mes actual)
                 </CardTitle>
                 <p className="text-sm text-muted-foreground">
-                  Estos mantenimientos se cargan automáticamente 3 días antes de su fecha. Asigne líder o técnico, fecha y hora para programarlos.
+                  Aquí se muestran todos los mantenimientos pendientes o programados del mes actual, desde hoy hasta su último día. Los anteriores a hoy aparecen en Vencidos.
                 </p>
               </CardHeader>
               <CardContent>
