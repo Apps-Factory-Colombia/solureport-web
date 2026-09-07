@@ -773,6 +773,13 @@ export default function AprobacionesPage() {
     (report: ActivityReport) => {
       if (!usesSharedBasePricing(report)) return report.costoActividad;
 
+      // A maintenance has one canonical technical value. Do not derive its
+      // total from delivered participant rows: when only one technician has
+      // submitted, the other row can legitimately still be zero/pending.
+      if (report.tipo === "mantenimiento_preventivo") {
+        return getSharedGroupBaseValue(report);
+      }
+
       if (isSharedVisit(report)) {
         return getSharedGroupBaseValue(report);
       }
@@ -880,17 +887,23 @@ export default function AprobacionesPage() {
   );
   const buildSharedParticipantDrafts = useCallback((report: ActivityReport) => {
     const sharedReports = getSharedReportsForReport(report);
+    const sharedTotal = Math.max(0, Math.round(getActivityTotalForReport(report)));
     return dedupeSharedParticipantDrafts(sharedReports.map((item) => ({
       reportId: item.id,
       tecnicoId: item.tecnicoId,
       nombre: getParticipantName(item.tecnicoId),
       percentage: String(getParticipationPercentageForReport(item)),
-      amount: String(item.costoActividad),
+      // A participant that has not submitted yet can have no delivered value
+      // in the activity row. The administrator still needs to see and edit a
+      // complete reparto for the single canonical maintenance.
+      amount: String(item.costoActividad > 0
+        ? item.costoActividad
+        : Math.round((sharedTotal * getParticipationPercentageForReport(item)) / 100)),
       periodoId: item.periodoId,
       visitId: item.visitaTecnicaId,
       defaultCost: getDefaultCostForReport(item),
     })));
-  }, [getDefaultCostForReport, getParticipantName, getParticipationPercentageForReport, getSharedReportsForReport]);
+  }, [getActivityTotalForReport, getDefaultCostForReport, getParticipantName, getParticipationPercentageForReport, getSharedReportsForReport]);
   const normalizeParticipantDrafts = useCallback((nextDrafts: SharedParticipantDraft[]) => {
     return nextDrafts.map((draft) => ({
       ...draft,
@@ -995,6 +1008,25 @@ export default function AprobacionesPage() {
       return next;
     });
   }, [syncParticipantDraftAmounts]);
+  const handleSharedParticipantPercentageChange = useCallback((reportId: string, value: string) => {
+    setSharedParticipantDrafts((current) => {
+      const next = current.map((draft) => draft.reportId === reportId
+        ? { ...draft, percentage: value }
+        : draft);
+      const totalPercentage = next.reduce((sum, draft) => sum + Math.max(0, Number(draft.percentage || 0) || 0), 0);
+      let assigned = 0;
+      return next.map((draft, index) => {
+        const percentage = Math.max(0, Number(draft.percentage || 0) || 0);
+        const amount = index === next.length - 1
+          ? Math.max(0, Math.round(costDraft - assigned))
+          : totalPercentage > 0
+            ? Math.max(0, Math.round((percentage / totalPercentage) * costDraft))
+            : 0;
+        assigned += amount;
+        return { ...draft, amount: String(amount) };
+      });
+    });
+  }, [costDraft]);
   const handleEditableCostChange = useCallback((value: string) => {
     setEditableCost(value);
 
@@ -1050,12 +1082,14 @@ export default function AprobacionesPage() {
     const totalAmount = participants.reduce((sum, participant) => sum + participant.amount, 0);
     const totalPercentage = Number(participants.reduce((sum, participant) => sum + participant.percentage, 0).toFixed(2));
     const isAmountBalanced = totalAmount === costDraft;
-    const isPercentageBalanced = Math.abs(totalPercentage - 100) <= 0.05;
+    const hasPositivePercentages = participants.every((participant) => participant.percentage > 0 && participant.percentage <= 100);
+    const isPercentageBalanced = hasPositivePercentages && Math.abs(totalPercentage - 100) <= 0.05;
 
     return {
       participants,
       totalAmount,
       totalPercentage,
+      hasPositivePercentages,
       isAmountBalanced,
       isPercentageBalanced,
       canSave: participants.length > 0 && isAmountBalanced && isPercentageBalanced,
@@ -3063,7 +3097,7 @@ export default function AprobacionesPage() {
                           <div className="mb-3 flex items-center justify-between gap-3">
                             <div>
                               <p className="text-sm font-semibold text-foreground">Reparto por técnico</p>
-                              <p className="text-xs text-muted-foreground">Edita los valores y los porcentajes se calculan automáticamente. Para guardar, el total debe completar 100%.</p>
+                              <p className="text-xs text-muted-foreground">Puedes editar el porcentaje y el valor de cada técnico, incluso si el otro aún no ha enviado su reporte. Para guardar, el total debe completar 100%.</p>
                             </div>
                             <Badge variant="outline" className="border-gold/20 bg-gold/10 text-gold">
                               Base: {formatCurrency(costDraft)}
@@ -3090,17 +3124,27 @@ export default function AprobacionesPage() {
                             </div>
                           </div>
                           <p className="mb-3 text-xs text-muted-foreground">
-                            Los porcentajes mostrados son automáticos y se redondean visualmente. El reparto solo se puede guardar cuando el total del porcentaje sea 100%.
+                            El reparto pertenece a una sola actividad de mantenimiento. Cada técnico conserva su entrega independiente; el administrador puede definir el porcentaje de cada uno antes de aprobar.
                           </p>
                           <div className="space-y-2">
                             {sharedParticipantsDraftSummary.participants.map((participant) => (
                               <div key={participant.reportId} className="grid grid-cols-1 gap-2 rounded-lg border border-border/50 bg-background/40 p-3 sm:grid-cols-[minmax(0,1fr)_110px_140px]">
                                 <div>
                                   <p className="text-sm font-medium text-foreground">{participant.nombre}</p>
-                                  <p className="text-xs text-muted-foreground">Porcentaje calculado: {formatRoundedPercentage(participant.percentage)}</p>
+                                  <p className="text-xs text-muted-foreground">Reporte independiente del técnico</p>
                                 </div>
-                                <div className="flex items-center justify-end rounded-md border border-border/50 bg-background/70 px-3 text-sm font-medium text-foreground">
-                                  {formatRoundedPercentage(participant.percentage)}
+                                <div className="relative">
+                                  <Input
+                                    data-testid={`approval-participant-percentage-${participant.reportId}`}
+                                    type="number"
+                                    min="0.01"
+                                    max="100"
+                                    step="0.01"
+                                    value={String(participant.percentage)}
+                                    onChange={(e) => handleSharedParticipantPercentageChange(participant.reportId, e.target.value)}
+                                    className="h-9 bg-background/70 border-border/50 text-right text-foreground"
+                                    aria-label={`Porcentaje de ${participant.nombre}`}
+                                  />
                                 </div>
                                 <div className="relative">
                                   <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />

@@ -122,6 +122,39 @@ function roundCurrency(value: number) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
+/**
+ * The participant percentage constraint is intentionally strict: every row
+ * must be positive and the set must represent a complete 100% split. An
+ * administrator may open a shared maintenance before every technician has
+ * delivered, so incomplete drafts must be normalized before PostgreSQL sees
+ * them. Preserve valid configured percentages; otherwise scale positive
+ * values or split evenly when one or more values are missing/zero.
+ */
+function normalizePositivePercentageRows<T extends Record<string, any>>(items: T[]): Array<T & { porcentaje: number }> {
+  const parsed = items.map((item) => ({ ...item, porcentaje: number(item.porcentaje, 0) }));
+  if (!parsed.length) return parsed;
+
+  const total = parsed.reduce((sum, item) => sum + item.porcentaje, 0);
+  const valid = parsed.every((item) => item.porcentaje > 0 && item.porcentaje <= 100)
+    && Math.abs(total - 100) <= 0.01;
+  if (valid) return parsed;
+
+  const hasMissingPercentage = parsed.some((item) => item.porcentaje <= 0);
+  const basis = hasMissingPercentage
+    ? parsed.map(() => 1)
+    : parsed.map((item) => item.porcentaje);
+  const basisTotal = basis.reduce((sum, value) => sum + value, 0) || parsed.length;
+  let assigned = 0;
+
+  return parsed.map((item, index) => {
+    const porcentaje = index === parsed.length - 1
+      ? roundCurrency(100 - assigned)
+      : roundCurrency((basis[index] * 100) / basisTotal);
+    assigned += porcentaje;
+    return { ...item, porcentaje: Math.max(0.01, porcentaje) };
+  });
+}
+
 function integerField(value: unknown, label: string, minimum: number, maximum?: number) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < minimum || (maximum !== undefined && parsed > maximum)) {
@@ -1464,6 +1497,69 @@ function normalizeMaintenanceParticipants(payload: Payload, fallbackUserId?: str
   const total = participants.reduce((sum, item) => sum + item.porcentaje, 0);
   if (Math.abs(total - 100) > 0.01) throw new Error("La suma de porcentajes de los técnicos asignados debe ser exactamente 100%.");
   return participants;
+}
+
+/**
+ * Makes the canonical operational activity contain every active maintenance
+ * assignee. A first delivery must not wait for the other technician, but the
+ * shared activity still needs a valid participant row for each assignee so
+ * approvals and liquidation can see the same maintenance. Existing complete
+ * participant sets are left untouched; only incomplete legacy sets are
+ * rebuilt from the maintenance assignment split.
+ */
+async function ensureMaintenanceActivityParticipants(client: any, activityId: string, maintenanceId: string) {
+  const { rows: maintenanceRows } = await client.query(
+    `SELECT costo_tecnico_presupuestado, sede_id, fecha_programada
+       FROM public.mantenimientos_programados
+      WHERE id = $1`,
+    [maintenanceId],
+  );
+  const maintenance = maintenanceRows[0];
+  if (!maintenance) throw new Error("No se encontró el mantenimiento asociado al reporte.");
+
+  const { rows: assignmentRows } = await client.query(
+    `SELECT usuario_id, rol_participacion, porcentaje
+       FROM public.mantenimientos_programados_participantes
+      WHERE mantenimiento_id = $1 AND estado = 'activo'
+      ORDER BY rol_participacion = 'principal' DESC, created_at`,
+    [maintenanceId],
+  );
+  // Historical maintenance activities may not have an assignment snapshot.
+  // They can still be edited by administration using their existing
+  // operational participant rows; there is nothing to synthesize in that
+  // case, so do not block the save.
+  if (!assignmentRows.length) return;
+
+  const assignments = normalizePositivePercentageRows(assignmentRows);
+  const { rows: existingRows } = await client.query(
+    `SELECT id, tecnico_id
+       FROM public.actividades_operativas_participantes
+      WHERE actividad_id = $1
+      FOR UPDATE`,
+    [activityId],
+  );
+  const existingByTechnician = new Map(existingRows.map((row: any) => [String(row.tecnico_id), row]));
+  const missing = assignments.some((item) => !existingByTechnician.has(String(item.usuario_id)));
+  const valueBase = number(maintenance.costo_tecnico_presupuestado);
+
+  for (const item of assignments) {
+    const porcentaje = item.porcentaje;
+    const valorGanado = roundCurrency(valueBase * porcentaje / 100);
+    if (!missing && existingByTechnician.has(String(item.usuario_id))) continue;
+
+    await client.query(
+      `INSERT INTO public.actividades_operativas_participantes
+        (actividad_id, tecnico_id, rol_participacion, porcentaje, valor_base, valor_ganado)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (actividad_id, tecnico_id) DO UPDATE SET
+         rol_participacion = EXCLUDED.rol_participacion,
+         porcentaje = EXCLUDED.porcentaje,
+         valor_base = EXCLUDED.valor_base,
+         valor_ganado = EXCLUDED.valor_ganado,
+         updated_at = clock_timestamp()`,
+      [activityId, item.usuario_id, item.rol_participacion, porcentaje, valueBase, valorGanado],
+    );
+  }
 }
 
 async function replaceMaintenanceParticipants(client: any, maintenanceId: string, payload: Payload, fallbackUserId?: string) {
@@ -3560,7 +3656,7 @@ async function syncActivityParticipantValue(client: any, activityId: string, par
   const normalizedAmount = Math.max(0, roundCurrency(amount));
   const normalizedPercentage = percentage == null
     ? number(participantRows[0].porcentaje)
-    : Math.max(0, Math.min(100, number(percentage)));
+    : Math.max(0.01, Math.min(100, number(percentage)));
 
   await client.query(
     `UPDATE public.actividades_operativas_participantes
@@ -3613,7 +3709,7 @@ async function updateActivityValues(payload: Payload) {
     : payload.value !== undefined && payload.clientCost === undefined
       ? number(payload.value)
       : null;
-  const sharedParticipants = jsonArray(payload.participantOverrides || payload.sharedVisitParticipants)
+  const rawSharedParticipants = jsonArray(payload.participantOverrides || payload.sharedVisitParticipants)
     .map((item) => ({
       participantId: canonicalParticipantId(item.reportId || item.id)
         || String(item.participantId || item.participanteId || "").trim()
@@ -3622,6 +3718,9 @@ async function updateActivityValues(payload: Payload) {
       amount: number(item.valorGanado ?? item.amount ?? item.valor_ganado),
     }))
     .filter((item) => item.participantId);
+  const sharedParticipants = normalizePositivePercentageRows(
+    rawSharedParticipants.map((item) => ({ ...item, porcentaje: item.percentage ?? 0 })),
+  ).map(({ porcentaje, ...item }) => ({ ...item, percentage: porcentaje }));
 
   const fields: string[] = [];
   const values: unknown[] = [];
@@ -3637,9 +3736,10 @@ async function updateActivityValues(payload: Payload) {
 
   return withTransaction(async (client) => {
     const { rows: activityRows } = await client.query(
-      `SELECT id, tipo, valor_aplicado
+      `SELECT a.id, a.tipo, a.valor_aplicado, am.mantenimiento_programado_id
          FROM public.actividades_operativas
-        WHERE id = $1
+          a LEFT JOIN public.actividades_operativas_mantenimientos am ON am.actividad_id = a.id
+        WHERE a.id = $1
         FOR UPDATE`,
       [id],
     );
@@ -3654,6 +3754,14 @@ async function updateActivityValues(payload: Payload) {
           WHERE id = $${values.length}`,
         values,
       );
+    }
+
+    // A maintenance can be reviewed before every assigned technician has
+    // submitted. Ensure the canonical activity has valid rows for all active
+    // assignees before applying the administrator's reparto. This preserves
+    // one maintenance in approvals while keeping each participant independent.
+    if (activity.tipo === "mantenimiento" && activity.mantenimiento_programado_id) {
+      await ensureMaintenanceActivityParticipants(client, id, activity.mantenimiento_programado_id);
     }
 
     if (!hasTechnicalValue || technicalValue == null) return true;
@@ -3697,15 +3805,24 @@ async function updateActivityValues(payload: Payload) {
 async function updateMaintenanceApproval(activityId: string, state: "aprobada" | "rechazada" | "pendiente", comment: string | null, user: UserContext) {
   return withTransaction(async (client) => {
     const { rows: activityRows } = await client.query(
-      `SELECT a.id, a.tipo, a.grupo_id, g.lider_id
+      `SELECT a.id, a.tipo, a.grupo_id, g.lider_id, am.mantenimiento_programado_id
          FROM public.actividades_operativas a
          LEFT JOIN public.grupos_trabajo g ON g.id = a.grupo_id
+         LEFT JOIN public.actividades_operativas_mantenimientos am ON am.actividad_id = a.id
         WHERE a.id = $1 AND a.tipo = 'mantenimiento'
         FOR UPDATE OF a`,
       [activityId],
     );
     const activity = activityRows[0];
     if (!activity) throw new Error("No se encontró el mantenimiento para aprobar.");
+
+    // Approval is an administrative action and may happen after only one
+    // technician has delivered. Materialize all assigned technicians with a
+    // valid split before saving the global approval; the missing delivery is
+    // intentionally not fabricated.
+    if (activity.mantenimiento_programado_id) {
+      await ensureMaintenanceActivityParticipants(client, activityId, activity.mantenimiento_programado_id);
+    }
 
     const reviewerId = user.id || activity.lider_id;
     const { rows: existingApprovals } = await client.query(
