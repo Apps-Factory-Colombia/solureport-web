@@ -24,8 +24,23 @@ const BOGOTA_NOW_SQL = "(now() AT TIME ZONE 'America/Bogota')";
 // La fecha de vencimiento operativa incluye la hora programada. Cuando una
 // fila histórica no tiene hora, se considera vigente hasta el final de ese
 // día, que conserva el comportamiento anterior basado únicamente en fecha.
-function maintenanceDueAtSql(scheduleAlias = "m") {
-  return `(${scheduleAlias}.fecha_programada::timestamp + COALESCE(${scheduleAlias}.hora_programada, TIME '23:59:59'))`;
+function maintenanceScheduledDateSql(scheduleAlias = "m", contractAlias = "cm") {
+  // Contract rows use the contract's start date, ordinal and frequency as
+  // the source of truth. Standalone maintenance rows keep their manually
+  // assigned date. Contract days are capped at 28 by the API, so adding the
+  // day offset after moving from the first day of the month is calendar-safe.
+  return `(CASE
+    WHEN ${contractAlias}.id IS NOT NULL AND ${scheduleAlias}.numero IS NOT NULL
+      THEN (make_date(${contractAlias}.anio, ${contractAlias}.mes_inicio, 1)
+        + ((${scheduleAlias}.numero - 1) * ${contractAlias}.frecuencia_meses) * INTERVAL '1 month'
+        + (${contractAlias}.dia_inicio - 1) * INTERVAL '1 day')::date
+    ELSE ${scheduleAlias}.fecha_programada
+  END)`;
+}
+
+function maintenanceDueAtSql(scheduleAlias = "m", scheduledDateExpression?: string) {
+  const scheduledDate = scheduledDateExpression || `${scheduleAlias}.fecha_programada`;
+  return `(${scheduledDate}::timestamp + COALESCE(${scheduleAlias}.hora_programada, TIME '23:59:59'))`;
 }
 
 function number(value: unknown, fallback = 0): number {
@@ -282,6 +297,10 @@ function mapPeriod(row: any): any {
 function mapMaintenance(row: any): any {
   const sourceState = row.estado_usuario || row.estado;
   const state = sourceState === "ejecutado" ? "realizado" : sourceState === "asignado" ? "programado" : sourceState;
+  const contractualDate = row.contrato_id && row.contrato_anio
+    ? contractMaintenanceScheduledDate(row, row.numero)
+    : null;
+  const scheduledDate = contractualDate || dateOnly(row.fecha_programada_efectiva) || dateOnly(row.fecha_programada) || "";
   const participants = jsonArray(row.participantes).map((item) => ({
     id: item.id,
     usuarioId: item.usuarioId || item.usuario_id,
@@ -306,7 +325,7 @@ function mapMaintenance(row: any): any {
     liderId: row.lider_id || undefined,
     tecnicoPrincipalId: row.tecnico_principal_id || undefined,
     titulo: row.titulo || undefined,
-    fechaProgramada: dateOnly(row.fecha_programada) || "",
+    fechaProgramada: scheduledDate,
     horaProgramada: row.hora_programada ? String(row.hora_programada).slice(0, 5) : undefined,
     proximaFecha: dateOnly(row.proxima_fecha) || undefined,
     estado: state,
@@ -324,6 +343,12 @@ function mapMaintenance(row: any): any {
 }
 
 function mapContract(row: any, maintenanceRows: any[] = []): any {
+  const contractSchedule = buildContractSchedule({
+    anio: row.anio,
+    mesInicio: row.mes_inicio,
+    diaInicio: row.dia_inicio,
+    cantidadMantenimientos: row.cantidad_mantenimientos,
+  });
   return {
     id: row.id,
     clienteId: row.cliente_id,
@@ -340,8 +365,8 @@ function mapContract(row: any, maintenanceRows: any[] = []): any {
     mantenimientosRealizados: maintenanceRows.map((item) => ({
       id: item.id,
       numero: number(item.numero),
-      mes: Number(String(item.fecha_programada || "").slice(5, 7)) || number(item.numero),
-      fechaProgramada: dateOnly(item.fecha_programada) || "",
+      mes: Number(String(contractSchedule.find((expected) => expected.numero === number(item.numero))?.fechaProgramada || item.fecha_programada || "").slice(5, 7)) || number(item.numero),
+      fechaProgramada: contractSchedule.find((expected) => expected.numero === number(item.numero))?.fechaProgramada || dateOnly(item.fecha_programada) || "",
       fechaRealizado: dateOnly(item.fecha_realizado) || undefined,
       tecnicoId: item.tecnico_principal_id || undefined,
       estado: item.estado === "ejecutado" ? "realizado" : item.estado === "asignado" ? "programado" : item.estado,
@@ -818,20 +843,21 @@ function partiallySubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m") {
  * but reopens the effective global state of rows that were incorrectly closed
  * after only one of several participants delivered.
  */
-function globallyCompletedMaintenancePredicate(scheduleAlias = "m") {
+function globallyCompletedMaintenancePredicate(scheduleAlias = "m", scheduledDateExpression?: string) {
   const partialDelivery = partiallySubmittedMaintenanceDeliveryPredicate(scheduleAlias);
   const allDeliveries = allSubmittedMaintenanceDeliveryPredicate(scheduleAlias);
   // A future-dated schedule cannot be completed, even if a legacy/imported
   // row was stored with estado=ejecutado or contains a delivery timestamp in
   // the future. Otherwise it disappears from Próximos and is shown as
   // Historial before its scheduled day.
-  const scheduleHasStarted = `${scheduleAlias}.fecha_programada <= ${BOGOTA_DATE_SQL}`;
+  const scheduleHasStarted = `${scheduledDateExpression || `${scheduleAlias}.fecha_programada`} <= ${BOGOTA_DATE_SQL}`;
   return `(${scheduleHasStarted} AND (((${scheduleAlias}.admin_completado_at IS NOT NULL) OR (${scheduleAlias}.estado IN ('ejecutado', 'completado') AND NOT (${partialDelivery})) OR (${allDeliveries}))))`;
 }
 
 async function dashboardMetrics(payload: Payload = {}) {
   const clock = bogotaClock();
-  const maintenanceDueAt = maintenanceDueAtSql();
+  const scheduledDateExpression = maintenanceScheduledDateSql("m", "cm");
+  const maintenanceDueAt = maintenanceDueAtSql("m", scheduledDateExpression);
   let startDate = dateOnly(payload.startDate) || currentMonthRange(clock.date).startDate;
   let endDate = dateOnly(payload.endDate) || currentMonthRange(clock.date).endDate;
 
@@ -852,14 +878,20 @@ async function dashboardMetrics(payload: Payload = {}) {
   // every active participant has sent a delivery. This prevents one delivery
   // from hiding the maintenance from pending/overdue views or inflating the
   // completed counters.
-  const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate();
+  const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate("m", scheduledDateExpression);
   const partiallySubmittedMaintenanceDelivery = partiallySubmittedMaintenanceDeliveryPredicate();
   const allSubmittedMaintenanceDeliveryInRange = allSubmittedMaintenanceDeliveryPredicate("m", { start: "$1", end: "$2" });
-  const globallyCompletedMaintenanceForMetric = globallyCompletedMaintenancePredicate("m_metric");
-  const globallyCompletedMaintenanceForActivity = globallyCompletedMaintenancePredicate("m_report");
+  const globallyCompletedMaintenanceForMetric = globallyCompletedMaintenancePredicate(
+    "m_metric",
+    maintenanceScheduledDateSql("m_metric", "cm_metric"),
+  );
+  const globallyCompletedMaintenanceForActivity = globallyCompletedMaintenancePredicate(
+    "m_report",
+    maintenanceScheduledDateSql("m_report", "cm_report"),
+  );
   const completedMaintenanceInRange = `(
     (${globallyCompletedMaintenance})
-    AND COALESCE(m.fecha_realizado, m.fecha_programada) BETWEEN $1::date AND $2::date
+    AND COALESCE(m.fecha_realizado, ${scheduledDateExpression}) BETWEEN $1::date AND $2::date
     OR ${allSubmittedMaintenanceDeliveryInRange}
   )`;
 
@@ -867,7 +899,8 @@ async function dashboardMetrics(payload: Payload = {}) {
     `SELECT
        (SELECT COUNT(*)::int
          FROM public.mantenimientos_programados m
-         WHERE m.fecha_programada BETWEEN $1::date AND $2::date
+         LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
+         WHERE ${scheduledDateExpression} BETWEEN $1::date AND $2::date
            AND ${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}
            AND m.estado IN ('programado', 'asignado')
            AND NOT (${globallyCompletedMaintenance})) AS programados,
@@ -877,11 +910,13 @@ async function dashboardMetrics(payload: Payload = {}) {
            AND m.estado IN ('en_ejecucion', 'en_progreso')) AS en_ejecucion,
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
+         LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
          WHERE m.estado <> 'cancelado'
            AND (${completedMaintenanceInRange})) AS mantenimientos_agenda_realizados,
        (SELECT COUNT(*)::int
           FROM public.mantenimientos_programados m
-         WHERE m.fecha_programada <= $2::date
+         LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
+         WHERE ${scheduledDateExpression} <= $2::date
            AND (
              m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
              OR (${partiallySubmittedMaintenanceDelivery})
@@ -895,6 +930,8 @@ async function dashboardMetrics(payload: Payload = {}) {
                 ON am_metric.actividad_id = a_metric.id
               JOIN public.mantenimientos_programados m_report
                 ON m_report.id = am_metric.mantenimiento_programado_id
+              LEFT JOIN public.contratos_mantenimiento cm_report
+                ON cm_report.id = m_report.contrato_id
              WHERE a_metric.tipo = 'mantenimiento'
                AND a_metric.estado IN ('pendiente_aprobacion', 'completada', 'aprobada', 'ejecutado')
                AND a_metric.fecha_operacion BETWEEN $1::date AND $2::date
@@ -911,8 +948,10 @@ async function dashboardMetrics(payload: Payload = {}) {
             UNION
             SELECT m_metric.id::text AS canonical_id
               FROM public.mantenimientos_programados m_metric
+              LEFT JOIN public.contratos_mantenimiento cm_metric
+                ON cm_metric.id = m_metric.contrato_id
              WHERE ${globallyCompletedMaintenanceForMetric}
-               AND COALESCE(m_metric.fecha_realizado, m_metric.fecha_programada) BETWEEN $1::date AND $2::date
+               AND COALESCE(m_metric.fecha_realizado, ${maintenanceScheduledDateSql("m_metric", "cm_metric")}) BETWEEN $1::date AND $2::date
           ) reported_maintenance
         ) AS mantenimientos_reportados,
        (SELECT COUNT(DISTINCT a.id)::int
@@ -923,7 +962,8 @@ async function dashboardMetrics(payload: Payload = {}) {
           FROM public.usuarios u
          WHERE u.rol = 'tecnico' AND u.estado = 'activo') AS tecnicos_activos,
        (SELECT COUNT(*)::int
-         FROM public.mantenimientos_programados m
+          FROM public.mantenimientos_programados m
+         LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
          WHERE ${maintenanceDueAt} < ${BOGOTA_NOW_SQL}
            AND (
              m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
@@ -953,9 +993,10 @@ async function dashboardMetrics(payload: Payload = {}) {
 async function overdueMaintenanceRows(payload: Payload = {}) {
   const today = bogotaClock().date;
   const values: unknown[] = [];
-  const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate();
+  const scheduledDateExpression = maintenanceScheduledDateSql();
+  const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate("m", scheduledDateExpression);
   const partiallySubmittedMaintenanceDelivery = partiallySubmittedMaintenanceDeliveryPredicate();
-  const maintenanceDueAt = maintenanceDueAtSql();
+  const maintenanceDueAt = maintenanceDueAtSql("m", scheduledDateExpression);
   const filters = [
     `${maintenanceDueAt} < ${BOGOTA_NOW_SQL}`,
     `(
@@ -973,7 +1014,8 @@ async function overdueMaintenanceRows(payload: Payload = {}) {
     filters.push(`m.grupo_id = $${values.length}`);
   }
   const { rows } = await dbQuery(
-    `SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id,
+    `SELECT m.*, ${scheduledDateExpression} AS fecha_programada_efectiva,
+        c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id,
        COALESCE((SELECT json_agg(json_build_object(
           'id', mp.id,
           'usuario_id', mp.usuario_id,
@@ -989,6 +1031,7 @@ async function overdueMaintenanceRows(payload: Payload = {}) {
        JOIN public.clientes c ON c.id = m.cliente_id
        LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
        LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+       LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
       WHERE ${filters.join(" AND ")}
       ORDER BY ${maintenanceDueAt} DESC, m.created_at DESC` ,
     values,
@@ -1854,9 +1897,10 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   const hasUserScope = !adminView && (Boolean(payload.usuarioId) || !privileged);
   const values: unknown[] = [];
   const filters: string[] = ["m.estado <> 'cancelado'"];
-  const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate();
+  const scheduledDateExpression = maintenanceScheduledDateSql();
+  const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate("m", scheduledDateExpression);
   const partiallySubmittedMaintenanceDelivery = partiallySubmittedMaintenanceDeliveryPredicate();
-  const maintenanceDueAt = maintenanceDueAtSql();
+  const maintenanceDueAt = maintenanceDueAtSql("m", scheduledDateExpression);
   let userScopeParam: string | null = null;
 
   if (hasUserScope) {
@@ -1899,8 +1943,8 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
       filters.push(`m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')`);
       // La bandeja administrativa muestra todo lo pendiente del mes actual.
       // Los elementos anteriores a hoy siguen perteneciendo a Vencidos.
-      filters.push(`m.fecha_programada >= date_trunc('month', ${BOGOTA_DATE_SQL})::date`);
-      filters.push(`m.fecha_programada < (date_trunc('month', ${BOGOTA_DATE_SQL}) + INTERVAL '1 month')::date`);
+      filters.push(`${scheduledDateExpression} >= date_trunc('month', ${BOGOTA_DATE_SQL})::date`);
+      filters.push(`${scheduledDateExpression} < (date_trunc('month', ${BOGOTA_DATE_SQL}) + INTERVAL '1 month')::date`);
       filters.push(`${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}`);
       filters.push(`NOT (${globallyCompletedMaintenance})`);
     } else if (view === "vencidos") {
@@ -1917,13 +1961,13 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
         filters.push(`EXISTS (
           SELECT 1 FROM public.periodos_liquidacion period_filter
            WHERE period_filter.id = $${values.length}
-             AND COALESCE(m.fecha_realizado, m.fecha_programada) BETWEEN period_filter.fecha_inicio AND period_filter.fecha_fin
+              AND COALESCE(m.fecha_realizado, ${scheduledDateExpression}) BETWEEN period_filter.fecha_inicio AND period_filter.fecha_fin
         )`);
       }
     } else if (view === "calendario") {
       const range = monthRange(payload.month, today);
       values.push(range.start, range.end);
-      filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+      filters.push(`${scheduledDateExpression} BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
     } else if (payload.status) {
       const status = String(payload.status);
       if (status === "vencido") {
@@ -1950,11 +1994,11 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     if (ownSubmittedDelivery) filters.push(`NOT (${ownSubmittedDelivery})`);
     if (category === "esta_semana") {
       values.push(week.start, week.end);
-      filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+      filters.push(`${scheduledDateExpression} BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
       filters.push(`${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}`);
     } else if (category === "proximos") {
       values.push(week.end);
-      filters.push(`m.fecha_programada > $${values.length}::date`);
+      filters.push(`${scheduledDateExpression} > $${values.length}::date`);
     } else {
       filters.push(`${maintenanceDueAt} < ${BOGOTA_NOW_SQL}`);
     }
@@ -1965,7 +2009,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     values.push(`%${search.toLowerCase()}%`);
     const searchParam = `$${values.length}`;
     filters.push(`lower(concat_ws(' ',
-      coalesce(activity.codigo, 'MP-' || to_char(m.fecha_programada, 'YYYYMMDD') || '-' || upper(left(replace(m.id::text, '-', ''), 10))),
+      coalesce(activity.codigo, 'MP-' || to_char(${scheduledDateExpression}, 'YYYYMMDD') || '-' || upper(left(replace(m.id::text, '-', ''), 10))),
       coalesce(activity.titulo, ''), coalesce(activity.descripcion, ''),
       coalesce(activity.descripcion_pendiente, ''), coalesce(m.observaciones, ''),
       coalesce(m.tipo_pendiente, ''), coalesce(c.nombre, ''), coalesce(s.nombre, ''), coalesce(s.direccion, ''),
@@ -1979,7 +2023,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   if (adminView && payload.month && view !== "calendario" && !(view === "programados" && search)) {
     const range = monthRange(payload.month, today);
     values.push(range.start, range.end);
-    filters.push(`m.fecha_programada BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
+    filters.push(`${scheduledDateExpression} BETWEEN $${values.length - 1}::date AND $${values.length}::date`);
   }
 
   const baseFrom = `
@@ -1987,6 +2031,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
     JOIN public.clientes c ON c.id = m.cliente_id
     LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
     LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+    LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
     LEFT JOIN LATERAL (
       SELECT am.titulo, am.descripcion_pendiente, a.descripcion, a.codigo
         FROM public.actividades_operativas_mantenimientos am
@@ -1999,24 +2044,25 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   const order = adminView
     ? view === "vencidos" || view === "realizados"
       ? view === "realizados"
-        ? "COALESCE(m.fecha_realizado, m.fecha_programada) DESC NULLS LAST, m.created_at DESC, m.id DESC"
+        ? `COALESCE(m.fecha_realizado, ${scheduledDateExpression}) DESC NULLS LAST, m.created_at DESC, m.id DESC`
         : `${maintenanceDueAt} DESC NULLS LAST, m.created_at DESC, m.id DESC`
       : view === "calendario"
-        ? "m.fecha_programada ASC NULLS LAST, m.created_at ASC, m.id ASC"
+        ? `${scheduledDateExpression} ASC NULLS LAST, m.created_at ASC, m.id ASC`
         : `${maintenanceDueAt} ASC NULLS LAST, m.created_at ASC, m.id ASC`
     : category === "vencidos"
       ? `${maintenanceDueAt} DESC NULLS LAST, m.created_at DESC, m.id DESC`
       : category === "historial"
-        ? "COALESCE(m.fecha_realizado, m.fecha_programada) DESC NULLS LAST, m.created_at DESC, m.id DESC"
-        : `${maintenanceDueAt} ASC NULLS LAST, m.created_at ASC, m.id ASC`;
+        ? `COALESCE(m.fecha_realizado, ${scheduledDateExpression}) DESC NULLS LAST, m.created_at DESC, m.id DESC`
+      : `${maintenanceDueAt} ASC NULLS LAST, m.created_at ASC, m.id ASC`;
 
   const pageValues = [...values, pageSize, offset];
   const limitParam = pageValues.length - 1;
   const offsetParam = pageValues.length;
   const { rows } = await dbQuery(
     `SELECT m.*,
+      ${scheduledDateExpression} AS fecha_programada_efectiva,
       ${displayStateExpression} AS estado_usuario,
-      COALESCE(activity.codigo, 'MP-' || to_char(m.fecha_programada, 'YYYYMMDD') || '-' || upper(left(replace(m.id::text, '-', ''), 10))) AS codigo,
+      COALESCE(activity.codigo, 'MP-' || to_char(${scheduledDateExpression}, 'YYYYMMDD') || '-' || upper(left(replace(m.id::text, '-', ''), 10))) AS codigo,
       COALESCE(activity.titulo, c.nombre, 'Mantenimiento programado') AS titulo,
       COALESCE(activity.descripcion, activity.descripcion_pendiente, m.observaciones) AS descripcion,
       c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id,
@@ -2070,7 +2116,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
       realizedFilter += ` AND EXISTS (
         SELECT 1 FROM public.periodos_liquidacion period_count
          WHERE period_count.id = $${countValues.length}
-           AND COALESCE(m.fecha_realizado, m.fecha_programada) BETWEEN period_count.fecha_inicio AND period_count.fecha_fin
+           AND COALESCE(m.fecha_realizado, ${scheduledDateExpression}) BETWEEN period_count.fecha_inicio AND period_count.fecha_fin
       )`;
     }
     const { rows: countRows } = await dbQuery(
@@ -2080,8 +2126,8 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
           AND ${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}
           AND NOT (${globallyCompletedMaintenance}))::int AS programados,
         COUNT(*) FILTER (WHERE m.estado IN ('pendiente', 'programado', 'asignado', 'en_ejecucion', 'en_progreso')
-          AND m.fecha_programada >= date_trunc('month', $1::date)::date
-          AND m.fecha_programada < (date_trunc('month', $1::date) + INTERVAL '1 month')::date
+           AND ${scheduledDateExpression} >= date_trunc('month', $1::date)::date
+           AND ${scheduledDateExpression} < (date_trunc('month', $1::date) + INTERVAL '1 month')::date
           AND ${maintenanceDueAt} >= ${BOGOTA_NOW_SQL}
           AND NOT (${globallyCompletedMaintenance}))::int AS proximos,
         COUNT(*) FILTER (WHERE (
@@ -2091,7 +2137,8 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
           AND ${maintenanceDueAt} < ${BOGOTA_NOW_SQL}
           AND NOT (${globallyCompletedMaintenance}))::int AS vencidos,
         COUNT(*) FILTER (WHERE m.estado <> 'cancelado' AND ${realizedFilter})::int AS realizados
-       FROM public.mantenimientos_programados m`,
+        FROM public.mantenimientos_programados m
+        LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id`,
       countValues,
     );
     adminCounts = {
@@ -2106,7 +2153,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   let statusCounts: { pendientes: number; enProgreso: number; completados: number; total: number } | undefined;
   if (Boolean(payload.includeStatusCounts)) {
     const statusValues: unknown[] = [];
-    const statusFilters = ["m.estado <> 'cancelado'", `m.fecha_programada BETWEEN $1::date AND $2::date`];
+    const statusFilters = ["m.estado <> 'cancelado'", `${scheduledDateExpression} BETWEEN $1::date AND $2::date`];
     statusValues.push(week.start, week.end);
     let statusUserParam: string | null = null;
     if (hasUserScope) {
@@ -2127,7 +2174,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
          AND d_scope.estado IN ('enviada', 'aprobada')
          AND COALESCE(d_scope.fecha_ejecucion, ${BOGOTA_DATE_SQL}) <= ${BOGOTA_DATE_SQL}
     )` : null;
-    const statusGloballyCompleted = globallyCompletedMaintenancePredicate();
+     const statusGloballyCompleted = globallyCompletedMaintenance;
     const statusPartiallySubmitted = partiallySubmittedMaintenanceDeliveryPredicate();
     const statusPendingBase = `(
       m.estado IN ('pendiente', 'programado', 'asignado')
@@ -2148,8 +2195,9 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
         COUNT(*) FILTER (WHERE ${statusInProgressFilter})::int AS "enProgreso",
         COUNT(*) FILTER (WHERE ${statusCompletedFilter})::int AS completados,
         COUNT(*)::int AS total
-       FROM public.mantenimientos_programados m
-       LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+        FROM public.mantenimientos_programados m
+        LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+        LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
       WHERE ${statusFilters.join(" AND ")}`,
       statusValues,
     );
@@ -2440,6 +2488,24 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "contracts.updateMaintenance": {
       await requireAdmin(user);
       const normalizedState = payload.estado === "realizado" ? "ejecutado" : payload.estado;
+      const { rows: currentRows } = await dbQuery(
+        `SELECT m.*, cm.anio AS contrato_anio, cm.mes_inicio AS contrato_mes_inicio,
+                cm.dia_inicio AS contrato_dia_inicio,
+                cm.cantidad_mantenimientos AS contrato_cantidad_mantenimientos
+           FROM public.mantenimientos_programados m
+           LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
+          WHERE m.id = $1`,
+        [payload.id],
+      );
+      const current = currentRows[0];
+      if (!current) throw new Error("No se encontró el mantenimiento del contrato que intentas actualizar.");
+      const contractDate = current.contrato_id
+        ? contractMaintenanceScheduledDate(current, current.numero)
+        : null;
+      // Las fechas de un mantenimiento perteneciente a un contrato son
+      // derivadas del cronograma contractual. Solo las filas independientes
+      // pueden recibir una fecha manual desde este endpoint.
+      const scheduledDate = contractDate || dateOnly(payload.fechaProgramada) || dateOnly(current.fecha_programada);
       const { rows } = await dbQuery(
         `UPDATE public.mantenimientos_programados
             SET estado = COALESCE($2, estado),
@@ -2459,9 +2525,8 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
                 updated_at = clock_timestamp()
           WHERE id = $1
           RETURNING *`,
-        [payload.id, normalizedState, payload.fechaProgramada, payload.fechaRealizado, payload.tecnicoId, payload.valorRecaudado],
+        [payload.id, normalizedState, scheduledDate, payload.fechaRealizado, payload.tecnicoId, payload.valorRecaudado],
       );
-      if (!rows[0]) throw new Error("No se encontró el mantenimiento del contrato que intentas actualizar.");
       return {
         id: rows[0].id,
         numero: number(rows[0].numero),
@@ -2483,7 +2548,10 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       const scope = hasUserScope
         ? `WHERE ${maintenanceVisibleToUserPredicate("$1")}`
         : "";
-      const { rows } = await dbQuery(`SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id,
+      const { rows } = await dbQuery(`SELECT m.*, ${maintenanceScheduledDateSql()} AS fecha_programada_efectiva,
+        cm.anio AS contrato_anio, cm.mes_inicio AS contrato_mes_inicio,
+        cm.dia_inicio AS contrato_dia_inicio, cm.cantidad_mantenimientos AS contrato_cantidad_mantenimientos,
+        c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id,
         COALESCE((SELECT json_agg(json_build_object(
           'id', mp.id,
           'usuario_id', mp.usuario_id,
@@ -2513,11 +2581,12 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
           FROM public.mantenimientos_programados_participantes mp
          WHERE mp.mantenimiento_id = m.id AND mp.estado = 'activo'), '[]'::json) AS participantes
         FROM public.mantenimientos_programados m
-        JOIN public.clientes c ON c.id = m.cliente_id
-        LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
-        LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
-        ${scope}
-        ORDER BY m.fecha_programada DESC, m.created_at DESC`, values);
+         JOIN public.clientes c ON c.id = m.cliente_id
+         LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
+         LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+         LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
+         ${scope}
+         ORDER BY ${maintenanceScheduledDateSql()} DESC, m.created_at DESC`, values);
       return rows.map(mapMaintenance);
     }
     case "maintenances.overdue": { await requireAdmin(user); return overdueMaintenanceRows(payload); }
@@ -2529,7 +2598,16 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
         );
         if (!permissionRows[0]?.permitido) return null;
       }
-      const { rows } = await dbQuery("SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id FROM public.mantenimientos_programados m JOIN public.clientes c ON c.id = m.cliente_id LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id WHERE m.id = $1", [payload.id]);
+      const { rows } = await dbQuery(`SELECT m.*, ${maintenanceScheduledDateSql()} AS fecha_programada_efectiva,
+        cm.anio AS contrato_anio, cm.mes_inicio AS contrato_mes_inicio,
+        cm.dia_inicio AS contrato_dia_inicio, cm.cantidad_mantenimientos AS contrato_cantidad_mantenimientos,
+        c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id
+         FROM public.mantenimientos_programados m
+         JOIN public.clientes c ON c.id = m.cliente_id
+         LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
+         LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+         LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
+        WHERE m.id = $1`, [payload.id]);
       if (!rows[0]) return null;
       const maintenance = await enrichMaintenance(rows[0], user.id);
       return maintenance;
@@ -2564,11 +2642,15 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       );
 
       const { rows } = await dbQuery(
-        `SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id
+        `SELECT m.*, ${maintenanceScheduledDateSql()} AS fecha_programada_efectiva,
+                cm.anio AS contrato_anio, cm.mes_inicio AS contrato_mes_inicio,
+                cm.dia_inicio AS contrato_dia_inicio, cm.cantidad_mantenimientos AS contrato_cantidad_mantenimientos,
+                c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id
            FROM public.mantenimientos_programados m
            JOIN public.clientes c ON c.id = m.cliente_id
            LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
            LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+           LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
           WHERE m.id = $1`,
         [maintenanceId],
       );
@@ -2576,9 +2658,13 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     }
     case "maintenances.update": {
       const { rows: currentRows } = await dbQuery(
-        `SELECT m.*, g.lider_id AS mantenimiento_lider_id
+        `SELECT m.*, g.lider_id AS mantenimiento_lider_id,
+                cm.anio AS contrato_anio, cm.mes_inicio AS contrato_mes_inicio,
+                cm.dia_inicio AS contrato_dia_inicio,
+                cm.cantidad_mantenimientos AS contrato_cantidad_mantenimientos
            FROM public.mantenimientos_programados m
            LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+           LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
           WHERE m.id = $1`,
         [payload.id],
       );
@@ -2598,7 +2684,12 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       }
 
       const normalizedState = ["realizado", "completado"].includes(String(payload.estado)) ? "ejecutado" : payload.estado;
-      const scheduledDate = dateOnly(payload.fechaProgramada || current.fecha_programada);
+      const contractDate = current.contrato_id
+        ? contractMaintenanceScheduledDate(current, current.numero)
+        : null;
+      // Nunca permitimos que una edición administrativa desincronice una
+      // fila contractual. Las filas sin contrato conservan la edición manual.
+      const scheduledDate = contractDate || dateOnly(payload.fechaProgramada || current.fecha_programada);
       if (normalizedState === "ejecutado" && scheduledDate && scheduledDate > bogotaClock().date) {
         throw new Error(`Este mantenimiento estará disponible desde el ${scheduledDate}.`);
       }
@@ -2622,10 +2713,19 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
                   descripcion_pendiente = $13,
                   updated_at = clock_timestamp()
             WHERE id = $1`,
-          [payload.id, editable, payload.clienteId || null, payload.sedeId || null, payload.fechaProgramada || null, payload.horaProgramada || null, payload.tecnicoId || null, payload.grupoId || null, normalizedState || null, dateOnly(payload.fechaCierre) || null, payload.observaciones, payload.tipoPendiente || null, payload.descripcionPendiente || null],
+          [payload.id, editable, payload.clienteId || null, payload.sedeId || null, scheduledDate, payload.horaProgramada || null, payload.tecnicoId || null, payload.grupoId || null, normalizedState || null, dateOnly(payload.fechaCierre) || null, payload.observaciones, payload.tipoPendiente || null, payload.descripcionPendiente || null],
         );
       });
-      const { rows } = await dbQuery("SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id FROM public.mantenimientos_programados m JOIN public.clientes c ON c.id = m.cliente_id LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id WHERE m.id = $1", [payload.id]);
+      const { rows } = await dbQuery(`SELECT m.*, ${maintenanceScheduledDateSql()} AS fecha_programada_efectiva,
+        cm.anio AS contrato_anio, cm.mes_inicio AS contrato_mes_inicio,
+        cm.dia_inicio AS contrato_dia_inicio, cm.cantidad_mantenimientos AS contrato_cantidad_mantenimientos,
+        c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id
+         FROM public.mantenimientos_programados m
+         JOIN public.clientes c ON c.id = m.cliente_id
+         LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
+         LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+         LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
+        WHERE m.id = $1`, [payload.id]);
       return rows[0] ? enrichMaintenance(rows[0]) : null;
     }
     case "maintenances.delete": { await requireAdmin(user); await dbQuery("UPDATE public.mantenimientos_programados SET estado = 'cancelado', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
@@ -2921,6 +3021,17 @@ function buildContractSchedule(payload: Payload) {
   }
 
   return generated;
+}
+
+function contractMaintenanceScheduledDate(contract: Payload, numero: unknown) {
+  const schedule = buildContractSchedule({
+    anio: contract.anio ?? contract.contrato_anio,
+    mesInicio: contract.mesInicio ?? contract.contrato_mes_inicio,
+    diaInicio: contract.diaInicio ?? contract.contrato_dia_inicio,
+    cantidadMantenimientos: contract.cantidadMantenimientos ?? contract.contrato_cantidad_mantenimientos,
+  });
+  const maintenanceNumber = number(numero);
+  return schedule.find((item) => item.numero === maintenanceNumber)?.fechaProgramada || null;
 }
 
 async function upsertContractMaintenance(client: any, contractId: string, contract: Payload, item: Payload, index: number) {
@@ -3301,7 +3412,16 @@ async function createMaintenance(payload: Payload, user: UserContext) {
     await replaceMaintenanceParticipants(client, rows[0].id, payload, user.id);
     return rows[0].id;
   });
-  const { rows } = await dbQuery("SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id FROM public.mantenimientos_programados m JOIN public.clientes c ON c.id = m.cliente_id LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id WHERE m.id = $1", [id]);
+  const { rows } = await dbQuery(`SELECT m.*, ${maintenanceScheduledDateSql()} AS fecha_programada_efectiva,
+    cm.anio AS contrato_anio, cm.mes_inicio AS contrato_mes_inicio,
+    cm.dia_inicio AS contrato_dia_inicio, cm.cantidad_mantenimientos AS contrato_cantidad_mantenimientos,
+    c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id
+     FROM public.mantenimientos_programados m
+     JOIN public.clientes c ON c.id = m.cliente_id
+     LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
+     LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+     LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
+    WHERE m.id = $1`, [id]);
   return rows[0] ? enrichMaintenance(rows[0]) : null;
 }
 
@@ -3314,9 +3434,12 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
 
   const result = await withTransaction(async (client) => {
     const { rows: maintenanceRows } = await client.query(
-      `SELECT m.*, g.lider_id AS mantenimiento_lider_id
+      `SELECT m.*, g.lider_id AS mantenimiento_lider_id,
+              cm.anio AS contrato_anio, cm.mes_inicio AS contrato_mes_inicio,
+              cm.dia_inicio AS contrato_dia_inicio, cm.cantidad_mantenimientos AS contrato_cantidad_mantenimientos
          FROM public.mantenimientos_programados m
          LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+         LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
         WHERE m.id = $1
         FOR UPDATE OF m`,
       [maintenanceId],
@@ -3326,7 +3449,9 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
     const sharedMaintenanceTitle = String(
       payload.titulo || maintenance.titulo || maintenance.descripcion_pendiente || "Mantenimiento preventivo",
     ).trim();
-    const scheduledDate = dateOnly(maintenance.fecha_programada);
+    const scheduledDate = maintenance.contrato_id
+      ? contractMaintenanceScheduledDate(maintenance, maintenance.numero)
+      : dateOnly(maintenance.fecha_programada);
     if (scheduledDate && scheduledDate > today) {
       throw new Error(`Este mantenimiento estará disponible desde el ${scheduledDate}.`);
     }

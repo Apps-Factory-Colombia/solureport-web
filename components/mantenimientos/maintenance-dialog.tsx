@@ -100,6 +100,21 @@ function calculateParticipantBreakdown(drafts: ParticipantDraft[], totalCost: nu
   };
 }
 
+function keepPercentageDraft(rawValue: string) {
+  if (rawValue === "") return "";
+  // Preserve intermediate values such as `0.` while the administrator is
+  // typing. Clamping on every key press made decimals and multi-digit values
+  // appear to be rejected in the overdue-maintenance editor.
+  if (!/^\d*(?:[.,]\d*)?$/.test(rawValue)) return null;
+  return rawValue.replace(",", ".");
+}
+
+function normalizePercentageOnBlur(rawValue: string) {
+  const parsed = Number(rawValue.replace(",", "."));
+  if (!Number.isFinite(parsed)) return "0";
+  return String(Number(Math.min(100, Math.max(0, parsed)).toFixed(2)));
+}
+
 function buildInitialFormData(maintenance?: Maintenance | null) {
   return {
     clienteId: maintenance?.clienteId || "",
@@ -498,21 +513,20 @@ export function MaintenanceDialog({
                         <div className="space-y-1">
                           <Label className="text-xs text-muted-foreground">Porcentaje</Label>
                           <Input
-                            type="number"
-                            min="0"
-                            max="100"
-                            step="0.01"
+                            type="text"
+                            inputMode="decimal"
                             value={draft.porcentaje}
                             onChange={(event) => {
                               const rawPercentage = event.target.value;
-                              const parsedPercentage = Number(rawPercentage);
-                              const nextPercentage = rawPercentage === ""
-                                ? ""
-                                : String(Math.min(100, Math.max(0, Number.isFinite(parsedPercentage) ? parsedPercentage : 0)));
+                              const nextPercentage = keepPercentageDraft(rawPercentage);
+                              if (nextPercentage === null) return;
                               setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
                                 ? { ...item, porcentaje: nextPercentage }
                                 : item));
                             }}
+                            onBlur={() => setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
+                              ? { ...item, porcentaje: normalizePercentageOnBlur(item.porcentaje) }
+                              : item))}
                             aria-label={`Porcentaje de ${user.nombre} ${user.apellido}`}
                             className="bg-secondary/50 border-border/50"
                           />
