@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Lock, Mail, Eye, EyeOff, AlertCircle } from "lucide-react";
 import { SoluReportLogo } from "@/components/shared/solureport-logo";
+import { DataApiError } from "@/lib/data/client";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -24,13 +25,20 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
 
-    const success = await login(email, password);
-    if (success) {
-      router.push("/admin");
-    } else {
-      setError("Credenciales incorrectas. Intente de nuevo.");
+    try {
+      const success = await login(email, password);
+      if (success) {
+        router.push("/admin");
+      } else {
+        setError("Credenciales incorrectas. Intente de nuevo.");
+      }
+    } catch (requestError) {
+      setError(requestError instanceof DataApiError
+        ? requestError.message
+        : "No fue posible iniciar sesión. Intente de nuevo.");
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (

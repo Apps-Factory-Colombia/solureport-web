@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUser, renewSession } from "@/lib/db/auth";
-import { dbQuery } from "@/lib/db/postgres";
+import { dbQuery, isDatabaseCapacityError } from "@/lib/db/postgres";
 
 export const runtime = "nodejs";
 
@@ -41,6 +41,12 @@ export async function GET(request: NextRequest) {
     return response;
   } catch (error) {
     console.error("Error validando sesión:", error);
+    if (isDatabaseCapacityError(error)) {
+      return NextResponse.json(
+        { error: "La base de datos está ocupada temporalmente. La sesión se conservará y se reintentará automáticamente." },
+        { status: 503, headers: { "Cache-Control": "no-store, max-age=0", "Retry-After": "3" } },
+      );
+    }
     return NextResponse.json({ data: null });
   }
 }

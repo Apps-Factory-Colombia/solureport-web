@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUser, hashPassword, renewSession } from "@/lib/db/auth";
-import { dbQuery, withTransaction } from "@/lib/db/postgres";
+import { dbQuery, isDatabaseCapacityError, withTransaction } from "@/lib/db/postgres";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -4350,6 +4350,18 @@ export async function POST(request: NextRequest) {
     return response;
   } catch (error: any) {
     console.error("Error en API de datos V2:", error);
+    if (isDatabaseCapacityError(error)) {
+      return NextResponse.json(
+        { error: "La base de datos está ocupada temporalmente. La operación no se perdió; vuelve a intentarlo en unos segundos." },
+        {
+          status: 503,
+          headers: {
+            "Cache-Control": "no-store, max-age=0",
+            "Retry-After": "3",
+          },
+        },
+      );
+    }
     const message = error?.code === "23505" ? "Ya existe un registro con esos datos." : error?.code === "23503" ? "La operación referencia datos inexistentes o protegidos." : error?.code === "23P01" ? "El rango de fechas se cruza con otro registro." : error?.message || "Error interno de datos.";
     return NextResponse.json({ error: message }, {
       status: 400,

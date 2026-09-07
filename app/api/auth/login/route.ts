@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from "next/server";
-import { dbQuery } from "@/lib/db/postgres";
+import { dbQuery, isDatabaseCapacityError } from "@/lib/db/postgres";
 import { issueSession, verifyPassword } from "@/lib/db/auth";
 
 export const runtime = "nodejs";
@@ -57,7 +57,9 @@ export async function POST(request: NextRequest) {
     }
 
     await dbQuery("UPDATE public.usuarios SET ultimo_acceso = clock_timestamp() WHERE id = $1", [row.id]);
-    await dbQuery("UPDATE public.sesiones_usuario SET revoked_at = clock_timestamp() WHERE usuario_id = $1 AND revoked_at IS NULL", [row.id]);
+    // Do not revoke the user's other sessions here. Administrators and field
+    // users can work from several browsers/devices at the same time; logout
+    // already revokes only the token that made that request.
     const response = NextResponse.json({ data: mapUser(row) });
     const token = await issueSession(row.id, request, response);
     if (request.headers.get("x-solureport-client") === "mobile") {
@@ -66,6 +68,12 @@ export async function POST(request: NextRequest) {
     return response;
   } catch (error) {
     console.error("Error en login PostgreSQL V2:", error);
+    if (isDatabaseCapacityError(error)) {
+      return NextResponse.json(
+        { error: "La base de datos está ocupada temporalmente. Conserva esta pantalla y vuelve a intentarlo en unos segundos." },
+        { status: 503, headers: { "Cache-Control": "no-store, max-age=0", "Retry-After": "3" } },
+      );
+    }
     return NextResponse.json({ error: "No fue posible iniciar sesión." }, { status: 500 });
   }
 }

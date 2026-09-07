@@ -21,6 +21,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshSession = useCallback(async (initial = false) => {
     try {
       const response = await fetch("/api/auth/session", { credentials: "include", cache: "no-store" });
+      // A temporary database outage must not turn into a local logout. The
+      // server returns 503 for capacity errors and the next heartbeat/focus
+      // check will validate the same cookie again.
+      if (!response.ok) return;
       const body = await response.json() as { data?: User | null };
       if (body.data) {
         setUser(body.data);

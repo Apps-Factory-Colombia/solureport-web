@@ -1,5 +1,5 @@
 import { User, UserScheduleDraft } from "@/lib/types";
-import { dataRequest } from "../client";
+import { DataApiError, dataRequest } from "../client";
 
 export type UserPayload = Partial<User> & { username?: string; password?: string; horarios?: UserScheduleDraft[] };
 
@@ -17,7 +17,15 @@ export async function loginUsuario(email: string, password: string): Promise<Use
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  if (!response.ok) return null;
-  const body = await response.json() as { data?: User };
+  let body: { data?: User; error?: string } = {};
+  try {
+    body = await response.json();
+  } catch {
+    if (!response.ok) throw new DataApiError("La respuesta del servidor no es válida.", response.status);
+  }
+  if (!response.ok) {
+    if (response.status === 401) return null;
+    throw new DataApiError(body.error || "No fue posible iniciar sesión.", response.status);
+  }
   return body.data || null;
 }
