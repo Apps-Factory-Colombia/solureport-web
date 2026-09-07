@@ -2346,9 +2346,13 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       const { rows } = await dbQuery(
         `UPDATE public.mantenimientos_programados
             SET estado = COALESCE($2, estado),
-                fecha_programada = COALESCE($3, fecha_programada),
+                fecha_programada = COALESCE($3::date, fecha_programada),
                 fecha_realizado = CASE
-                  WHEN $2 = 'ejecutado' THEN COALESCE($4::date, fecha_realizado, (now() AT TIME ZONE 'America/Bogota')::date)
+                  WHEN $2 = 'ejecutado' THEN GREATEST(
+                    COALESCE($4::date, fecha_realizado, (now() AT TIME ZONE 'America/Bogota')::date),
+                    COALESCE($3::date, fecha_programada)
+                  )
+                  WHEN $3::date IS NOT NULL AND fecha_realizado IS NOT NULL AND fecha_realizado < $3::date THEN NULL
                   ELSE COALESCE($4::date, fecha_realizado)
                 END,
                 tecnico_principal_id = COALESCE($5, tecnico_principal_id),
@@ -2821,6 +2825,14 @@ async function upsertContractMaintenance(client: any, contractId: string, contra
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
      ON CONFLICT (contrato_id, numero) DO UPDATE SET
        fecha_programada = EXCLUDED.fecha_programada,
+       fecha_realizado = CASE
+         WHEN mantenimientos_programados.estado IN ('ejecutado','completado')
+           THEN GREATEST(COALESCE(mantenimientos_programados.fecha_realizado, EXCLUDED.fecha_programada), EXCLUDED.fecha_programada)
+         WHEN mantenimientos_programados.fecha_realizado IS NOT NULL
+           AND mantenimientos_programados.fecha_realizado < EXCLUDED.fecha_programada
+           THEN NULL
+         ELSE mantenimientos_programados.fecha_realizado
+       END,
        hora_programada = EXCLUDED.hora_programada,
        sede_id = EXCLUDED.sede_id,
        grupo_id = EXCLUDED.grupo_id,
