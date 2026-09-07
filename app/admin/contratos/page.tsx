@@ -69,6 +69,7 @@ type CalculatedContractParticipantDraft = {
 };
 
 type ContractMaintenanceDraft = {
+  numero: number;
   mes: number;
   fechaProgramada: string;
   horaProgramada: string;
@@ -105,7 +106,7 @@ function calculateParticipantBreakdown(drafts: ContractParticipantDraft[], total
 
   const normalizedDrafts = visibleDrafts.map((draft) => ({
     usuarioId: draft.usuarioId,
-    porcentaje: Number((Math.max(0, Number(draft.porcentaje || 0) || 0)).toFixed(2)),
+    porcentaje: Number((Math.min(100, Math.max(0, Number(draft.porcentaje || 0) || 0))).toFixed(2)),
     valorCalculado: Math.max(0, Math.round(Number(draft.valorCalculado || 0) || 0)),
   }));
   const totalPercentage = Number(normalizedDrafts.reduce((sum, draft) => sum + draft.porcentaje, 0).toFixed(2));
@@ -137,7 +138,7 @@ function recalculateParticipantValuesFromPercentages(drafts: ContractParticipant
 
   let assigned = 0;
   return visibleDrafts.map((draft, index) => {
-    const porcentaje = Math.max(0, Number(draft.porcentaje || 0) || 0);
+    const porcentaje = Math.min(100, Math.max(0, Number(draft.porcentaje || 0) || 0));
     const valorCalculado = index === visibleDrafts.length - 1
       ? Math.max(0, totalAssigned - assigned)
       : Math.max(0, Math.round((porcentaje / 100) * totalAssigned));
@@ -353,6 +354,7 @@ export default function ContratosPage() {
       const mesStr = String(mesNum).padStart(2, "0");
       return {
         id: `temp-${i}`,
+        numero: i + 1,
         mes: mesNum,
         fechaProgramada: `${anioMant}-${mesStr}-${diaStr}`,
         estado: "pendiente" as const,
@@ -377,6 +379,7 @@ export default function ContratosPage() {
       const previous = previousByKey.get(key);
 
       return {
+        numero: maintenance.numero,
         mes: maintenance.mes,
         fechaProgramada: maintenance.fechaProgramada,
         horaProgramada: previous?.horaProgramada || "",
@@ -582,6 +585,7 @@ export default function ContratosPage() {
         const technicalValue = Math.max(0, Math.round(Number(draft.valorTecnico || 0) || 0));
         const participantSummary = calculateParticipantBreakdown(draft.participantDrafts, technicalValue);
         return {
+          numero: draft.numero,
           mes: draft.mes,
           fechaProgramada: draft.fechaProgramada,
           horaProgramada: draft.horaProgramada || undefined,
@@ -2266,6 +2270,7 @@ export default function ContratosPage() {
                                         type="number"
                                         min="0"
                                         max="100"
+                                        step="0.01"
                                         value={participant.porcentaje}
                                         onChange={(event) => updateCreateMaintenanceDraft(index, (current) => ({
                                           ...current,

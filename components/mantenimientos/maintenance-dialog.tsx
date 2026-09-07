@@ -69,7 +69,7 @@ function calculateParticipantBreakdown(drafts: ParticipantDraft[], totalCost: nu
   const normalizedTotal = Math.max(0, Math.round(Number(totalCost) || 0));
   const normalizedDrafts = visibleDrafts.map((draft) => ({
     usuarioId: draft.usuarioId,
-    porcentaje: Number((Math.max(0, Number(draft.porcentaje || 0) || 0)).toFixed(2)),
+    porcentaje: Number((Math.min(100, Math.max(0, Number(draft.porcentaje || 0) || 0))).toFixed(2)),
   }));
   const totalPercentage = Number(normalizedDrafts.reduce((sum, draft) => sum + draft.porcentaje, 0).toFixed(2));
 
@@ -98,17 +98,6 @@ function calculateParticipantBreakdown(drafts: ParticipantDraft[], totalCost: nu
     totalAssigned,
     isBalanced: calculatedDrafts.length > 0 && totalPercentage === 100 && totalAssigned === normalizedTotal,
   };
-}
-
-function calculatePercentageFromPayment(paymentValue: string, totalCost: number) {
-  const normalizedPayment = Math.max(0, Math.round(Number(paymentValue || 0) || 0));
-  const normalizedTotal = Math.max(0, Math.round(Number(totalCost) || 0));
-
-  if (normalizedTotal <= 0) {
-    return "0";
-  }
-
-  return String(Number(((normalizedPayment / normalizedTotal) * 100).toFixed(2)));
 }
 
 function buildInitialFormData(maintenance?: Maintenance | null) {
@@ -510,10 +499,22 @@ export function MaintenanceDialog({
                           <Label className="text-xs text-muted-foreground">Porcentaje</Label>
                           <Input
                             type="number"
+                            min="0"
+                            max="100"
+                            step="0.01"
                             value={draft.porcentaje}
-                            readOnly
-                            tabIndex={-1}
-                            className="bg-secondary/30 border-border/40 text-muted-foreground"
+                            onChange={(event) => {
+                              const rawPercentage = event.target.value;
+                              const parsedPercentage = Number(rawPercentage);
+                              const nextPercentage = rawPercentage === ""
+                                ? ""
+                                : String(Math.min(100, Math.max(0, Number.isFinite(parsedPercentage) ? parsedPercentage : 0)));
+                              setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
+                                ? { ...item, porcentaje: nextPercentage }
+                                : item));
+                            }}
+                            aria-label={`Porcentaje de ${user.nombre} ${user.apellido}`}
+                            className="bg-secondary/50 border-border/50"
                           />
                         </div>
                         <div className="space-y-1">
@@ -522,17 +523,10 @@ export function MaintenanceDialog({
                             type="number"
                             min="0"
                             value={calculatedDraft?.valorCalculado || "0"}
-                            onChange={(event) => {
-                              const nextPercentage = calculatePercentageFromPayment(
-                                event.target.value,
-                                Number(formData.costoTecnicoTotal || 0)
-                              );
-
-                              setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
-                                ? { ...item, porcentaje: nextPercentage }
-                                : item));
-                            }}
-                            className="bg-secondary/50 border-border/50"
+                            readOnly
+                            tabIndex={-1}
+                            aria-label={`Pago calculado de ${user.nombre} ${user.apellido}`}
+                            className="bg-secondary/30 border-border/40 text-muted-foreground"
                           />
                         </div>
                       </div>

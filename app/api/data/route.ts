@@ -339,7 +339,8 @@ function mapContract(row: any, maintenanceRows: any[] = []): any {
     costoPorMantenimiento: number(row.costo_por_mantenimiento),
     mantenimientosRealizados: maintenanceRows.map((item) => ({
       id: item.id,
-      mes: number(item.numero),
+      numero: number(item.numero),
+      mes: Number(String(item.fecha_programada || "").slice(5, 7)) || number(item.numero),
       fechaProgramada: dateOnly(item.fecha_programada) || "",
       fechaRealizado: dateOnly(item.fecha_realizado) || undefined,
       tecnicoId: item.tecnico_principal_id || undefined,
@@ -2428,7 +2429,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "contracts.list": {
       const { rows } = await dbQuery("SELECT * FROM public.contratos_mantenimiento ORDER BY anio DESC, created_at DESC");
       const ids = rows.map((row) => row.id);
-      const { rows: maintenanceRows } = ids.length ? await dbQuery("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = ANY($1::uuid[]) ORDER BY numero", [ids]) : { rows: [] };
+      const { rows: maintenanceRows } = ids.length ? await dbQuery("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = ANY($1::uuid[]) ORDER BY fecha_programada, numero", [ids]) : { rows: [] };
       return rows.map((row) => mapContract(row, maintenanceRows.filter((item) => item.contrato_id === row.id)));
     }
     case "contracts.create": { await requireAdmin(user); return createContract(payload, user); }
@@ -2460,7 +2461,8 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       if (!rows[0]) throw new Error("No se encontró el mantenimiento del contrato que intentas actualizar.");
       return {
         id: rows[0].id,
-        mes: number(rows[0].numero),
+        numero: number(rows[0].numero),
+        mes: Number(String(rows[0].fecha_programada || "").slice(5, 7)) || number(rows[0].numero),
         fechaProgramada: dateOnly(rows[0].fecha_programada),
         fechaRealizado: dateOnly(rows[0].fecha_realizado) || undefined,
         tecnicoId: rows[0].tecnico_principal_id || undefined,
@@ -2885,28 +2887,41 @@ async function updateConfig(payload: Payload) {
 function buildContractSchedule(payload: Payload) {
   const supplied = jsonArray(payload.mantenimientosRealizados);
   const count = integerField(payload.cantidadMantenimientos, "La cantidad de mantenimientos", 1, 12);
-  if (supplied.length > 0) {
-    if (supplied.length !== count) throw new Error("El cronograma debe tener exactamente la cantidad de mantenimientos configurada.");
-    return supplied.map((item, index) => ({ ...item, mes: integerField(item.mes ?? item.numero ?? index + 1, "El número del mantenimiento", 1, 12) }));
-  }
-
   const interval = Math.max(1, Math.floor(12 / count));
-  return Array.from({ length: count }, (_, index) => {
+  const startMonth = integerField(payload.mesInicio ?? 1, "El mes de inicio", 1, 12);
+  const startYear = integerField(payload.anio, "El año", 2000, 2200);
+  const startDay = Math.min(integerField(payload.diaInicio ?? 1, "El día de inicio", 1, 28), 28);
+  const generated = Array.from({ length: count }, (_, index) => {
     const offset = index * interval;
-    const monthIndex = integerField(payload.mesInicio ?? 1, "El mes de inicio", 1, 12) - 1 + offset;
-    const year = integerField(payload.anio, "El año", 2000, 2200) + Math.floor(monthIndex / 12);
+    const monthIndex = startMonth - 1 + offset;
+    const year = startYear + Math.floor(monthIndex / 12);
     const month = (monthIndex % 12) + 1;
-    const day = Math.min(integerField(payload.diaInicio ?? 1, "El día de inicio", 1, 28), 28);
     return {
+      numero: index + 1,
       mes: month,
-      fechaProgramada: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+      fechaProgramada: `${year}-${String(month).padStart(2, "0")}-${String(startDay).padStart(2, "0")}`,
       estado: "pendiente",
     };
   });
+
+  if (supplied.length > 0) {
+    if (supplied.length !== count) throw new Error("El cronograma debe tener exactamente la cantidad de mantenimientos configurada.");
+    return supplied.map((item, index) => ({
+      ...item,
+      // `numero` identifica la posición en el contrato; `mes` es el mes
+      // calendario usado por los informes. La fecha es autoritativa del
+      // contrato y no se acepta una fecha vieja enviada por el formulario.
+      numero: integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12),
+      mes: generated[index].mes,
+      fechaProgramada: generated[index].fechaProgramada,
+    }));
+  }
+
+  return generated;
 }
 
 async function upsertContractMaintenance(client: any, contractId: string, contract: Payload, item: Payload, index: number) {
-  const numero = integerField(item.mes ?? item.numero ?? index + 1, "El número del mantenimiento", 1, 12);
+  const numero = integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12);
   const fechaProgramada = dateOnly(item.fechaProgramada);
   if (!fechaProgramada) throw new Error(`El mantenimiento ${index + 1} requiere una fecha programada válida.`);
   const desiredState = item.estado === "realizado" ? "ejecutado" : item.estado || "pendiente";
@@ -2965,8 +2980,8 @@ async function insertContractMaintenances(client: any, contractId: string, paylo
   const numbers = new Set<number>();
   for (let index = 0; index < list.length; index += 1) {
     const item = list[index];
-    const numero = integerField(item.mes ?? index + 1, "El número del mantenimiento", 1, 12);
-    if (numbers.has(numero)) throw new Error("El cronograma contiene dos mantenimientos en el mismo mes.");
+    const numero = integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12);
+    if (numbers.has(numero)) throw new Error("El cronograma contiene dos mantenimientos con el mismo número.");
     numbers.add(numero);
     const maintenance = await upsertContractMaintenance(client, contractId, payload, item, index);
     if (item.participantes !== undefined || item.tecnicoId) {
@@ -3023,13 +3038,13 @@ async function createContract(payload: Payload, user: UserContext) {
     return contract.id;
   });
   const { rows } = await dbQuery("SELECT * FROM public.contratos_mantenimiento WHERE id = $1", [id]);
-  const { rows: maintenanceRows } = await dbQuery("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = $1 ORDER BY numero", [id]);
+  const { rows: maintenanceRows } = await dbQuery("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = $1 ORDER BY fecha_programada, numero", [id]);
   return mapContract(rows[0], maintenanceRows);
 }
 
 async function reconcileContractSchedule(client: any, contractId: string, contract: Payload, payload: Payload) {
   const desired = buildContractSchedule({ ...contract, ...payload });
-  const desiredNumbers = new Set(desired.map((item, index) => integerField(item.mes ?? index + 1, "El número del mantenimiento", 1, 12)));
+  const desiredNumbers = new Set(desired.map((item, index) => integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12)));
   if (desiredNumbers.size !== desired.length) throw new Error("El cronograma contiene números de mantenimiento repetidos.");
 
   const currentResult = await client.query("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = $1 FOR UPDATE", [contractId]);
@@ -3048,7 +3063,7 @@ async function reconcileContractSchedule(client: any, contractId: string, contra
 
   for (let index = 0; index < desired.length; index += 1) {
     const item = desired[index];
-    const numero = integerField(item.mes ?? index + 1, "El número del mantenimiento", 1, 12);
+    const numero = integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12);
     const existing = currentByNumber.get(numero);
     const protectedHistory = existing && (
       linkedIds.has(String(existing.id))
@@ -3118,6 +3133,12 @@ async function updateContract(payload: Payload, user: UserContext) {
       estado: payload.estado ?? current.estado,
     };
     const totals = calculateContractTotals(merged);
+    const scheduleChanged = [
+      ["anio", current.anio, merged.anio],
+      ["mesInicio", current.mes_inicio, merged.mesInicio],
+      ["diaInicio", current.dia_inicio, merged.diaInicio],
+      ["cantidadMantenimientos", current.cantidad_mantenimientos, merged.cantidadMantenimientos],
+    ].some(([, previous, next]) => Number(previous) !== Number(next));
     const updateResult = await client.query(
       `UPDATE public.contratos_mantenimiento
           SET cliente_id=$2, anio=$3, mes_inicio=$4, dia_inicio=$5,
@@ -3132,7 +3153,7 @@ async function updateContract(payload: Payload, user: UserContext) {
     );
     const updatedContract = updateResult.rows[0];
     let scheduleResult = { created: 0, updated: 0, preserved: 0, cancelled: 0 };
-    if (payload.regenerarMantenimientos) {
+    if (payload.regenerarMantenimientos || scheduleChanged) {
       scheduleResult = await reconcileContractSchedule(client, payload.id, { ...merged, ...totals, costoPorMantenimiento: totals.perMaintenance }, payload);
       await client.query("UPDATE public.contratos_mantenimiento SET cronograma_version = cronograma_version + 1, updated_at = clock_timestamp() WHERE id = $1", [payload.id]);
     }
@@ -3140,7 +3161,7 @@ async function updateContract(payload: Payload, user: UserContext) {
     return { scheduleResult };
   });
   const { rows } = await dbQuery("SELECT * FROM public.contratos_mantenimiento WHERE id = $1", [payload.id]);
-  const { rows: maintenanceRows } = await dbQuery("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = $1 ORDER BY numero", [payload.id]);
+  const { rows: maintenanceRows } = await dbQuery("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = $1 ORDER BY fecha_programada, numero", [payload.id]);
   return { ...mapContract(rows[0], maintenanceRows), cronogramaResultado: result.scheduleResult };
 }
 

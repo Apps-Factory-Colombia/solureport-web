@@ -196,6 +196,9 @@ export interface MaintenanceContract {
 
 export interface MantenimientoContrato {
   id: string;
+  /** Orden del mantenimiento dentro del contrato (1..cantidadMantenimientos). */
+  numero?: number;
+  /** Mes calendario derivado de fechaProgramada (1..12). */
   mes: number;
   fechaProgramada: string;
   fechaRealizado?: string;

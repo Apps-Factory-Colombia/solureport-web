@@ -1037,6 +1037,7 @@ export default function MantenimientosPage() {
 
       return {
         id: `reactivated-${index}`,
+        numero: index + 1,
         mes: monthValue,
         fechaProgramada: dateValue,
         estado: "pendiente" as const,
