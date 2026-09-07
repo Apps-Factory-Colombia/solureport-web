@@ -34,7 +34,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, ChevronDown, ArrowLeft, X, } from "lucide-react";
+import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, ChevronDown, ArrowLeft, X, Loader2 } from "lucide-react";
 import { MaintenanceContract, Client, User } from "@/lib/types";
 import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
@@ -228,6 +228,7 @@ export default function ContratosPage() {
   const [editValorPuertaVehicular, setEditValorPuertaVehicular] = useState("0");
   const [editRegenerarMants, setEditRegenerarMants] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: "info" | "success" | "error"; message: string } | null>(null);
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteContract, setDeleteContract] = useState<MaintenanceContract | null>(null);
@@ -253,6 +254,12 @@ export default function ContratosPage() {
   };
 
   useEffect(() => { loadData(); }, []);
+
+  useEffect(() => {
+    if (!feedback) return;
+    const timeoutId = window.setTimeout(() => setFeedback(null), 6000);
+    return () => window.clearTimeout(timeoutId);
+  }, [feedback]);
 
   const assignableUsers = useMemo(
     () => users.filter(isAssignableMaintenanceUser),
@@ -642,10 +649,24 @@ export default function ContratosPage() {
   };
 
   const handleSaveEdit = async () => {
-    if (!selectedContract || !editClienteId || !calculatedEditTotal) return;
+    if (!selectedContract) return;
+    if (!editClienteId) {
+      setFeedback({ type: "error", message: "Selecciona un cliente antes de guardar el contrato." });
+      return;
+    }
+    const cantidad = Number(editCantidad);
+    if (!Number.isInteger(cantidad) || cantidad < 1 || cantidad > 12) {
+      setFeedback({ type: "error", message: "La cantidad de mantenimientos debe estar entre 1 y 12." });
+      return;
+    }
+    if (calculatedEditTotal <= 0) {
+      setFeedback({ type: "error", message: "Configura cantidades y valores de puertas para obtener un total anual mayor a cero." });
+      return;
+    }
+
     setSaving(true);
+    setFeedback({ type: "info", message: "Actualizando contrato y sincronizando el cronograma…" });
     try {
-      const cantidad = Number(editCantidad);
       const costoTotal = calculatedEditTotal;
       const updated = await updateContrato(selectedContract.id, {
         clienteId: editClienteId,
@@ -663,13 +684,17 @@ export default function ContratosPage() {
         regenerarMantenimientos: editRegenerarMants,
       });
       setSelectedContract(updated);
-      window.alert(editRegenerarMants
-        ? "Contrato actualizado. El cronograma fue reconciliado sin borrar mantenimientos con historial."
-        : "Contrato actualizado correctamente.");
+      setContracts((current) => current.map((contract) => contract.id === updated.id ? updated : contract));
+      setFeedback({
+        type: "success",
+        message: editRegenerarMants
+          ? "Contrato actualizado. El cronograma fue reconciliado sin borrar mantenimientos con historial."
+          : "Contrato actualizado correctamente.",
+      });
       await loadData();
     } catch (err) {
       console.error("Error editando contrato:", err);
-      window.alert(err instanceof Error ? err.message : "No se pudo actualizar el contrato.");
+      setFeedback({ type: "error", message: err instanceof Error ? err.message : "No se pudo actualizar el contrato." });
     } finally {
       setSaving(false);
     }
@@ -684,7 +709,12 @@ export default function ContratosPage() {
   };
 
   const handleSaveMant = async (mantId: string) => {
+    if (!mantEditFechaProg) {
+      setFeedback({ type: "error", message: "Selecciona una fecha programada válida." });
+      return;
+    }
     setSavingMant(true);
+    setFeedback({ type: "info", message: "Actualizando el mantenimiento…" });
     try {
       const updated = await updateMantenimientoContrato(mantId, {
         estado: mantEditEstado,
@@ -715,8 +745,11 @@ export default function ContratosPage() {
         })
       );
       setEditingMantId(null);
+      setFeedback({ type: "success", message: "Mantenimiento actualizado correctamente." });
+      await loadData();
     } catch (err) {
       console.error("Error guardando mantenimiento:", err);
+      setFeedback({ type: "error", message: err instanceof Error ? err.message : "No se pudo actualizar el mantenimiento." });
     } finally {
       setSavingMant(false);
     }
@@ -944,6 +977,22 @@ export default function ContratosPage() {
   return (
     <div>
       <AdminHeader title="Contratos de Mantenimiento Preventivo" />
+      {feedback && (
+        <div
+          role={feedback.type === "error" ? "alert" : "status"}
+          className={cn(
+            "mx-6 mt-4 rounded-lg border px-4 py-3 text-sm",
+            feedback.type === "error" && "border-red-500/30 bg-red-500/10 text-red-300",
+            feedback.type === "success" && "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+            feedback.type === "info" && "border-cyan-neon/30 bg-cyan-neon/10 text-cyan-neon",
+          )}
+        >
+          <span className="inline-flex items-center gap-2">
+            {feedback.type === "info" && <Loader2 className="h-4 w-4 animate-spin" />}
+            {feedback.message}
+          </span>
+        </div>
+      )}
       <div className="p-6 space-y-6">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Card className="border-border/50 bg-card/80">
@@ -1533,7 +1582,7 @@ export default function ContratosPage() {
                                       {savingMant ? (
                                         <div className="h-3 w-3 animate-spin rounded-full border-2 border-background border-t-transparent mr-1" />
                                       ) : null}
-                                      Guardar
+                                      {savingMant ? "Actualizando..." : "Guardar"}
                                     </Button>
                                   </div>
                                 </div>
@@ -1840,7 +1889,7 @@ export default function ContratosPage() {
                         ) : (
                           <CheckCircle2 className="h-4 w-4" />
                         )}
-                        {saving ? "Guardando..." : "Guardar Configuración"}
+                        {saving ? "Actualizando..." : "Guardar Configuración"}
                       </Button>
                     </div>
                   </div>

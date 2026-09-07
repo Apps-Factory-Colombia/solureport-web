@@ -2340,7 +2340,37 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     }
     case "contracts.create": { await requireAdmin(user); return createContract(payload, user); }
     case "contracts.update": { await requireAdmin(user); return updateContract(payload, user); }
-    case "contracts.updateMaintenance": { await requireAdmin(user); const { rows } = await dbQuery("UPDATE public.mantenimientos_programados SET estado = COALESCE($2,estado), fecha_programada = COALESCE($3,fecha_programada), fecha_realizado = COALESCE($4,fecha_realizado), tecnico_principal_id = COALESCE($5,tecnico_principal_id), valor_recaudado = COALESCE($6,valor_recaudado), updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id, payload.estado === "realizado" ? "ejecutado" : payload.estado, payload.fechaProgramada, payload.fechaRealizado, payload.tecnicoId, payload.valorRecaudado]); return { id: rows[0].id, mes: number(rows[0].numero), fechaProgramada: dateOnly(rows[0].fecha_programada), fechaRealizado: dateOnly(rows[0].fecha_realizado) || undefined, tecnicoId: rows[0].tecnico_principal_id || undefined, estado: rows[0].estado === "ejecutado" ? "realizado" : rows[0].estado, valorRecaudado: number(rows[0].valor_recaudado) }; }
+    case "contracts.updateMaintenance": {
+      await requireAdmin(user);
+      const normalizedState = payload.estado === "realizado" ? "ejecutado" : payload.estado;
+      const { rows } = await dbQuery(
+        `UPDATE public.mantenimientos_programados
+            SET estado = COALESCE($2, estado),
+                fecha_programada = COALESCE($3, fecha_programada),
+                fecha_realizado = CASE
+                  WHEN $2 = 'ejecutado' THEN COALESCE($4::date, fecha_realizado, (now() AT TIME ZONE 'America/Bogota')::date)
+                  ELSE COALESCE($4::date, fecha_realizado)
+                END,
+                tecnico_principal_id = COALESCE($5, tecnico_principal_id),
+                valor_recaudado = COALESCE($6, valor_recaudado),
+                admin_completado_at = CASE WHEN $2 IS NULL OR $2 = 'ejecutado' THEN admin_completado_at ELSE NULL END,
+                admin_completado_por_id = CASE WHEN $2 IS NULL OR $2 = 'ejecutado' THEN admin_completado_por_id ELSE NULL END,
+                updated_at = clock_timestamp()
+          WHERE id = $1
+          RETURNING *`,
+        [payload.id, normalizedState, payload.fechaProgramada, payload.fechaRealizado, payload.tecnicoId, payload.valorRecaudado],
+      );
+      if (!rows[0]) throw new Error("No se encontró el mantenimiento del contrato que intentas actualizar.");
+      return {
+        id: rows[0].id,
+        mes: number(rows[0].numero),
+        fechaProgramada: dateOnly(rows[0].fecha_programada),
+        fechaRealizado: dateOnly(rows[0].fecha_realizado) || undefined,
+        tecnicoId: rows[0].tecnico_principal_id || undefined,
+        estado: rows[0].estado === "ejecutado" ? "realizado" : rows[0].estado,
+        valorRecaudado: number(rows[0].valor_recaudado),
+      };
+    }
     case "contracts.delete": { await requireAdmin(user); return deleteContract(payload); }
 
     case "maintenances.page": return maintenancePageRows(payload, user);
