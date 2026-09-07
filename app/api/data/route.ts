@@ -3737,7 +3737,7 @@ async function updateActivityValues(payload: Payload) {
          FROM public.actividades_operativas
           a LEFT JOIN public.actividades_operativas_mantenimientos am ON am.actividad_id = a.id
         WHERE a.id = $1
-        FOR UPDATE`,
+        FOR UPDATE OF a`,
       [id],
     );
     const activity = activityRows[0];
