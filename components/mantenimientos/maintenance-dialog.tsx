@@ -28,7 +28,7 @@ import { isAssignableMaintenanceUser } from "@/lib/utils/maintenance-assignment"
 
 type ParticipantDraft = {
   usuarioId: string;
-  porcentaje: string;
+  pago: string;
 };
 
 type CalculatedParticipantDraft = {
@@ -45,12 +45,12 @@ function formatCurrency(value: number) {
   }).format(value);
 }
 
-function buildDefaultParticipantDrafts(tecnicoId?: string): ParticipantDraft[] {
+function buildDefaultParticipantDrafts(tecnicoId?: string, totalCost = 0): ParticipantDraft[] {
   if (!tecnicoId) return [];
 
   return [{
     usuarioId: tecnicoId,
-    porcentaje: "100",
+    pago: String(Math.max(0, Math.round(Number(totalCost) || 0))),
   }];
 }
 
@@ -69,27 +69,29 @@ function calculateParticipantBreakdown(drafts: ParticipantDraft[], totalCost: nu
   const normalizedTotal = Math.max(0, Math.round(Number(totalCost) || 0));
   const normalizedDrafts = visibleDrafts.map((draft) => ({
     usuarioId: draft.usuarioId,
-    porcentaje: Number((Math.min(100, Math.max(0, Number(draft.porcentaje || 0) || 0))).toFixed(2)),
+    pago: Math.max(0, Math.round(Number(draft.pago || 0) || 0)),
   }));
-  const totalPercentage = Number(normalizedDrafts.reduce((sum, draft) => sum + draft.porcentaje, 0).toFixed(2));
+  const totalAssigned = normalizedDrafts.reduce((sum, draft) => sum + draft.pago, 0);
 
-  let assigned = 0;
+  let percentageAssigned = 0;
 
   const calculatedDrafts = normalizedDrafts.map((draft, index) => {
-    const valorCalculado = totalPercentage === 100 && index === normalizedDrafts.length - 1
-      ? Math.max(0, normalizedTotal - assigned)
-      : Math.max(0, Math.round((draft.porcentaje / 100) * normalizedTotal));
+    const porcentaje = normalizedTotal === 0
+      ? index === 0 ? 100 : 0
+      : index === normalizedDrafts.length - 1 && totalAssigned === normalizedTotal
+        ? Number(Math.max(0, 100 - percentageAssigned).toFixed(2))
+        : Number(((draft.pago / normalizedTotal) * 100).toFixed(2));
 
-    assigned += valorCalculado;
+    percentageAssigned += porcentaje;
 
     return {
       usuarioId: draft.usuarioId,
-      porcentaje: String(draft.porcentaje),
-      valorCalculado: String(valorCalculado),
+      porcentaje: String(porcentaje),
+      valorCalculado: String(draft.pago),
     };
   });
 
-  const totalAssigned = calculatedDrafts.reduce((sum, draft) => sum + (Number(draft.valorCalculado || 0) || 0), 0);
+  const totalPercentage = Number(calculatedDrafts.reduce((sum, draft) => sum + (Number(draft.porcentaje || 0) || 0), 0).toFixed(2));
 
   return {
     drafts: calculatedDrafts,
@@ -100,19 +102,10 @@ function calculateParticipantBreakdown(drafts: ParticipantDraft[], totalCost: nu
   };
 }
 
-function keepPercentageDraft(rawValue: string) {
+function keepPaymentDraft(rawValue: string) {
   if (rawValue === "") return "";
-  // Preserve intermediate values such as `0.` while the administrator is
-  // typing. Clamping on every key press made decimals and multi-digit values
-  // appear to be rejected in the overdue-maintenance editor.
-  if (!/^\d*(?:[.,]\d*)?$/.test(rawValue)) return null;
-  return rawValue.replace(",", ".");
-}
-
-function normalizePercentageOnBlur(rawValue: string) {
-  const parsed = Number(rawValue.replace(",", "."));
-  if (!Number.isFinite(parsed)) return "0";
-  return String(Number(Math.min(100, Math.max(0, parsed)).toFixed(2)));
+  if (!/^\d*$/.test(rawValue)) return null;
+  return rawValue;
 }
 
 function buildInitialFormData(maintenance?: Maintenance | null) {
@@ -131,11 +124,11 @@ function buildInitialParticipantDrafts(maintenance?: Maintenance | null): Partic
   if (maintenance?.participantes && maintenance.participantes.length > 0) {
     return maintenance.participantes.map((participant) => ({
       usuarioId: participant.usuarioId,
-      porcentaje: String(participant.porcentaje),
+      pago: String(Math.max(0, Math.round(Number(participant.valorCalculado ?? 0) || 0))),
     }));
   }
 
-  return buildDefaultParticipantDrafts(maintenance?.tecnicoId);
+  return buildDefaultParticipantDrafts(maintenance?.tecnicoId, maintenance?.costoTecnicoTotal);
 }
 
 interface MaintenanceDialogProps {
@@ -162,21 +155,37 @@ export function MaintenanceDialog({
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open) {
-      Promise.all([getUsuarios(), getClientes()])
-        .then(([users, cls]) => {
-          const availableTechnicians = users.filter(isAssignableMaintenanceUser);
+    if (!open) return;
 
-          setTechnicians(availableTechnicians);
-          setClients(cls.filter((c) => c.estado === "activo"));
-          setParticipantDrafts((current) => {
-            const activeTechnicianIds = new Set(availableTechnicians.map((user) => user.id));
-            return current.filter((draft) => draft.usuarioId && activeTechnicianIds.has(draft.usuarioId));
-          });
-        })
-        .catch((err) => console.error("Error cargando datos:", err));
-    }
-  }, [open]);
+    let cancelled = false;
+    const resetFrame = window.requestAnimationFrame(() => {
+      setFormData(buildInitialFormData(maintenance));
+      setParticipantDrafts(buildInitialParticipantDrafts(maintenance));
+      setClientQuery("");
+      setIsClientListOpen(false);
+      setParticipantSearch("");
+      setIsParticipantListOpen(false);
+    });
+
+    Promise.all([getUsuarios(), getClientes()])
+      .then(([users, cls]) => {
+        if (cancelled) return;
+        const availableTechnicians = users.filter(isAssignableMaintenanceUser);
+
+        setTechnicians(availableTechnicians);
+        setClients(cls.filter((c) => c.estado === "activo"));
+        setParticipantDrafts((current) => {
+          const activeTechnicianIds = new Set(availableTechnicians.map((user) => user.id));
+          return current.filter((draft) => draft.usuarioId && activeTechnicianIds.has(draft.usuarioId));
+        });
+      })
+      .catch((err) => console.error("Error cargando datos:", err));
+
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(resetFrame);
+    };
+  }, [maintenance, open]);
 
   const visibleParticipantDrafts = useMemo(
     () => participantDrafts.filter((draft) => !!draft.usuarioId),
@@ -255,13 +264,13 @@ export function MaintenanceDialog({
     setParticipantDrafts((current) => {
       const filteredCurrent = current.filter((draft) => !!draft.usuarioId);
       const nextDrafts = checked
-        ? [...filteredCurrent, { usuarioId: user.id, porcentaje: filteredCurrent.length === 0 ? "100" : "0" }]
+        ? [...filteredCurrent, { usuarioId: user.id, pago: filteredCurrent.length === 0 ? formData.costoTecnicoTotal : "0" }]
         : filteredCurrent.filter((draft) => draft.usuarioId !== user.id);
 
       if (nextDrafts.length === 1) {
         nextDrafts[0] = {
           ...nextDrafts[0],
-          porcentaje: "100",
+          pago: formData.costoTecnicoTotal,
         };
       }
 
@@ -310,7 +319,7 @@ export function MaintenanceDialog({
             <div className="relative">
               <Input
                 value={clientQuery || selectedClientLabel}
-                onFocus={() => setIsClientListOpen(true)}
+                onClick={() => setIsClientListOpen(true)}
                 onChange={(e) => {
                   setClientQuery(e.target.value);
                   setIsClientListOpen(true);
@@ -425,7 +434,7 @@ export function MaintenanceDialog({
           <div className="space-y-3 rounded-lg border border-border/50 bg-secondary/20 p-4">
             <div>
               <p className="text-sm font-medium text-foreground">Participantes del mantenimiento</p>
-              <p className="text-xs text-muted-foreground">Elige todos los usuarios activos que participarán, configura el porcentaje de cada uno y el pago se calcula automáticamente con base en el total.</p>
+              <p className="text-xs text-muted-foreground">Elige los usuarios activos y define manualmente el pago de cada uno. El porcentaje se calcula automáticamente con base en el valor técnico total.</p>
             </div>
 
             <div className="space-y-3">
@@ -514,33 +523,32 @@ export function MaintenanceDialog({
                           <Label className="text-xs text-muted-foreground">Porcentaje</Label>
                           <Input
                             type="text"
-                            inputMode="decimal"
-                            value={draft.porcentaje}
-                            onChange={(event) => {
-                              const rawPercentage = event.target.value;
-                              const nextPercentage = keepPercentageDraft(rawPercentage);
-                              if (nextPercentage === null) return;
-                              setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
-                                ? { ...item, porcentaje: nextPercentage }
-                                : item));
-                            }}
-                            onBlur={() => setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
-                              ? { ...item, porcentaje: normalizePercentageOnBlur(item.porcentaje) }
-                              : item))}
+                            value={`${calculatedDraft?.porcentaje || "0"}%`}
+                            readOnly
+                            tabIndex={-1}
                             aria-label={`Porcentaje de ${user.nombre} ${user.apellido}`}
-                            className="bg-secondary/50 border-border/50"
+                            className="bg-secondary/30 border-border/40 text-muted-foreground"
                           />
                         </div>
                         <div className="space-y-1">
                           <Label className="text-xs text-muted-foreground">Pago</Label>
                           <Input
-                            type="number"
+                            type="text"
+                            inputMode="numeric"
                             min="0"
-                            value={calculatedDraft?.valorCalculado || "0"}
-                            readOnly
-                            tabIndex={-1}
-                            aria-label={`Pago calculado de ${user.nombre} ${user.apellido}`}
-                            className="bg-secondary/30 border-border/40 text-muted-foreground"
+                            value={draft.pago}
+                            onChange={(event) => {
+                              const nextPayment = keepPaymentDraft(event.target.value);
+                              if (nextPayment === null) return;
+                              setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
+                                ? { ...item, pago: nextPayment }
+                                : item));
+                            }}
+                            onBlur={() => setParticipantDrafts((current) => current.map((item) => item.usuarioId === draft.usuarioId
+                              ? { ...item, pago: String(Math.max(0, Math.round(Number(item.pago || 0) || 0))) }
+                              : item))}
+                            aria-label={`Pago de ${user.nombre} ${user.apellido}`}
+                            className="bg-secondary/50 border-border/50"
                           />
                         </div>
                       </div>
