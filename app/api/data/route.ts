@@ -640,7 +640,11 @@ function mapReport(row: any, participant: any, index: number): any {
     valorSugerido: row.valor_sugerido == null ? undefined : number(row.valor_sugerido),
     valorSugeridoGlobal: row.valor_sugerido == null ? undefined : number(row.valor_sugerido),
     motivoSugerenciaValor: row.motivo_modificacion_valor || undefined,
-    valorModificado: row.valor_sugerido != null && number(row.valor_sugerido) !== number(row.valor_base),
+    // A recorrido can have a real administrative value different from the
+    // configured snapshot. Keep that fact in the API response so the web
+    // does not replace it with the current default after a reload.
+    valorModificado: (row.tipo === "recorrido" && Math.abs(number(row.valor_aplicado) - number(row.valor_base)) > 0.01)
+      || (row.valor_sugerido != null && number(row.valor_sugerido) !== number(row.valor_base)),
     motivoModificacionValor: row.motivo_modificacion_valor || undefined,
     costoActividad: number(participant?.valorGanado, number(row.valor_aplicado)),
     participantes: jsonArray(row.participantes),
@@ -3402,19 +3406,151 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
   return result;
 }
 
+async function syncActivityParticipantValue(client: any, activityId: string, participantId: string, amount: number, percentage?: number) {
+  const { rows: participantRows } = await client.query(
+    `SELECT id, porcentaje
+       FROM public.actividades_operativas_participantes
+      WHERE actividad_id = $1 AND id = $2
+      FOR UPDATE`,
+    [activityId, participantId],
+  );
+  if (!participantRows[0]) return false;
+
+  const normalizedAmount = Math.max(0, roundCurrency(amount));
+  const normalizedPercentage = percentage == null
+    ? number(participantRows[0].porcentaje)
+    : Math.max(0, Math.min(100, number(percentage)));
+
+  await client.query(
+    `UPDATE public.actividades_operativas_participantes
+        SET porcentaje = $3,
+            valor_ganado = $4,
+            updated_at = clock_timestamp()
+      WHERE actividad_id = $1 AND id = $2`,
+    [activityId, participantId, normalizedPercentage, normalizedAmount],
+  );
+
+  const { rows: liquidationRows } = await client.query(
+    `SELECT id, tipo, porcentaje_descuento_tardanza
+       FROM public.liquidacion_items
+      WHERE actividad_id = $1 AND participante_id = $2
+      FOR UPDATE`,
+    [activityId, participantId],
+  );
+
+  for (const liquidation of liquidationRows) {
+    const discount = liquidation.tipo === "recorrido"
+      ? 0
+      : Math.max(0, Math.min(100, number(liquidation.porcentaje_descuento_tardanza)));
+    const discountValue = roundCurrency(normalizedAmount * discount / 100);
+    const earnedValue = roundCurrency(normalizedAmount - discountValue);
+
+    await client.query(
+      `UPDATE public.liquidacion_items
+          SET valor_ganado_original = $2,
+              valor_ganado = $3,
+              descuento_tardanza = $4,
+              updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [liquidation.id, normalizedAmount, earnedValue, discountValue],
+    );
+  }
+
+  return true;
+}
+
 async function updateActivityValues(payload: Payload) {
-  const id = canonicalActivityId(payload.id || payload.actividadOperativaId);
+  const rawId = String(payload.id || payload.actividadOperativaId || "");
+  const id = canonicalActivityId(rawId);
+  const directParticipantId = canonicalParticipantId(rawId)
+    || String(payload.participantId || payload.participanteId || "").trim()
+    || null;
+  const hasTechnicalValue = payload.clientCost === undefined
+    && (payload.value !== undefined || payload.costoActividad !== undefined);
+  const technicalValue = payload.costoActividad !== undefined
+    ? number(payload.costoActividad)
+    : payload.value !== undefined && payload.clientCost === undefined
+      ? number(payload.value)
+      : null;
+  const sharedParticipants = jsonArray(payload.participantOverrides || payload.sharedVisitParticipants)
+    .map((item) => ({
+      participantId: canonicalParticipantId(item.reportId || item.id)
+        || String(item.participantId || item.participanteId || "").trim()
+        || null,
+      percentage: item.percentage == null ? undefined : number(item.percentage),
+      amount: number(item.valorGanado ?? item.amount ?? item.valor_ganado),
+    }))
+    .filter((item) => item.participantId);
+
   const fields: string[] = [];
   const values: unknown[] = [];
-  const set = (column: string, value: unknown) => { values.push(value); fields.push(`${column} = $${values.length}`); };
+  const set = (column: string, value: unknown) => {
+    values.push(value);
+    fields.push(`${column} = $${values.length}`);
+  };
   if (payload.value !== undefined) set(payload.clientCost !== undefined ? "valor_cliente" : "valor_aplicado", number(payload.value));
   if (payload.costoActividad !== undefined) set("valor_aplicado", number(payload.costoActividad));
   if (payload.valorSugerido !== undefined) set("valor_sugerido", payload.valorSugerido == null ? null : number(payload.valorSugerido));
   if (payload.motivoModificacionValor !== undefined) set("motivo_modificacion_valor", payload.motivoModificacionValor || null);
-  if (fields.length === 0) return true;
-  values.push(id);
-  await dbQuery(`UPDATE public.actividades_operativas SET ${fields.join(", ")}, updated_at = clock_timestamp(), version = version + 1 WHERE id = $${values.length}`, values);
-  return true;
+  if (fields.length === 0 && !hasTechnicalValue) return true;
+
+  return withTransaction(async (client) => {
+    const { rows: activityRows } = await client.query(
+      `SELECT id, tipo, valor_aplicado
+         FROM public.actividades_operativas
+        WHERE id = $1
+        FOR UPDATE`,
+      [id],
+    );
+    const activity = activityRows[0];
+    if (!activity) throw new Error("No se encontró la actividad para actualizar.");
+
+    if (fields.length > 0) {
+      values.push(id);
+      await client.query(
+        `UPDATE public.actividades_operativas
+            SET ${fields.join(", ")}, updated_at = clock_timestamp(), version = version + 1
+          WHERE id = $${values.length}`,
+        values,
+      );
+    }
+
+    if (!hasTechnicalValue || technicalValue == null) return true;
+
+    const normalizedTechnicalValue = Math.max(0, roundCurrency(technicalValue));
+    if (sharedParticipants.length > 0) {
+      for (const participant of sharedParticipants) {
+        await syncActivityParticipantValue(client, id, participant.participantId!, participant.amount, participant.percentage);
+      }
+    } else {
+      const { rows: participants } = await client.query(
+        `SELECT id, porcentaje
+           FROM public.actividades_operativas_participantes
+          WHERE actividad_id = $1
+          ORDER BY created_at, id
+          FOR UPDATE`,
+        [id],
+      );
+
+      if (directParticipantId) {
+        await syncActivityParticipantValue(client, id, directParticipantId, normalizedTechnicalValue);
+      } else if (participants.length === 1) {
+        await syncActivityParticipantValue(client, id, participants[0].id, normalizedTechnicalValue);
+      } else if (participants.length > 1) {
+        let assigned = 0;
+        for (let index = 0; index < participants.length; index += 1) {
+          const participantPercentage = Math.max(0, number(participants[index].porcentaje));
+          const amount = index === participants.length - 1
+            ? normalizedTechnicalValue - assigned
+            : roundCurrency(normalizedTechnicalValue * participantPercentage / 100);
+          assigned += amount;
+          await syncActivityParticipantValue(client, id, participants[index].id, amount, participantPercentage);
+        }
+      }
+    }
+
+    return true;
+  });
 }
 
 async function updateMaintenanceApproval(activityId: string, state: "aprobada" | "rechazada" | "pendiente", comment: string | null, user: UserContext) {
