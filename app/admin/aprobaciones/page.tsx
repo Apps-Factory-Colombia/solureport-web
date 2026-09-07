@@ -1082,14 +1082,14 @@ export default function AprobacionesPage() {
     const totalAmount = participants.reduce((sum, participant) => sum + participant.amount, 0);
     const totalPercentage = Number(participants.reduce((sum, participant) => sum + participant.percentage, 0).toFixed(2));
     const isAmountBalanced = totalAmount === costDraft;
-    const hasPositivePercentages = participants.every((participant) => participant.percentage > 0 && participant.percentage <= 100);
-    const isPercentageBalanced = hasPositivePercentages && Math.abs(totalPercentage - 100) <= 0.05;
+    const hasValidPercentages = participants.every((participant) => participant.percentage >= 0 && participant.percentage <= 100);
+    const isPercentageBalanced = hasValidPercentages && Math.abs(totalPercentage - 100) <= 0.05;
 
     return {
       participants,
       totalAmount,
       totalPercentage,
-      hasPositivePercentages,
+      hasValidPercentages,
       isAmountBalanced,
       isPercentageBalanced,
       canSave: participants.length > 0 && isAmountBalanced && isPercentageBalanced,
@@ -3137,7 +3137,7 @@ export default function AprobacionesPage() {
                                   <Input
                                     data-testid={`approval-participant-percentage-${participant.reportId}`}
                                     type="number"
-                                    min="0.01"
+                                    min="0"
                                     max="100"
                                     step="0.01"
                                     value={String(participant.percentage)}

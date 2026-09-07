@@ -123,35 +123,32 @@ function roundCurrency(value: number) {
 }
 
 /**
- * The participant percentage constraint is intentionally strict: every row
- * must be positive and the set must represent a complete 100% split. An
- * administrator may open a shared maintenance before every technician has
- * delivered, so incomplete drafts must be normalized before PostgreSQL sees
- * them. Preserve valid configured percentages; otherwise scale positive
- * values or split evenly when one or more values are missing/zero.
+ * A shared activity must represent one complete 100% split, but administration
+ * may assign all of it to one technician. Zero is therefore valid for a
+ * participant: it keeps the participant visible without adding payment.
+ * Invalid or incomplete totals are normalized before PostgreSQL sees them.
  */
-function normalizePositivePercentageRows<T extends Record<string, any>>(items: T[]): Array<T & { porcentaje: number }> {
+function normalizePercentageRows<T extends Record<string, any>>(items: T[]): Array<T & { porcentaje: number }> {
   const parsed = items.map((item) => ({ ...item, porcentaje: number(item.porcentaje, 0) }));
   if (!parsed.length) return parsed;
 
   const total = parsed.reduce((sum, item) => sum + item.porcentaje, 0);
-  const valid = parsed.every((item) => item.porcentaje > 0 && item.porcentaje <= 100)
+  const valid = parsed.every((item) => item.porcentaje >= 0 && item.porcentaje <= 100)
     && Math.abs(total - 100) <= 0.01;
   if (valid) return parsed;
 
-  const hasMissingPercentage = parsed.some((item) => item.porcentaje <= 0);
-  const basis = hasMissingPercentage
-    ? parsed.map(() => 1)
-    : parsed.map((item) => item.porcentaje);
-  const basisTotal = basis.reduce((sum, value) => sum + value, 0) || parsed.length;
+  const basis = parsed.map((item) => Math.max(0, item.porcentaje));
+  const hasPositiveBasis = basis.some((value) => value > 0);
+  const normalizedBasis = hasPositiveBasis ? basis : parsed.map(() => 1);
+  const basisTotal = normalizedBasis.reduce((sum, value) => sum + value, 0) || parsed.length;
   let assigned = 0;
 
   return parsed.map((item, index) => {
     const porcentaje = index === parsed.length - 1
       ? roundCurrency(100 - assigned)
-      : roundCurrency((basis[index] * 100) / basisTotal);
+      : roundCurrency((normalizedBasis[index] * 100) / basisTotal);
     assigned += porcentaje;
-    return { ...item, porcentaje: Math.max(0.01, porcentaje) };
+    return { ...item, porcentaje: Math.max(0, porcentaje) };
   });
 }
 
@@ -1530,7 +1527,7 @@ async function ensureMaintenanceActivityParticipants(client: any, activityId: st
   // case, so do not block the save.
   if (!assignmentRows.length) return;
 
-  const assignments = normalizePositivePercentageRows(assignmentRows);
+  const assignments = normalizePercentageRows(assignmentRows);
   const { rows: existingRows } = await client.query(
     `SELECT id, tecnico_id
        FROM public.actividades_operativas_participantes
@@ -3656,7 +3653,7 @@ async function syncActivityParticipantValue(client: any, activityId: string, par
   const normalizedAmount = Math.max(0, roundCurrency(amount));
   const normalizedPercentage = percentage == null
     ? number(participantRows[0].porcentaje)
-    : Math.max(0.01, Math.min(100, number(percentage)));
+    : Math.max(0, Math.min(100, number(percentage)));
 
   await client.query(
     `UPDATE public.actividades_operativas_participantes
@@ -3718,7 +3715,7 @@ async function updateActivityValues(payload: Payload) {
       amount: number(item.valorGanado ?? item.amount ?? item.valor_ganado),
     }))
     .filter((item) => item.participantId);
-  const sharedParticipants = normalizePositivePercentageRows(
+  const sharedParticipants = normalizePercentageRows(
     rawSharedParticipants.map((item) => ({ ...item, porcentaje: item.percentage ?? 0 })),
   ).map(({ porcentaje, ...item }) => ({ ...item, percentage: porcentaje }));
 
