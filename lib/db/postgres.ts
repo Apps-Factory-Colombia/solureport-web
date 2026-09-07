@@ -38,6 +38,19 @@ function getConnectionSettings() {
   return { connectionString, isPooler };
 }
 
+export function getDatabaseConnectionInfo() {
+  try {
+    const parsed = new URL(getConnectionString());
+    const port = parsed.port || "5432";
+    return {
+      port,
+      mode: port === "6543" || parsed.hostname.includes(".pooler.supabase.com") ? "pooler" : "direct",
+    } as const;
+  } catch {
+    return { port: null, mode: "not_configured" } as const;
+  }
+}
+
 export function isDatabaseCapacityError(error: unknown): boolean {
   const candidate = error as { code?: string; message?: string } | null;
   const code = String(candidate?.code || "");
