@@ -35,7 +35,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, ChevronDown, ArrowLeft, X, Loader2 } from "lucide-react";
-import { MaintenanceContract, Client, User } from "@/lib/types";
+import { MaintenanceContract, MantenimientoContrato, Client, User } from "@/lib/types";
 import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
@@ -55,6 +55,11 @@ const monthNames = [
   "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
 ];
+
+function getMaintenanceCalendarMonth(maintenance: Pick<MantenimientoContrato, "fechaProgramada" | "mes">) {
+  const month = Number(maintenance.fechaProgramada.slice(5, 7));
+  return month >= 1 && month <= 12 ? month : maintenance.mes;
+}
 
 type ContractParticipantDraft = {
   usuarioId: string;
@@ -761,15 +766,15 @@ export default function ContratosPage() {
 
   const handleExportInformeMensual = (contract: MaintenanceContract, mes: number) => {
     const client = clients.find((c) => c.id === contract.clienteId);
-    const mantsDelMes = contract.mantenimientosRealizados.filter((m) => m.mes === mes);
+    const mantsDelMes = contract.mantenimientosRealizados.filter((m) => getMaintenanceCalendarMonth(m) === mes);
     const totalMes = mantsDelMes.reduce((s, m) => s + m.valorRecaudado, 0);
     const totalAcumulado = contract.mantenimientosRealizados
-      .filter((m) => m.mes <= mes)
+      .filter((m) => getMaintenanceCalendarMonth(m) <= mes)
       .reduce((s, m) => s + m.valorRecaudado, 0);
 
     const rows = mantsDelMes.length > 0
       ? mantsDelMes.map((m) => [
-        monthNames[m.mes - 1],
+        monthNames[getMaintenanceCalendarMonth(m) - 1],
         m.fechaProgramada,
         m.fechaRealizado || "No registrada",
         m.estado.charAt(0).toUpperCase() + m.estado.slice(1),
@@ -802,14 +807,15 @@ export default function ContratosPage() {
     let mesTotal = 0;
 
     contract.mantenimientosRealizados.forEach((m, i) => {
-      if (m.mes !== currentMes && currentMes > 0) {
+      const calendarMonth = getMaintenanceCalendarMonth(m);
+      if (calendarMonth !== currentMes && currentMes > 0) {
         rows.push(["", "", "", `Cierre ${monthNames[currentMes - 1]}`, formatCurrency(mesTotal)]);
         mesTotal = 0;
       }
-      currentMes = m.mes;
+      currentMes = calendarMonth;
       mesTotal += m.valorRecaudado;
       rows.push([
-        monthNames[m.mes - 1],
+        monthNames[calendarMonth - 1],
         m.fechaProgramada,
         m.fechaRealizado || "—",
         m.estado.charAt(0).toUpperCase() + m.estado.slice(1),
@@ -886,9 +892,10 @@ export default function ContratosPage() {
     }
     contracts.forEach((ct) => {
       ct.mantenimientosRealizados.forEach((m) => {
-        meses[m.mes].programados += 1;
-        meses[m.mes].recaudado += m.valorRecaudado;
-        if (m.estado === "realizado") meses[m.mes].realizados += 1;
+        const calendarMonth = getMaintenanceCalendarMonth(m);
+        meses[calendarMonth].programados += 1;
+        meses[calendarMonth].recaudado += m.valorRecaudado;
+        if (m.estado === "realizado") meses[calendarMonth].realizados += 1;
       });
     });
     return meses;
@@ -1566,7 +1573,7 @@ export default function ContratosPage() {
                             {isEditing ? (
                               <div className="space-y-3">
                                 <div className="flex items-center justify-between">
-                                  <span className="text-sm font-semibold text-gold">{monthNames[m.mes - 1]}</span>
+                                  <span className="text-sm font-semibold text-gold">{monthNames[getMaintenanceCalendarMonth(m) - 1]}</span>
                                   <div className="flex gap-2">
                                     <Button
                                       size="sm"
@@ -1640,7 +1647,7 @@ export default function ContratosPage() {
                             ) : (
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-4">
-                                  <span className="text-sm font-semibold text-foreground w-24">{monthNames[m.mes - 1]}</span>
+                                  <span className="text-sm font-semibold text-foreground w-24">{monthNames[getMaintenanceCalendarMonth(m) - 1]}</span>
                                   <Badge
                                     variant="outline"
                                     className={cn(
