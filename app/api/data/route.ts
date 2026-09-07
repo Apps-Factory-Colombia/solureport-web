@@ -580,6 +580,20 @@ function mapReport(row: any, participant: any, index: number): any {
   const approvals = jsonArray(row.aprobaciones);
   const approval = approvals.find((item) => item.participanteId === participant?.id)
     || (participant?.id ? approvals.find((item) => !item.participanteId) : approvals[0]);
+  // Older approved reports can exist without a corresponding liquidation row.
+  // Keep them visible in the same approved-only source used by the mobile app;
+  // the fallback is deterministic and does not create a duplicate database row.
+  const effectiveLiquidation = liquidation || (approval?.estado === "aprobada"
+    ? {
+        id: `fallback:${row.id}:${participant?.id || "activity"}:${row.periodo_id || "period"}`,
+        estado: "aprobado",
+        valorBase: number(participant?.valorBase, number(row.valor_base)),
+        valorGanado: number(participant?.valorGanado, number(row.valor_aplicado) * number(participant?.porcentaje, 100) / 100),
+        valorGanadoOriginal: number(participant?.valorGanado, number(row.valor_aplicado) * number(participant?.porcentaje, 100) / 100),
+        descuentoTardanza: 0,
+        porcentajeDescuentoTardanza: 0,
+      }
+    : undefined);
   const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
   const reportId = participant?.id ? `${row.id}:${participant.id}` : `${row.id}:${index}`;
   return {
@@ -648,13 +662,13 @@ function mapReport(row: any, participant: any, index: number): any {
     motivoModificacionValor: row.motivo_modificacion_valor || undefined,
     costoActividad: number(participant?.valorGanado, number(row.valor_aplicado)),
     participantes: jsonArray(row.participantes),
-    liquidacionId: liquidation?.id,
-    liquidacionEstado: liquidation?.estado,
-    liquidacionValorBase: liquidation ? number(liquidation.valorBase) : undefined,
-    liquidacionValorGanado: liquidation ? number(liquidation.valorGanado) : undefined,
-    liquidacionValorGanadoOriginal: liquidation ? number(liquidation.valorGanadoOriginal) : undefined,
-    liquidacionDescuentoTardanza: liquidation ? number(liquidation.descuentoTardanza) : undefined,
-    liquidacionPorcentajeDescuentoTardanza: liquidation ? number(liquidation.porcentajeDescuentoTardanza) : undefined,
+    liquidacionId: effectiveLiquidation?.id,
+    liquidacionEstado: effectiveLiquidation?.estado,
+    liquidacionValorBase: effectiveLiquidation ? number(effectiveLiquidation.valorBase) : undefined,
+    liquidacionValorGanado: effectiveLiquidation ? number(effectiveLiquidation.valorGanado) : undefined,
+    liquidacionValorGanadoOriginal: effectiveLiquidation ? number(effectiveLiquidation.valorGanadoOriginal) : undefined,
+    liquidacionDescuentoTardanza: effectiveLiquidation ? number(effectiveLiquidation.descuentoTardanza) : undefined,
+    liquidacionPorcentajeDescuentoTardanza: effectiveLiquidation ? number(effectiveLiquidation.porcentajeDescuentoTardanza) : undefined,
     costoAdministrable: Boolean(row.costo_administrable),
     firmado: row.tipo === "visita_tecnica" ? Boolean(row.visita_firmado) : row.tipo === "mantenimiento" ? Boolean(participantDelivery?.firmado || participantDelivery?.firmaReceptorUrl || (canUseLegacyMaintenanceFields && row.mantenimiento_firmado)) : false,
     correoEnviado: Boolean(metadata.correoEnviado),
@@ -956,11 +970,92 @@ async function overdueMaintenanceRows(payload: Payload = {}) {
   };
 }
 
-async function canonicalLiquidationSummary(payload: Payload, user: UserContext) {
+async function getApprovedLiquidationRows(periodId: string, technicianIds?: string[] | null) {
+  const values: unknown[] = [periodId];
+  const scope = technicianIds && technicianIds.length > 0
+    ? (() => {
+        values.push(technicianIds);
+        return "AND p.tecnico_id = ANY($2::uuid[])";
+      })()
+    : "";
+
+  const { rows } = await dbQuery(
+    `SELECT
+        COALESCE(li.id::text, 'fallback:' || a.id::text || ':' || p.id::text || ':' || pl.id::text) AS id,
+        a.id AS actividad_id,
+        a.codigo,
+        a.descripcion,
+        a.tipo,
+        a.fecha_operacion,
+        a.cliente_id,
+        a.sede_id,
+        a.grupo_id,
+        g.nombre AS grupo_nombre,
+        g.lider_id AS grupo_lider_id,
+        c.nombre AS cliente_nombre,
+        s.nombre AS sede_nombre,
+        COALESCE(li.periodo_id, pl.id) AS periodo_id,
+        p.id AS participante_id,
+        p.tecnico_id,
+        u.nombre,
+        u.apellido,
+        u.email,
+        u.rol,
+        COALESCE(li.porcentaje, p.porcentaje) AS porcentaje,
+        COALESCE(li.valor_base, p.valor_base) AS valor_base,
+        COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100) AS valor_ganado,
+        COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100) AS valor_ganado_original,
+        COALESCE(li.descuento_tardanza, 0) AS descuento_tardanza,
+        COALESCE(li.porcentaje_descuento_tardanza, 0) AS porcentaje_descuento_tardanza,
+        COALESCE(li.created_at, a.created_at) AS created_at
+     FROM public.actividades_operativas a
+     JOIN public.periodos_liquidacion pl
+       ON pl.id = $1 AND a.fecha_operacion BETWEEN pl.fecha_inicio AND pl.fecha_fin
+     JOIN public.actividades_operativas_participantes p ON p.actividad_id = a.id
+     JOIN public.usuarios u ON u.id = p.tecnico_id
+     LEFT JOIN public.liquidacion_items li
+       ON li.periodo_id = pl.id
+      AND li.actividad_id = a.id
+      AND li.participante_id = p.id
+     LEFT JOIN public.grupos_trabajo g ON g.id = a.grupo_id
+     LEFT JOIN public.clientes c ON c.id = a.cliente_id
+     LEFT JOIN public.cliente_sedes s ON s.id = a.sede_id
+    WHERE a.estado NOT IN ('cancelada', 'rechazada')
+      AND (
+        li.estado IN ('aprobado', 'pagado')
+        OR EXISTS (
+          SELECT 1
+            FROM public.actividades_operativas_aprobaciones ap
+           WHERE ap.actividad_id = a.id
+             AND ap.participante_id = p.id
+             AND ap.estado = 'aprobada'
+        )
+        OR (
+          a.tipo = 'mantenimiento'
+          AND EXISTS (
+            SELECT 1
+              FROM public.actividades_operativas_aprobaciones ap
+             WHERE ap.actividad_id = a.id
+               AND ap.participante_id IS NULL
+               AND ap.estado = 'aprobada'
+          )
+        )
+      )
+      ${scope}
+    ORDER BY a.fecha_operacion DESC, COALESCE(li.created_at, a.created_at) DESC, p.id` ,
+    values,
+  );
+
+  return rows;
+}
+
+async function canonicalLiquidationSummary(payload: Payload, user: UserContext, scopeOverride?: string[] | null) {
   const requestedUserId = payload.usuarioId || payload.tecnicoId;
-  const userScope = ["admin", "supervisor"].includes(user.rol)
-    ? (requestedUserId ? [String(requestedUserId)] : null)
-    : [user.id];
+  const userScope = scopeOverride !== undefined
+    ? scopeOverride
+    : ["admin", "supervisor"].includes(user.rol)
+      ? (requestedUserId ? [String(requestedUserId)] : null)
+      : [user.id];
   const periodId = String(payload.periodoId || "").trim();
   if (!periodId) throw new Error("Debes indicar el período de liquidación.");
 
@@ -970,74 +1065,71 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext) 
   );
   if (!periodRowsResult[0]) throw new Error("No se encontró el período de liquidación.");
 
-  const scopeClause = userScope ? "AND li.tecnico_id = ANY($2::uuid[])" : "";
-  const baseValues: unknown[] = [periodId];
-  if (userScope) baseValues.push(userScope);
-  const { rows: technicianRows } = await dbQuery(
-    `SELECT li.tecnico_id,
-            u.nombre, u.apellido, u.email, u.rol,
-            COALESCE(bool_or(g.lider_id = li.tecnico_id), false) AS es_lider,
-            COUNT(DISTINCT li.actividad_id) FILTER (WHERE li.estado <> 'anulado')::int AS actividades,
-            COUNT(DISTINCT li.actividad_id) FILTER (WHERE li.estado IN ('aprobado', 'pagado'))::int AS actividades_aprobadas,
-            COALESCE(SUM(li.valor_ganado_original), 0) AS total_bruto,
-            COALESCE(SUM(li.valor_ganado_original) FILTER (WHERE li.tipo <> 'recorrido'), 0) AS total_no_recorridos,
-            COALESCE(SUM(li.valor_ganado_original) FILTER (WHERE li.tipo = 'recorrido' AND li.estado <> 'anulado'), 0) AS total_recorridos,
-            COALESCE(SUM(li.descuento_tardanza) FILTER (WHERE li.estado IN ('aprobado', 'pagado') AND li.tipo <> 'recorrido'), 0) AS descuento_valor,
-            COALESCE(SUM(CASE WHEN li.estado IN ('aprobado', 'pagado') THEN CASE WHEN li.tipo = 'recorrido' THEN li.valor_ganado_original ELSE li.valor_ganado END ELSE 0 END), 0) AS total_aprobado,
-            COALESCE(SUM(li.valor_ganado) FILTER (WHERE li.estado = 'pendiente' AND li.tipo <> 'recorrido'), 0) AS total_pendiente
-       FROM public.liquidacion_items li
-       JOIN public.usuarios u ON u.id = li.tecnico_id
-       LEFT JOIN public.actividades_operativas a ON a.id = li.actividad_id
-       LEFT JOIN public.grupos_trabajo g ON g.id = a.grupo_id
-      WHERE li.periodo_id = $1 ${scopeClause}
-      GROUP BY li.tecnico_id, u.nombre, u.apellido, u.email, u.rol
-      ORDER BY u.nombre, u.apellido, li.tecnico_id`,
-    baseValues,
-  );
-
-  const extraValues: unknown[] = [periodId];
-  if (userScope) extraValues.push(userScope);
-  const extraScopeClause = userScope ? "AND g.lider_id = ANY($2::uuid[])" : "";
-  const { rows: extraRows } = await dbQuery(
-    `SELECT g.lider_id AS tecnico_id,
-            COALESCE(SUM(li.valor_ganado), 0) AS base_extra
-       FROM public.liquidacion_items li
-       JOIN public.actividades_operativas a ON a.id = li.actividad_id
-       JOIN public.grupos_trabajo g ON g.id = a.grupo_id
-      WHERE li.periodo_id = $1
-        AND li.tecnico_id <> g.lider_id
-        AND li.tipo <> 'recorrido'
-        AND li.estado IN ('aprobado', 'pagado')
-        ${extraScopeClause}
-      GROUP BY g.lider_id`,
-    extraValues,
-  );
+  const approvedRows = await getApprovedLiquidationRows(periodId, userScope);
   const settings = await getConfig();
-  const extraByLeader = new Map(extraRows.map((row) => [row.tecnico_id, settings.extraLiderActivo
-    ? roundCurrency(number(row.base_extra) * number(settings.porcentajeExtraLider) / 100)
-    : 0]));
+  const grouped = new Map<string, any>();
+  const extraBaseByLeader = new Map<string, number>();
 
-  const technicians = technicianRows.map((row) => {
-    const extraLider = extraByLeader.get(row.tecnico_id) || 0;
-    const totalAprobado = number(row.total_aprobado);
-    return {
+  for (const row of approvedRows) {
+    const current = grouped.get(row.tecnico_id) || {
       tecnicoId: row.tecnico_id,
       nombre: `${row.nombre || ""} ${row.apellido || ""}`.trim(),
       email: row.email || "",
       rol: row.rol,
-      esLider: Boolean(row.es_lider),
-      actividades: number(row.actividades),
-      actividadesAprobadas: number(row.actividades_aprobadas),
-      totalBruto: number(row.total_bruto),
-      totalNoRecorridos: number(row.total_no_recorridos),
-      totalRecorridos: number(row.total_recorridos),
-      descuentoValor: number(row.descuento_valor),
-      totalAprobado,
-      totalPendiente: number(row.total_pendiente),
-      extraLider,
-      total: roundCurrency(totalAprobado + extraLider),
+      esLider: false,
+      actividades: 0,
+      actividadesAprobadas: 0,
+      totalBruto: 0,
+      totalNoRecorridos: 0,
+      totalRecorridos: 0,
+      descuentoValor: 0,
+      totalAprobado: 0,
+      totalPendiente: 0,
+      extraLider: 0,
+      total: 0,
     };
-  });
+    const gross = number(row.valor_ganado_original);
+    const earned = row.tipo === "recorrido" ? gross : number(row.valor_ganado);
+    current.actividades += 1;
+    current.actividadesAprobadas += 1;
+    current.totalBruto += gross;
+    current.totalAprobado += earned;
+    if (row.tipo === "recorrido") current.totalRecorridos += gross;
+    else {
+      current.totalNoRecorridos += gross;
+      current.descuentoValor += number(row.descuento_tardanza);
+    }
+    if (row.grupo_lider_id && row.grupo_lider_id === row.tecnico_id) current.esLider = true;
+    if (row.grupo_lider_id && row.grupo_lider_id !== row.tecnico_id && row.tipo !== "recorrido") {
+      extraBaseByLeader.set(row.grupo_lider_id, (extraBaseByLeader.get(row.grupo_lider_id) || 0) + number(row.valor_ganado));
+    }
+    grouped.set(row.tecnico_id, current);
+  }
+
+  const technicians = [...grouped.values()].map((row) => {
+    const extraLider = settings.extraLiderActivo
+      ? roundCurrency((extraBaseByLeader.get(row.tecnicoId) || 0) * number(settings.porcentajeExtraLider) / 100)
+      : 0;
+    row.extraLider = extraLider;
+    row.total = roundCurrency(row.totalAprobado + extraLider);
+    return {
+      tecnicoId: row.tecnicoId,
+      nombre: row.nombre,
+      email: row.email,
+      rol: row.rol,
+      esLider: Boolean(row.esLider),
+      actividades: number(row.actividades),
+      actividadesAprobadas: number(row.actividadesAprobadas),
+      totalBruto: number(row.totalBruto),
+      totalNoRecorridos: number(row.totalNoRecorridos),
+      totalRecorridos: number(row.totalRecorridos),
+      descuentoValor: number(row.descuentoValor),
+      totalAprobado: number(row.totalAprobado),
+      totalPendiente: 0,
+      extraLider,
+      total: number(row.total),
+    };
+  }).sort((a, b) => `${a.nombre} ${a.tecnicoId}`.localeCompare(`${b.nombre} ${b.tecnicoId}`));
   const totals = technicians.reduce((acc, row) => ({
     actividades: acc.actividades + row.actividades,
     actividadesAprobadas: acc.actividadesAprobadas + row.actividadesAprobadas,
@@ -2508,23 +2600,14 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       return [...byActivity.values()];
     }
     case "liquidation.items": {
-      const { rows } = await dbQuery("SELECT li.*, a.codigo, a.descripcion, a.tipo AS activity_type, a.sede_id, s.nombre AS sede_nombre FROM public.liquidacion_items li JOIN public.actividades_operativas a ON a.id = li.actividad_id LEFT JOIN public.cliente_sedes s ON s.id = a.sede_id WHERE li.tecnico_id = $1 AND li.periodo_id = $2 ORDER BY li.fecha_operacion DESC, li.created_at DESC", [payload.usuarioId || user.id, payload.periodoId]);
-      return rows.map((row) => ({ id: row.id, codigoRegistro: row.codigo, tecnicoId: row.tecnico_id, periodoId: row.periodo_id, nombreActividad: row.descripcion_snapshot, edificio: row.sede_snapshot || row.sede_nombre || "", fecha: dateOnly(row.fecha_operacion) || "", porcentaje: number(row.porcentaje), valorBase: number(row.valor_base), valorGanado: number(row.valor_ganado), valorGanadoOriginal: number(row.valor_ganado_original), descuentoTardanzaAplicado: number(row.descuento_tardanza), porcentajeDescuentoTardanzaAplicado: number(row.porcentaje_descuento_tardanza), tipo: row.tipo, estado: row.estado, referenciaId: row.actividad_id, fechaCreacion: dateOnly(row.created_at) || "" }));
+      const rows = await getApprovedLiquidationRows(String(payload.periodoId || ""), [String(payload.usuarioId || user.id)]);
+      return rows.map((row) => ({ id: row.id, codigoRegistro: row.codigo, tecnicoId: row.tecnico_id, periodoId: row.periodo_id, nombreActividad: row.descripcion, edificio: row.sede_nombre || "", fecha: dateOnly(row.fecha_operacion) || "", porcentaje: number(row.porcentaje), valorBase: number(row.valor_base), valorGanado: number(row.valor_ganado), valorGanadoOriginal: number(row.valor_ganado_original), descuentoTardanzaAplicado: number(row.descuento_tardanza), porcentajeDescuentoTardanzaAplicado: number(row.porcentaje_descuento_tardanza), tipo: row.tipo, estado: "aprobado", referenciaId: row.actividad_id, fechaCreacion: dateOnly(row.created_at) || "" }));
     }
     case "liquidation.summary": {
-      const { rows } = await dbQuery(`
-        SELECT
-          COALESCE(SUM(CASE WHEN estado IN ('aprobado', 'pagado') THEN CASE WHEN tipo = 'recorrido' THEN valor_ganado_original ELSE valor_ganado END ELSE 0 END), 0) AS approved,
-          COALESCE(SUM(valor_ganado) FILTER (WHERE estado = 'pendiente' AND tipo <> 'recorrido'), 0) AS pending,
-          COALESCE(SUM(valor_ganado_original), 0) AS gross,
-          COALESCE(SUM(descuento_tardanza) FILTER (WHERE estado IN ('aprobado', 'pagado') AND tipo <> 'recorrido'), 0) AS discounts,
-          COALESCE(SUM(valor_ganado_original) FILTER (WHERE tipo = 'recorrido' AND estado <> 'anulado'), 0) AS routes
-        FROM public.liquidacion_items
-        WHERE tecnico_id = $1 AND periodo_id = $2`, [payload.usuarioId || user.id, payload.periodoId]);
-      const row = rows[0] || {};
-      const approved = number(row.approved);
-      const pending = number(row.pending);
-      const discounts = number(row.discounts);
+      const canonical = await canonicalLiquidationSummary({ periodoId: payload.periodoId }, user, [String(payload.usuarioId || user.id)]);
+      const row = canonical.technicians[0] || {};
+      const approved = number(row.totalAprobado);
+      const discounts = number(row.descuentoValor);
       const { rows: periodRows } = await dbQuery("SELECT fecha_inicio, fecha_fin FROM public.periodos_liquidacion WHERE id = $1", [payload.periodoId]);
       const { rows: tardinessRows } = periodRows[0]
         ? await dbQuery("SELECT fecha, porcentaje_descuento, minutos_retraso, razon_tardanza FROM public.registros_asistencia WHERE usuario_id = $1 AND fecha BETWEEN $2 AND $3 AND descuento_aplicado = true AND estado_entrada = 'tarde' ORDER BY fecha", [payload.usuarioId || user.id, periodRows[0].fecha_inicio, periodRows[0].fecha_fin])
@@ -2532,14 +2615,14 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       const tardinessPercentage = Math.min(100, tardinessRows.reduce((max, item) => Math.max(max, number(item.porcentaje_descuento)), 0));
       return {
         totalAprobadoGenerado: approved,
-        totalPendienteGenerado: pending,
-        totalRecorridos: number(row.routes),
-        totalAcumuladoBruto: number(row.gross),
+        totalPendienteGenerado: 0,
+        totalRecorridos: number(row.totalRecorridos),
+        totalAcumuladoBruto: number(row.totalBruto),
         totalMultasTardanza: discounts,
         totalPorcentajeDescuentoTardanza: tardinessPercentage,
         tardanzas: tardinessRows.map((item) => ({ fecha: dateOnly(item.fecha) || "", porcentaje: number(item.porcentaje_descuento), minutos_retraso: number(item.minutos_retraso), razon_tardanza: item.razon_tardanza || undefined })),
-        totalAcumulado: approved + pending,
-        totalAPagar: Math.max(0, approved),
+        totalAcumulado: number(row.totalBruto),
+        totalAPagar: Math.max(0, number(row.total)),
       };
     }
     case "liquidation.periodSummary": { return canonicalLiquidationSummary(payload, user); }
@@ -2598,49 +2681,24 @@ function mapConfig(row: any): any {
 async function getConfig() { const { rows } = await dbQuery("SELECT * FROM public.configuracion_empresa WHERE id = 1"); return rows[0] ? mapConfig(rows[0]) : configDefaults(); }
 
 async function getLeaderLiquidationSummary(liderId: string, periodoId: string) {
-  const { rows: personalRows } = await dbQuery(
-    `SELECT
-       COALESCE(SUM(CASE WHEN li.estado IN ('aprobado', 'pagado') THEN CASE WHEN li.tipo = 'recorrido' THEN li.valor_ganado_original ELSE li.valor_ganado END ELSE 0 END), 0) AS total_aprobado,
-       COALESCE(SUM(li.valor_ganado) FILTER (WHERE li.estado = 'pendiente' AND li.tipo <> 'recorrido'), 0) AS total_pendiente,
-       COALESCE(SUM(li.valor_ganado_original) FILTER (WHERE li.tipo = 'recorrido' AND li.estado <> 'anulado'), 0) AS total_recorridos,
-       COALESCE(SUM(li.valor_ganado_original), 0) AS total_bruto,
-       COALESCE(SUM(li.descuento_tardanza) FILTER (WHERE li.tipo <> 'recorrido'), 0) AS total_descuentos
-       FROM public.liquidacion_items li
-      WHERE li.tecnico_id = $1 AND li.periodo_id = $2`,
-    [liderId, periodoId],
-  );
-  const { rows: groupRows } = await dbQuery("SELECT id FROM public.grupos_trabajo WHERE lider_id = $1 AND estado = 'activo' ORDER BY created_at", [liderId]);
-  const settings = await getConfig();
-  let extraLider = 0;
-  if (groupRows.length > 0 && settings.extraLiderActivo && number(settings.porcentajeExtraLider) > 0) {
-    const { rows: extraRows } = await dbQuery(
-      `SELECT COALESCE(SUM(li.valor_ganado), 0) AS base_extra
-         FROM public.liquidacion_items li
-         JOIN public.actividades_operativas a ON a.id = li.actividad_id
-         JOIN public.grupos_trabajo g ON g.id = a.grupo_id
-        WHERE li.periodo_id = $1
-          AND g.lider_id = $2
-          AND li.tecnico_id <> $2
-          AND li.tipo <> 'recorrido'
-          AND li.estado IN ('aprobado', 'pagado')`,
-      [periodoId, liderId],
-    );
-    extraLider = roundCurrency(number(extraRows[0]?.base_extra) * number(settings.porcentajeExtraLider) / 100);
-  }
-  const row = personalRows[0] || {};
+  // Build the leader's extra from the complete approved set, then return only
+  // that leader. Scoping the source rows to the leader would omit the team's
+  // approved work used to calculate the extra leader amount.
+  const summary = await canonicalLiquidationSummary({ periodoId }, { id: liderId, rol: "admin" } as UserContext, null);
+  const row: any = summary.technicians.find((item) => item.tecnicoId === liderId) || {};
   return {
     id: `${liderId}:${periodoId}`,
     liderId,
     periodoId,
-    totalAprobadoPago: number(row.total_aprobado),
-    totalPendientePago: number(row.total_pendiente),
-    extraLider,
-    totalRecorridos: number(row.total_recorridos),
-    totalAcumulado: number(row.total_aprobado) + number(row.total_pendiente),
-    totalAcumuladoBruto: number(row.total_bruto),
-    totalDescuentosTardanza: number(row.total_descuentos),
-    porcentajeExtraLiderAplicado: settings.extraLiderActivo ? number(settings.porcentajeExtraLider) : 0,
-    extraLiderActivo: Boolean(settings.extraLiderActivo),
+    totalAprobadoPago: number(row.totalAprobado),
+    totalPendientePago: 0,
+    extraLider: number(row.extraLider),
+    totalRecorridos: number(row.totalRecorridos),
+    totalAcumulado: number(row.totalBruto),
+    totalAcumuladoBruto: number(row.totalBruto),
+    totalDescuentosTardanza: number(row.descuentoValor),
+    porcentajeExtraLiderAplicado: 0,
+    extraLiderActivo: number(row.extraLider) > 0,
     tecnicosExcluidosExtraIds: [],
   };
 }
