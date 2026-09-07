@@ -2711,9 +2711,10 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
                   observaciones = COALESCE($11, observaciones),
                   tipo_pendiente = $12,
                   descripcion_pendiente = $13,
+                  costo_tecnico_presupuestado = CASE WHEN $2::boolean AND $14::numeric IS NOT NULL THEN GREATEST(0, $14::numeric) ELSE costo_tecnico_presupuestado END,
                   updated_at = clock_timestamp()
             WHERE id = $1`,
-          [payload.id, editable, payload.clienteId || null, payload.sedeId || null, scheduledDate, payload.horaProgramada || null, payload.tecnicoId || null, payload.grupoId || null, normalizedState || null, dateOnly(payload.fechaCierre) || null, payload.observaciones, payload.tipoPendiente || null, payload.descripcionPendiente || null],
+          [payload.id, editable, payload.clienteId || null, payload.sedeId || null, scheduledDate, payload.horaProgramada || null, payload.tecnicoId || null, payload.grupoId || null, normalizedState || null, dateOnly(payload.fechaCierre) || null, payload.observaciones, payload.tipoPendiente || null, payload.descripcionPendiente || null, payload.costoTecnicoTotal === undefined ? null : Math.max(0, number(payload.costoTecnicoTotal))],
         );
       });
       const { rows } = await dbQuery(`SELECT m.*, ${maintenanceScheduledDateSql()} AS fecha_programada_efectiva,

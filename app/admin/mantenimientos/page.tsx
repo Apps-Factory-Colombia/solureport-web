@@ -658,7 +658,7 @@ export default function MantenimientosPage() {
             porcentaje: 100,
             valorCalculado: getMaintenancePaymentCost(schedulingMaint),
           }];
-      await updateMantenimiento(schedulingMaint.id, {
+      const saved = await updateMantenimiento(schedulingMaint.id, {
         estado: "programado" as MaintenanceStatus,
         tecnicoId,
         fechaProgramada: fecha,
@@ -671,8 +671,13 @@ export default function MantenimientosPage() {
 
       setScheduleOpen(false);
       setSchedulingMaint(null);
-      const scheduledMonth = fecha.slice(0, 7);
-      const scheduledIsOverdue = isMaintenanceDue(fecha, scheduleTime);
+      // Use the date returned by the API. Contract rows keep their
+      // authoritative date from the contract, so the date typed in this
+      // dialog is not necessarily the date that was persisted.
+      const effectiveDate = saved.fechaProgramada || fecha;
+      const effectiveTime = saved.horaProgramada || scheduleTime;
+      const scheduledMonth = effectiveDate.slice(0, 7);
+      const scheduledIsOverdue = isMaintenanceDue(effectiveDate, effectiveTime);
       setProgramadosMonthFilter(scheduledMonth);
       const targetTab: MaintenanceAdminTab = scheduledIsOverdue ? "vencidos" : "programados";
       setPageByTab((current) => ({ ...current, [targetTab]: 1, programados: 1, proximos: 1, lista: 1 }));
