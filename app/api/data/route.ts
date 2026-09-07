@@ -614,6 +614,14 @@ async function activityRows(payload: Payload = {}) {
 function mapReport(row: any, participant: any, index: number): any {
   const type = row.tipo === "actividad" ? "actividad_grupal" : row.tipo === "mantenimiento" ? "mantenimiento_preventivo" : row.tipo;
   const isMaintenance = row.tipo === "mantenimiento";
+  // For group activities, `a.descripcion` is the client/building text sent
+  // by the mobile form. The catalog activity is the actual work performed
+  // and must be the primary description shown by approvals, reports and
+  // liquidation. Client and specification continue to travel in their own
+  // fields, so this does not lose any context.
+  const reportDescription = type === "actividad_grupal"
+    ? row.catalogo_nombre || row.descripcion || ""
+    : row.descripcion || row.catalogo_nombre || "";
   const allEvidence = jsonArray(row.evidencias);
   const deliveries = jsonArray(row.entregas);
   const participantDelivery = isMaintenance && participant?.id
@@ -676,7 +684,7 @@ function mapReport(row: any, participant: any, index: number): any {
     porcentajeParticipacion: number(participant?.porcentaje, 100),
     fecha: dateOnly(row.fecha_operacion) || "",
     clienteId: row.cliente_id,
-    descripcion: row.descripcion || row.catalogo_nombre || "",
+    descripcion: reportDescription,
     actividadesRealizadas: isMaintenance
       ? participantDelivery?.actividadesRealizadas || (canUseLegacyMaintenanceFields ? metadata.actividadesRealizadas : undefined)
       : metadata.actividadesRealizadas || row.catalogo_nombre || undefined,
