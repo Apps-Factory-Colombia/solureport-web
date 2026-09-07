@@ -241,6 +241,8 @@ export default function LiquidacionPage() {
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [leaderAccumulations, setLeaderAccumulations] = useState<LeaderAccumulation[]>([]);
   const [actReports, setActReports] = useState<ActivityReport[]>([]);
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [reportsLoadError, setReportsLoadError] = useState<string | null>(null);
   const [arrivalRecords, setArrivalRecords] = useState<ArrivalRecord[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [canonicalSummary, setCanonicalSummary] = useState<CanonicalLiquidationSummary | null>(null);
@@ -342,14 +344,13 @@ export default function LiquidacionPage() {
     const requestId = ++liquidationRequestRef.current;
     setLoading(true);
     Promise.allSettled([
-      getPeriodos(), getUsuarios(), getGrupos(), getAcumulacionesLider(), getReportesActividad(), getConfiguracion(), getLlegadas(),
-    ]).then(([periodsResult, usersResult, groupsResult, accumulationsResult, reportsResult, settingsResult, arrivalsResult]) => {
+      getPeriodos(), getUsuarios(), getGrupos(), getAcumulacionesLider(), getConfiguracion(), getLlegadas(),
+    ]).then(([periodsResult, usersResult, groupsResult, accumulationsResult, settingsResult, arrivalsResult]) => {
       if (requestId !== liquidationRequestRef.current) return;
       const p = periodsResult.status === "fulfilled" ? periodsResult.value : [];
       const u = usersResult.status === "fulfilled" ? usersResult.value : [];
       const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
       const la = accumulationsResult.status === "fulfilled" ? accumulationsResult.value : [];
-      const ar = reportsResult.status === "fulfilled" ? reportsResult.value : [];
       const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
       const l = arrivalsResult.status === "fulfilled" ? arrivalsResult.value : [];
 
@@ -357,7 +358,6 @@ export default function LiquidacionPage() {
       if (usersResult.status === "rejected") console.error("Error cargando usuarios en liquidación:", usersResult.reason);
       if (groupsResult.status === "rejected") console.error("Error cargando grupos en liquidación:", groupsResult.reason);
       if (accumulationsResult.status === "rejected") console.error("Error cargando acumulaciones en liquidación:", accumulationsResult.reason);
-      if (reportsResult.status === "rejected") console.error("Error cargando reportes en liquidación:", reportsResult.reason);
       if (settingsResult.status === "rejected") console.error("Error cargando configuración en liquidación:", settingsResult.reason);
       if (arrivalsResult.status === "rejected") console.error("Error cargando llegadas en liquidación:", arrivalsResult.reason);
 
@@ -365,14 +365,49 @@ export default function LiquidacionPage() {
       setUsers(u);
       setGroups(g);
       setLeaderAccumulations(la);
-      setActReports(ar);
       setArrivalRecords(l);
       setCompanySettings(s);
-      setSelectedPeriodId((current) => (current && p.some((period) => period.id === current) ? current : p[0]?.id || ""));
+      const initialPeriodId = p[0]?.id || "";
+      setSelectedPeriodId((current) => (current && p.some((period) => period.id === current) ? current : initialPeriodId));
     }).finally(() => {
       if (requestId === liquidationRequestRef.current) setLoading(false);
     });
   }, []);
+
+  // Load only the reports for the selected period. Loading the complete
+  // history here made the liquidation request grow until it could fail or
+  // return incomplete data, which hid activities, visits and routes.
+  useEffect(() => {
+    if (!selectedPeriodId) {
+      setActReports([]);
+      setReportsLoading(false);
+      setReportsLoadError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setReportsLoading(true);
+    setReportsLoadError(null);
+
+    getReportesActividad({ periodoId: selectedPeriodId })
+      .then((reports) => {
+        if (cancelled) return;
+        setActReports(reports);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("Error cargando reportes del período en liquidación:", error);
+        setActReports([]);
+        setReportsLoadError("No se pudieron cargar todos los reportes de este período.");
+      })
+      .finally(() => {
+        if (!cancelled) setReportsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPeriodId]);
 
   const loadCanonicalSummary = useCallback(async (periodId: string) => {
     const requestId = ++canonicalSummaryRequestRef.current;
@@ -962,7 +997,7 @@ export default function LiquidacionPage() {
     setDeletingReportId(reportToDelete.id);
     try {
       await deleteReporteActividadAdmin(reportToDelete.id);
-      const updatedReports = await getReportesActividad();
+      const updatedReports = await getReportesActividad({ periodoId: selectedPeriodId });
       setActReports(updatedReports);
       setReportToDelete(null);
     } catch (err) {
@@ -1034,6 +1069,17 @@ export default function LiquidacionPage() {
           <div className="flex items-center gap-2 rounded-lg border border-gold/20 bg-gold/5 px-4 py-2 text-sm text-gold">
             <Loader2 className="h-4 w-4 animate-spin" />
             Actualizando liquidación canónica del período...
+          </div>
+        )}
+        {reportsLoading && (
+          <div className="flex items-center gap-2 rounded-lg border border-cyan-400/20 bg-cyan-400/5 px-4 py-2 text-sm text-cyan-200">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Cargando todas las actividades, visitas y recorridos del período...
+          </div>
+        )}
+        {reportsLoadError && (
+          <div className="rounded-lg border border-red-400/30 bg-red-400/10 px-4 py-2 text-sm text-red-200">
+            {reportsLoadError}
           </div>
         )}
         <div className="flex items-center justify-between gap-4 flex-wrap">
