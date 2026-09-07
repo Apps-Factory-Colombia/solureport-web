@@ -37,6 +37,9 @@ export async function getMantenimientosVencidos(): Promise<{ today: string; gene
 }
 export async function createMantenimiento(maintenance: Partial<Maintenance>): Promise<Maintenance> { return dataRequest<Maintenance>("maintenances.create", maintenance); }
 export async function updateMantenimiento(id: string, maintenance: Partial<Maintenance>): Promise<Maintenance> { return dataRequest<Maintenance>("maintenances.update", { id, ...maintenance }); }
+export async function markMantenimientoRealizado(id: string, fechaRealizado?: string): Promise<Maintenance> {
+  return dataRequest<Maintenance>("maintenances.markCompleted", { id, fechaRealizado });
+}
 export async function deleteMantenimiento(id: string): Promise<void> { await dataRequest("maintenances.delete", { id }); }
 export async function getReportesMantenimiento(): Promise<MaintenanceReport[]> { return dataRequest<MaintenanceReport[]>("maintenances.reports"); }
 export async function syncReporteMantenimientoToActividad(id: string): Promise<void> { void id; }

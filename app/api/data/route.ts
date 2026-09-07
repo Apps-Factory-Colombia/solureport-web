@@ -795,7 +795,7 @@ function globallyCompletedMaintenancePredicate(scheduleAlias = "m") {
   // the future. Otherwise it disappears from Próximos and is shown as
   // Historial before its scheduled day.
   const scheduleHasStarted = `${scheduleAlias}.fecha_programada <= ${BOGOTA_DATE_SQL}`;
-  return `(${scheduleHasStarted} AND (((${scheduleAlias}.estado IN ('ejecutado', 'completado') AND NOT (${partialDelivery})) OR (${allDeliveries}))))`;
+  return `(${scheduleHasStarted} AND (((${scheduleAlias}.admin_completado_at IS NOT NULL) OR (${scheduleAlias}.estado IN ('ejecutado', 'completado') AND NOT (${partialDelivery})) OR (${allDeliveries}))))`;
 }
 
 async function dashboardMetrics(payload: Payload = {}) {
@@ -2403,6 +2403,45 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       return maintenance;
     }
     case "maintenances.create": { await requireAdmin(user); return createMaintenance(payload, user); }
+    case "maintenances.markCompleted": {
+      await requireAdmin(user);
+      const maintenanceId = String(payload.id || "").trim();
+      if (!maintenanceId) throw new Error("No se recibió el mantenimiento que se marcará como realizado.");
+
+      const completedDate = dateOnly(payload.fechaRealizado) || bogotaClock().date;
+      const { rows: currentRows } = await dbQuery(
+        "SELECT id, estado, fecha_programada FROM public.mantenimientos_programados WHERE id = $1",
+        [maintenanceId],
+      );
+      const current = currentRows[0];
+      if (!current) throw new Error("No se encontró el mantenimiento vencido.");
+      if (current.estado === "cancelado") throw new Error("Un mantenimiento cancelado no puede marcarse como realizado.");
+
+      // This action intentionally changes only the scheduled maintenance row.
+      // It does not edit the contract, regenerate dates, replace participants,
+      // or remove any independent technician delivery/evidence.
+      await dbQuery(
+        `UPDATE public.mantenimientos_programados
+            SET estado = 'ejecutado',
+                fecha_realizado = COALESCE(fecha_realizado, $2::date),
+                admin_completado_at = clock_timestamp(),
+                admin_completado_por_id = $3::uuid,
+                updated_at = clock_timestamp()
+          WHERE id = $1`,
+        [maintenanceId, completedDate, user.id],
+      );
+
+      const { rows } = await dbQuery(
+        `SELECT m.*, c.nombre AS cliente_nombre, s.nombre AS sede_nombre, g.lider_id AS lider_id
+           FROM public.mantenimientos_programados m
+           JOIN public.clientes c ON c.id = m.cliente_id
+           LEFT JOIN public.cliente_sedes s ON s.id = m.sede_id
+           LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
+          WHERE m.id = $1`,
+        [maintenanceId],
+      );
+      return rows[0] ? enrichMaintenance(rows[0]) : null;
+    }
     case "maintenances.update": {
       const { rows: currentRows } = await dbQuery(
         `SELECT m.*, g.lider_id AS mantenimiento_lider_id
@@ -2444,6 +2483,8 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
                   grupo_id = CASE WHEN $2::boolean THEN COALESCE($8, grupo_id) ELSE grupo_id END,
                   estado = COALESCE($9, estado),
                   fecha_realizado = CASE WHEN $9 = 'ejecutado' THEN COALESCE($10::date, (now() AT TIME ZONE 'America/Bogota')::date) ELSE COALESCE($10::date, fecha_realizado) END,
+                  admin_completado_at = CASE WHEN $9 IS NULL OR $9 = 'ejecutado' THEN admin_completado_at ELSE NULL END,
+                  admin_completado_por_id = CASE WHEN $9 IS NULL OR $9 = 'ejecutado' THEN admin_completado_por_id ELSE NULL END,
                   observaciones = COALESCE($11, observaciones),
                   tipo_pendiente = $12,
                   descripcion_pendiente = $13,

@@ -61,7 +61,7 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 import { Maintenance, MaintenanceStatus, Client, User, CompanySettings } from "@/lib/types";
-import { MaintenanceAdminPage, MaintenanceAdminView, getMantenimientosAdminPage, createMantenimiento, updateMantenimiento, deleteMantenimiento } from "@/lib/data/services/mantenimientos";
+import { MaintenanceAdminPage, MaintenanceAdminView, getMantenimientosAdminPage, createMantenimiento, updateMantenimiento, deleteMantenimiento, markMantenimientoRealizado } from "@/lib/data/services/mantenimientos";
 import { getContratos, createContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
@@ -324,6 +324,7 @@ export default function MantenimientosPage() {
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [maintenanceToDelete, setMaintenanceToDelete] = useState<Maintenance | null>(null);
   const [deletingMaintenanceId, setDeletingMaintenanceId] = useState<string | null>(null);
+  const [completingMaintenanceId, setCompletingMaintenanceId] = useState<string | null>(null);
   const [uncoveredSearch, setUncoveredSearch] = useState("");
   const [reactivateOpen, setReactivateOpen] = useState(false);
   const [reactivatingContract, setReactivatingContract] = useState<MaintenanceContract | null>(null);
@@ -989,6 +990,32 @@ export default function MantenimientosPage() {
       alert(message);
     } finally {
       setDeletingMaintenanceId(null);
+    }
+  };
+
+  const handleMarkAsCompleted = async (maintenance: Maintenance) => {
+    if (completingMaintenanceId) return;
+    const label = maintenance.codigoRegistro || getMaintenanceClientLabel(maintenance);
+    if (!window.confirm(`¿Confirmas que el mantenimiento ${label} sí fue realizado? Se moverá a Realizados y dejará de aparecer en Vencidos.`)) return;
+
+    setCompletingMaintenanceId(maintenance.id);
+    setNotification({ type: "success", message: "Marcando mantenimiento como realizado…" });
+    try {
+      await markMantenimientoRealizado(maintenance.id);
+      setNotification({
+        type: "success",
+        message: `${label} fue marcado como realizado y ya no aparece en Vencidos.`,
+      });
+      setPageByTab((current) => ({ ...current, vencidos: 1 }));
+      await loadMaintenancePage("vencidos", 1);
+    } catch (err) {
+      console.error("Error marcando mantenimiento como realizado:", err);
+      setNotification({
+        type: "error",
+        message: err instanceof Error ? err.message : "No se pudo marcar el mantenimiento como realizado.",
+      });
+    } finally {
+      setCompletingMaintenanceId(null);
     }
   };
 
@@ -1792,6 +1819,20 @@ export default function MantenimientosPage() {
                             </TableCell>
                             <TableCell className="text-right">
                               <div className="flex items-center justify-end gap-2">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={completingMaintenanceId === m.id}
+                                  className="gap-2 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-300"
+                                  title="Confirmar que el mantenimiento fue realizado"
+                                  onClick={() => void handleMarkAsCompleted(m)}
+                                >
+                                  {completingMaintenanceId === m.id
+                                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                                    : <CheckCircle2 className="h-4 w-4" />}
+                                  {completingMaintenanceId === m.id ? "Marcando…" : "Marcar realizado"}
+                                </Button>
                                 <Button
                                   type="button"
                                   variant="ghost"
