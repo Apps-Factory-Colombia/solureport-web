@@ -23,6 +23,21 @@ function getPoolMax(): number {
   return Math.min(Math.floor(configured), 2);
 }
 
+function getConnectionSettings() {
+  const connectionString = getConnectionString();
+  let port = "";
+  let hostname = "";
+  try {
+    const parsed = new URL(connectionString);
+    port = parsed.port;
+    hostname = parsed.hostname;
+  } catch {
+    // Let `pg` return its normal connection-string error below.
+  }
+  const isPooler = port === "6543" || hostname.includes(".pooler.supabase.com");
+  return { connectionString, isPooler };
+}
+
 export function isDatabaseCapacityError(error: unknown): boolean {
   const candidate = error as { code?: string; message?: string } | null;
   const code = String(candidate?.code || "");
@@ -39,15 +54,21 @@ export function isDatabaseCapacityError(error: unknown): boolean {
 
 export function getPool(): Pool {
   if (!globalThis.solureportPool) {
+    const { connectionString, isPooler } = getConnectionSettings();
+    const startupOptions = isPooler
+      ? undefined
+      : (process.env.SOLUREPORT_DB_OPTIONS || "-c jit=off");
     globalThis.solureportPool = new Pool({
-      connectionString: getConnectionString(),
+      connectionString,
       max: getPoolMax(),
       idleTimeoutMillis: 10_000,
       connectionTimeoutMillis: 5_000,
       maxUses: 500,
       // These are OLTP requests, not analytical batches. PostgreSQL JIT was
       // spending ~2.4s compiling the report query for only a few rows.
-      options: process.env.SOLUREPORT_DB_OPTIONS || "-c jit=off",
+      // Supabase Transaction Pooler rejects the `options` startup parameter,
+      // so it must not be sent on port 6543.
+      ...(startupOptions ? { options: startupOptions } : {}),
       ssl: process.env.SOLUREPORT_DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
     });
   }
