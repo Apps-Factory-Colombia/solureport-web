@@ -11,6 +11,23 @@ const resend = resendApiKey ? new Resend(resendApiKey) : null;
 const resendFromEmail = process.env.RESEND_FROM_EMAIL || "notificaciones@solucionesyautomatizaciones.com";
 const resendReplyTo = process.env.RESEND_REPLY_TO || "solucionesyautomatizaciones@hotmail.com";
 
+/**
+ * Email is an optional notification side effect. A provider outage, quota
+ * limit, missing key or rendering problem must never make the operation that
+ * triggered the notification fail. Keep HTTP 200 so existing callers that
+ * only await the notification can continue, while exposing `skipped` so a
+ * manual sender does not mark the report as delivered.
+ */
+function skippedEmailResponse(reason: string, error?: unknown) {
+  console.warn("Correo omitido; la operación principal continúa:", reason, error);
+  return NextResponse.json({
+    success: false,
+    skipped: true,
+    emailSent: false,
+    warning: "El correo fue omitido porque el servicio de correo no está disponible. La operación principal sí se completó.",
+  }, { status: 200 });
+}
+
 function normalizeRecipients(value: string | string[] | undefined): string[] | undefined {
   if (!value) return undefined;
   const values = Array.isArray(value) ? value : [value];
@@ -45,10 +62,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!resend) {
-      return NextResponse.json(
-        { error: "La configuracion de correo esta incompleta. Falta RESEND_API_KEY." },
-        { status: 500 }
-      );
+      return skippedEmailResponse("Falta RESEND_API_KEY.");
     }
 
     let html = providedHtml;
@@ -110,10 +124,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!html) {
-      return NextResponse.json(
-        { error: "No se pudo construir el contenido del correo." },
-        { status: 400 }
-      );
+      return skippedEmailResponse("No se pudo construir el contenido del correo.");
     }
 
     const toRecipients = normalizeRecipients(to);
@@ -147,16 +158,11 @@ export async function POST(request: NextRequest) {
     });
 
     if (error) {
-      console.error("Error enviando email:", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return skippedEmailResponse(error.message || "Resend devolvió un error.", error);
     }
 
     return NextResponse.json({ success: true, data });
   } catch (err) {
-    console.error("Error en API send-email:", err);
-    return NextResponse.json(
-      { error: "Error interno del servidor" },
-      { status: 500 }
-    );
+    return skippedEmailResponse("Error inesperado al preparar o enviar el correo.", err);
   }
 }

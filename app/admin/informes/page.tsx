@@ -1767,6 +1767,13 @@ export default function InformesPage() {
         throw new Error(payload?.error || "No se pudo enviar el correo del informe.");
       }
 
+      const emailResult = await response.json().catch(() => null);
+      if (emailResult?.skipped) {
+        console.warn("Correo del informe omitido:", emailResult.warning);
+        alert(emailResult.warning || "El correo fue omitido, pero el informe continúa disponible en el sistema.");
+        return;
+      }
+
       const sentAt = new Date().toISOString();
       await markReporteActividadEmailSent(report.id, sentAt);
       applySentState(report, sentAt);
