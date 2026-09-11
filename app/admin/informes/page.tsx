@@ -919,8 +919,37 @@ export default function InformesPage() {
     grupales: 1,
   });
   const reportsRequestRef = useRef(0);
+  const reportsScopeRef = useRef<string | null>(null);
   const hasLoadedDataRef = useRef(false);
   const [refreshing, setRefreshing] = useState(false);
+
+  const loadReportsForPeriod = useCallback(async (periodId: string) => {
+    const requestId = ++reportsRequestRef.current;
+    setRefreshing(true);
+    try {
+      const filters = periodId && periodId !== ALL_PERIODS_VALUE ? { periodoId: periodId } : {};
+      const nextReports = mergeContractMaintenanceHistory(
+        normalizeSharedVisitRowsForUi(await getReportesActividad(filters)),
+        contracts,
+        today,
+      );
+      if (requestId !== reportsRequestRef.current) return;
+      reportsScopeRef.current = periodId;
+      setReports(nextReports);
+    } catch (error) {
+      if (requestId === reportsRequestRef.current) {
+        console.error("Error cargando reportes del período en informes:", error);
+        setReports([]);
+      }
+    } finally {
+      if (requestId === reportsRequestRef.current) setRefreshing(false);
+    }
+  }, [contracts, today]);
+
+  const handlePeriodChange = useCallback((periodId: string) => {
+    setSelectedPeriodId(periodId);
+    if (reportsScopeRef.current !== periodId) void loadReportsForPeriod(periodId);
+  }, [loadReportsForPeriod]);
 
   const loadData = useCallback(async () => {
     const requestId = ++reportsRequestRef.current;
@@ -929,14 +958,16 @@ export default function InformesPage() {
     else setRefreshing(true);
 
     try {
-      const [reportsResult, usersResult, clientsResult, groupsResult, settingsResult, contractsResult, periodsResult] = await Promise.allSettled([
-        getReportesActividad(),
+      const periodsResult = await Promise.allSettled([getPeriodos()]);
+      const p = periodsResult[0].status === "fulfilled" ? periodsResult[0].value : [];
+      const defaultPeriodId = getLatestPeriodId(p);
+      const [reportsResult, usersResult, clientsResult, groupsResult, settingsResult, contractsResult] = await Promise.allSettled([
+        getReportesActividad(defaultPeriodId === ALL_PERIODS_VALUE ? {} : { periodoId: defaultPeriodId }),
         getUsuarios(),
         getClientes(),
         getGrupos(),
         getConfiguracion(),
         getContratos(),
-        getPeriodos(),
       ]);
       const r = reportsResult.status === "fulfilled" ? reportsResult.value : [];
       const u = usersResult.status === "fulfilled" ? usersResult.value : [];
@@ -944,7 +975,6 @@ export default function InformesPage() {
       const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
       const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
       const ct = contractsResult.status === "fulfilled" ? contractsResult.value : [];
-      const p = periodsResult.status === "fulfilled" ? periodsResult.value : [];
 
       if (reportsResult.status === "rejected") console.error("Error cargando reportes en informes:", reportsResult.reason);
       if (usersResult.status === "rejected") console.error("Error cargando usuarios en informes:", usersResult.reason);
@@ -952,7 +982,7 @@ export default function InformesPage() {
       if (groupsResult.status === "rejected") console.error("Error cargando grupos en informes:", groupsResult.reason);
       if (settingsResult.status === "rejected") console.error("Error cargando configuración en informes:", settingsResult.reason);
       if (contractsResult.status === "rejected") console.error("Error cargando contratos en informes:", contractsResult.reason);
-      if (periodsResult.status === "rejected") console.error("Error cargando períodos en informes:", periodsResult.reason);
+      if (periodsResult[0].status === "rejected") console.error("Error cargando períodos en informes:", periodsResult[0].reason);
 
       if (requestId !== reportsRequestRef.current) return;
       const normalizedReports = normalizeSharedVisitRowsForUi(r);
@@ -965,6 +995,7 @@ export default function InformesPage() {
       setCompanySettings(s);
       setContracts(ct);
       setPeriods(historicalData.periods);
+      reportsScopeRef.current = defaultPeriodId;
       setSelectedPeriodId((current) => {
         if (current === ALL_PERIODS_VALUE) return current;
         if (current && historicalData.periods.some((period) => period.id === current)) return current;
@@ -2849,7 +2880,7 @@ export default function InformesPage() {
           </div>
           <div className="min-w-56 space-y-1">
             <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Corte / período de trabajo</p>
-            <Select value={selectedPeriodId || undefined} onValueChange={setSelectedPeriodId}>
+          <Select value={selectedPeriodId || undefined} onValueChange={handlePeriodChange}>
               <SelectTrigger className="w-full bg-secondary/50 border-border/50">
               <SelectValue placeholder="Último período" />
               </SelectTrigger>

@@ -13,14 +13,15 @@ function getConnectionString(): string {
 }
 
 function getPoolMax(): number {
-  const configured = Number(process.env.SOLUREPORT_DB_POOL_MAX || 2);
-  if (!Number.isFinite(configured) || configured < 1) return 2;
+  const isVercel = process.env.VERCEL === "1" || Boolean(process.env.VERCEL_ENV);
+  const configured = Number(process.env.SOLUREPORT_DB_POOL_MAX || (isVercel ? 2 : 4));
+  if (!Number.isFinite(configured) || configured < 1) return isVercel ? 2 : 4;
 
-  // Vercel can run several serverless instances at the same time. A large
-  // per-instance pool exhausts Supabase direct-connection slots very quickly;
-  // keep the safe ceiling here even if an old deployment still has a larger
-  // value configured. The transaction pooler can queue the rest of the work.
-  return Math.min(Math.floor(configured), 2);
+  // Vercel can run several serverless instances at the same time, so keep the
+  // conservative per-instance ceiling there. Dockploy runs one long-lived
+  // container; allowing a small configurable pool prevents six independent
+  // admin-screen requests from waiting behind one another after login.
+  return Math.min(Math.floor(configured), isVercel ? 2 : 6);
 }
 
 function getConnectionSettings() {

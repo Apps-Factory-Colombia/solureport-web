@@ -51,12 +51,12 @@ import {
   ChevronDown,
   Percent,
 } from "lucide-react";
-import { LiquidationPeriod, User, WorkGroup, LeaderAccumulation, ActivityReport, ArrivalRecord } from "@/lib/types";
+import { LiquidationPeriod, User, WorkGroup, ActivityReport, ArrivalRecord } from "@/lib/types";
 import { getPeriodos, closePeriodo, getCanonicalLiquidationSummary, CanonicalLiquidationSummary } from "@/lib/data/services/liquidacion";
 import { getConfiguracion } from "@/lib/data/services/configuracion";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getGrupos } from "@/lib/data/services/grupos";
-import { deleteReporteActividadAdmin, getAcumulacionesLider, getReportesActividad } from "@/lib/data/services/reportes-actividad";
+import { deleteReporteActividadAdmin, getReportesActividad } from "@/lib/data/services/reportes-actividad";
 import { getLlegadas } from "@/lib/data/services/llegadas";
 import { cn } from "@/lib/utils";
 import { generateTablePDF, generateComprobantePDF } from "@/lib/utils/pdf-generator";
@@ -243,7 +243,6 @@ export default function LiquidacionPage() {
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
-  const [leaderAccumulations, setLeaderAccumulations] = useState<LeaderAccumulation[]>([]);
   const [actReports, setActReports] = useState<ActivityReport[]>([]);
   const [reportsLoading, setReportsLoading] = useState(false);
   const [reportsLoadError, setReportsLoadError] = useState<string | null>(null);
@@ -348,27 +347,24 @@ export default function LiquidacionPage() {
     const requestId = ++liquidationRequestRef.current;
     setLoading(true);
     Promise.allSettled([
-      getPeriodos(), getUsuarios(), getGrupos(), getAcumulacionesLider(), getConfiguracion(), getLlegadas(),
-    ]).then(([periodsResult, usersResult, groupsResult, accumulationsResult, settingsResult, arrivalsResult]) => {
+      getPeriodos(), getUsuarios(), getGrupos(), getConfiguracion(), getLlegadas(),
+    ]).then(([periodsResult, usersResult, groupsResult, settingsResult, arrivalsResult]) => {
       if (requestId !== liquidationRequestRef.current) return;
       const p = periodsResult.status === "fulfilled" ? periodsResult.value : [];
       const u = usersResult.status === "fulfilled" ? usersResult.value : [];
       const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
-      const la = accumulationsResult.status === "fulfilled" ? accumulationsResult.value : [];
       const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
       const l = arrivalsResult.status === "fulfilled" ? arrivalsResult.value : [];
 
       if (periodsResult.status === "rejected") console.error("Error cargando períodos en liquidación:", periodsResult.reason);
       if (usersResult.status === "rejected") console.error("Error cargando usuarios en liquidación:", usersResult.reason);
       if (groupsResult.status === "rejected") console.error("Error cargando grupos en liquidación:", groupsResult.reason);
-      if (accumulationsResult.status === "rejected") console.error("Error cargando acumulaciones en liquidación:", accumulationsResult.reason);
       if (settingsResult.status === "rejected") console.error("Error cargando configuración en liquidación:", settingsResult.reason);
       if (arrivalsResult.status === "rejected") console.error("Error cargando llegadas en liquidación:", arrivalsResult.reason);
 
       setPeriods(p);
       setUsers(u);
       setGroups(g);
-      setLeaderAccumulations(la);
       setArrivalRecords(l);
       setCompanySettings(s);
       const initialPeriodId = p[0]?.id || "";
@@ -509,25 +505,12 @@ export default function LiquidacionPage() {
     return acc;
   }, new Map());
 
-  const periodAccumulationSettings = leaderAccumulations.reduce<Map<string, LeaderAccumulation>>((acc, item) => {
-    if (item.periodoId === selectedPeriodId) {
-      acc.set(item.liderId, item);
-    }
-    return acc;
-  }, new Map());
-
   const defaultExtraPct = companySettings?.porcentajeExtraLider || 0;
   const defaultExtraActivo = companySettings?.extraLiderActivo ?? false;
 
   const leaderExtraByTech = groups.reduce<Map<string, number>>((acc, group) => {
     const liderId = group.liderId;
     if (!liderId) return acc;
-
-    const persisted = periodAccumulationSettings.get(liderId);
-    if (persisted) {
-      acc.set(liderId, Number(persisted.extraLider || 0));
-      return acc;
-    }
 
     const porcentajeExtraLiderAplicado = defaultExtraPct;
     const extraLiderActivo = defaultExtraActivo;
@@ -1871,12 +1854,6 @@ export default function LiquidacionPage() {
             <DialogTitle className="text-foreground">Cerrar Período de Liquidación</DialogTitle>
           </DialogHeader>
           {(() => {
-            const pendingAccumulations = leaderAccumulations.filter(
-              (a) => a.periodoId === selectedPeriodId && a.totalPendientePago > 0
-            );
-            const totalPendingCarryOver = pendingAccumulations.reduce(
-              (s, a) => s + a.totalPendientePago, 0
-            );
             const pendingReports = actReports.filter(
               (r) => r.periodoId === selectedPeriodId && r.estadoAprobacionLider === "pendiente"
             );
@@ -1920,20 +1897,6 @@ export default function LiquidacionPage() {
                       </p>
                       <p className="text-[10px] text-muted-foreground">
                         Estos informes no han sido aprobados y su valor se trasladará como pendiente de pago al siguiente período.
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {totalPendingCarryOver > 0 && (
-                  <div className="rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-3 flex items-start gap-2">
-                    <Bike className="h-4 w-4 text-cyan-neon mt-0.5 shrink-0" />
-                    <div>
-                      <p className="text-xs font-medium text-cyan-neon">
-                        Arrastre al siguiente período: {formatCurrency(totalPendingCarryOver)}
-                      </p>
-                      <p className="text-[10px] text-muted-foreground">
-                        El acumulado pendiente de pago se transferirá automáticamente al siguiente período quincenal.
                       </p>
                     </div>
                   </div>

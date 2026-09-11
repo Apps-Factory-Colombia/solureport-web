@@ -674,17 +674,49 @@ export default function AprobacionesPage() {
   const [evidenceUploadMessage, setEvidenceUploadMessage] = useState<string | null>(null);
   const activeReportIdRef = useRef<string | null>(null);
   const evidenceInputRef = useRef<HTMLInputElement | null>(null);
+  const reportsRequestRef = useRef(0);
+  const reportsScopeRef = useRef<string | null>(null);
+  const [reportsRefreshing, setReportsRefreshing] = useState(false);
 
   // Paginación
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
+  const loadReportsForPeriod = useCallback(async (periodId: string) => {
+    const requestId = ++reportsRequestRef.current;
+    setReportsRefreshing(true);
+    try {
+      const filters = periodId && periodId !== ALL_PERIODS_VALUE ? { periodoId: periodId } : {};
+      const nextReports = normalizeSharedVisitRowsForUi(await getReportesActividad(filters));
+      if (requestId !== reportsRequestRef.current) return;
+      reportsScopeRef.current = periodId;
+      setReports(nextReports);
+    } catch (error) {
+      if (requestId === reportsRequestRef.current) {
+        console.error("Error cargando reportes del período en aprobaciones:", error);
+        setReports([]);
+      }
+    } finally {
+      if (requestId === reportsRequestRef.current) setReportsRefreshing(false);
+    }
+  }, []);
+
+  const handlePeriodChange = useCallback((periodId: string) => {
+    setSelectedPeriodId(periodId);
+    if (reportsScopeRef.current !== periodId) void loadReportsForPeriod(periodId);
+  }, [loadReportsForPeriod]);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [periodResult, reportsResult, usersResult, clientsResult, contractsResult, groupsResult, settingsResult] = await Promise.allSettled([
-        getPeriodos(),
-        getReportesActividad(),
+      // Periods are tiny and determine the default scope. Fetching the report
+      // history before knowing the selected period made this screen process
+      // every evidence and delivery in the database on first paint.
+      const periodResult = await Promise.allSettled([getPeriodos()]);
+      const p = periodResult[0].status === "fulfilled" ? periodResult[0].value : [];
+      const defaultPeriodId = getLatestPeriodId(p);
+      const [reportsResult, usersResult, clientsResult, contractsResult, groupsResult, settingsResult] = await Promise.allSettled([
+        getReportesActividad(defaultPeriodId === ALL_PERIODS_VALUE ? {} : { periodoId: defaultPeriodId }),
         getUsuarios(),
         getClientes(),
         getContratos(),
@@ -692,7 +724,6 @@ export default function AprobacionesPage() {
         getConfiguracion(),
       ]);
 
-      const p = periodResult.status === "fulfilled" ? periodResult.value : [];
       const r = reportsResult.status === "fulfilled" ? reportsResult.value : [];
       const u = usersResult.status === "fulfilled" ? usersResult.value : [];
       const c = clientsResult.status === "fulfilled" ? clientsResult.value : [];
@@ -700,7 +731,7 @@ export default function AprobacionesPage() {
       const g = groupsResult.status === "fulfilled" ? groupsResult.value : [];
       const s = settingsResult.status === "fulfilled" ? settingsResult.value : null;
 
-      if (periodResult.status === "rejected") console.error("Error cargando períodos en aprobaciones:", periodResult.reason);
+      if (periodResult[0].status === "rejected") console.error("Error cargando períodos en aprobaciones:", periodResult[0].reason);
       if (reportsResult.status === "rejected") console.error("Error cargando reportes en aprobaciones:", reportsResult.reason instanceof Error ? reportsResult.reason.message : JSON.stringify(reportsResult.reason));
       if (usersResult.status === "rejected") console.error("Error cargando usuarios en aprobaciones:", usersResult.reason);
       if (clientsResult.status === "rejected") console.error("Error cargando clientes en aprobaciones:", clientsResult.reason);
@@ -710,6 +741,7 @@ export default function AprobacionesPage() {
 
       const normalizedReports = normalizeSharedVisitRowsForUi(r);
       setReports(normalizedReports); setUsers(u); setClients(c); setContracts(ct); setGroups(g); setCompanySettings(s); setPeriods(p);
+      reportsScopeRef.current = defaultPeriodId;
       setSelectedPeriodId((current) => {
         if (current === ALL_PERIODS_VALUE) return current;
         if (current && p.some((period) => period.id === current)) return current;
@@ -721,7 +753,9 @@ export default function AprobacionesPage() {
   }, []);
 
   const refreshReports = useCallback(async (reportId?: string | null) => {
-    const refreshedReports = normalizeSharedVisitRowsForUi(await getReportesActividad());
+    const filters = selectedPeriodId && selectedPeriodId !== ALL_PERIODS_VALUE ? { periodoId: selectedPeriodId } : {};
+    const refreshedReports = normalizeSharedVisitRowsForUi(await getReportesActividad(filters));
+    reportsScopeRef.current = selectedPeriodId;
     setReports(refreshedReports);
 
     if (!reportId) {
@@ -730,7 +764,7 @@ export default function AprobacionesPage() {
     }
 
     setSelectedReport(refreshedReports.find((item) => item.id === reportId) || null);
-  }, []);
+  }, [selectedPeriodId]);
 
   const sharedActivityStats = useMemo(() => {
     const totalByKey = new Map<string, number>();
@@ -2228,6 +2262,12 @@ export default function AprobacionesPage() {
         </div>
       )}
       <div className="p-6 space-y-6">
+        {reportsRefreshing && (
+          <div className="flex items-center gap-2 rounded-lg border border-cyan-400/20 bg-cyan-400/5 px-4 py-2 text-sm text-cyan-200" role="status" aria-live="polite">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Actualizando informes del período...
+          </div>
+        )}
         {hasSelectedPeriod && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <Card className="border-border/50 bg-card/80">
@@ -2328,7 +2368,7 @@ export default function AprobacionesPage() {
               className="pl-10 bg-secondary/50 border-border/50"
             />
           </div>
-          <Select value={selectedPeriodId || undefined} onValueChange={setSelectedPeriodId}>
+          <Select value={selectedPeriodId || undefined} onValueChange={handlePeriodChange}>
             <SelectTrigger className="w-56 bg-secondary/50 border-border/50">
               <SelectValue placeholder="Último período" />
             </SelectTrigger>

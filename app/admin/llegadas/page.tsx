@@ -136,14 +136,17 @@ export default function LlegadasPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [u, s] = await Promise.all([getUsuarios(), getConfiguracion()]);
-      await ensureNoRegistradosForToday(
+      // The attendance list is independent from the user/settings lookups.
+      // Fetch it in the same batch so the automatic cutoff does not block the
+      // first paint of the screen.
+      const [u, s, initialRecords] = await Promise.all([getUsuarios(), getConfiguracion(), getLlegadas()]);
+      const changed = await ensureNoRegistradosForToday(
         u,
         s.porcentajeDescuentoTardanza,
         s.diasDescuentoAutomatico,
         s.horaDescuentoAutomatico,
       );
-      const r = await getLlegadas();
+      const r = changed > 0 ? await getLlegadas() : initialRecords;
       setRecords(r);
       setUsers(u);
       setCompanySettings(s);
