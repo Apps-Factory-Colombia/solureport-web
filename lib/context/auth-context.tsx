@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, ReactNode } from "react";
 import { User } from "@/lib/types";
 import { loginUsuario } from "@/lib/data/services/usuarios";
+import { clearDataRequestCache } from "@/lib/data/client";
 
 interface AuthContextType {
   user: User | null;
@@ -56,11 +57,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     const loggedUser = await loginUsuario(email, password);
     if (!loggedUser) return false;
+    clearDataRequestCache();
     setUser(loggedUser);
     return true;
   }, []);
 
   const logout = useCallback(() => {
+    clearDataRequestCache();
     setUser(null);
     void fetch("/api/auth/logout", { method: "POST", credentials: "include" });
   }, []);

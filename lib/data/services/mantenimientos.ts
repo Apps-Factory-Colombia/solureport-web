@@ -19,7 +19,9 @@ export interface MaintenanceAdminPage {
 
 export function invalidateMantenimientosCache() {}
 export function invalidateReportesMantenimientoCache() {}
-export async function getMantenimientos(): Promise<Maintenance[]> { return dataRequest<Maintenance[]>("maintenances.list"); }
+export async function getMantenimientos(options?: { limit?: number }): Promise<Maintenance[]> {
+  return dataRequest<Maintenance[]>("maintenances.list", options || {});
+}
 export async function getMantenimientosAdminPage(options: {
   view: MaintenanceAdminView;
   page?: number;

@@ -35,7 +35,7 @@ export default function DashboardPage() {
     if (showLoader) setLoading(true);
     try {
       const [m, c, u, dashboardMetrics] = await Promise.all([
-        getMantenimientos(),
+        getMantenimientos({ limit: 6 }),
         getClientes(),
         getUsuarios(),
         getDashboardMetrics(),

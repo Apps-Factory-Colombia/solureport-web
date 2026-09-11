@@ -2552,10 +2552,20 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "maintenances.adminPage": { await requireAdmin(user); return maintenancePageRows({ ...payload, adminView: true }, user); }
     case "maintenances.list": {
       const hasUserScope = Boolean(payload.usuarioId) || !["admin", "supervisor"].includes(user.rol);
-      const values = hasUserScope ? [user.id] : [];
+      const values: unknown[] = hasUserScope ? [user.id] : [];
       const scope = hasUserScope
         ? `WHERE ${maintenanceVisibleToUserPredicate("$1")}`
         : "";
+      const requestedLimit = payload.limit === undefined || payload.limit === null
+        ? null
+        : Math.min(25, Math.max(1, Math.floor(number(payload.limit, 6))));
+      const listValues = [...values];
+      const limitClause = requestedLimit === null
+        ? ""
+        : (() => {
+            listValues.push(requestedLimit);
+            return ` LIMIT $${listValues.length}`;
+          })();
       const { rows } = await dbQuery(`SELECT m.*, ${maintenanceScheduledDateSql()} AS fecha_programada_efectiva,
         cm.anio AS contrato_anio, cm.mes_inicio AS contrato_mes_inicio,
         cm.dia_inicio AS contrato_dia_inicio, cm.cantidad_mantenimientos AS contrato_cantidad_mantenimientos,
@@ -2594,7 +2604,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
          LEFT JOIN public.grupos_trabajo g ON g.id = m.grupo_id
          LEFT JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
          ${scope}
-         ORDER BY ${maintenanceScheduledDateSql()} DESC, m.created_at DESC`, values);
+         ORDER BY ${maintenanceScheduledDateSql()} DESC, m.created_at DESC${limitClause}`, listValues);
       return rows.map(mapMaintenance);
     }
     case "maintenances.overdue": { await requireAdmin(user); return overdueMaintenanceRows(payload); }
