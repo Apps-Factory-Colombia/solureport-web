@@ -78,6 +78,7 @@ export default function AcumuladosPage() {
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
+  const [reportsLoading, setReportsLoading] = useState(false);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [leaderExtraDrafts, setLeaderExtraDrafts] = useState<Record<string, { porcentaje: string; activo: boolean; tecnicosExcluidosIds?: string[] }>>({});
   const [savingLeaderId, setSavingLeaderId] = useState<string | null>(null);
@@ -89,17 +90,44 @@ export default function AcumuladosPage() {
   const itemsPerPage = 5;
 
   useEffect(() => {
+    let active = true;
     setLoading(true);
     Promise.all([
       getPeriodos(), getAcumulacionesLider(), getLotesAprobacion(),
-      getReportesActividad(), getUsuarios(), getGrupos(), getConfiguracion(),
-    ]).then(([p, a, b, r, u, g, s]) => {
+      getUsuarios(), getGrupos(), getConfiguracion(),
+    ]).then(([p, a, b, u, g, s]) => {
+      if (!active) return;
       setPeriods(p); setAccumulations(a); setBatches(b);
-      setActReports(r); setUsers(u); setGroups(g); setCompanySettings(s);
-      if (p.length > 0) setSelectedPeriodId(p[0].id);
+      setActReports([]); setUsers(u); setGroups(g); setCompanySettings(s);
+      if (p.length > 0) setSelectedPeriodId((current) => current || p[0].id);
     }).catch((err) => console.error("Error cargando acumulados:", err))
       .finally(() => setLoading(false));
+    return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!selectedPeriodId) {
+      setActReports([]);
+      setReportsLoading(false);
+      return;
+    }
+
+    let active = true;
+    setReportsLoading(true);
+    getReportesActividad({ periodoId: selectedPeriodId })
+      .then((reports) => {
+        if (active) setActReports(reports);
+      })
+      .catch((err) => {
+        console.error("Error cargando el detalle del período:", err);
+        if (active) setActReports([]);
+      })
+      .finally(() => {
+        if (active) setReportsLoading(false);
+      });
+
+    return () => { active = false; };
+  }, [selectedPeriodId]);
 
   const selectedPeriod = periods.find((p) => p.id === selectedPeriodId);
 
@@ -122,29 +150,23 @@ export default function AcumuladosPage() {
     }, new Map());
   }, [accumulations, selectedPeriodId]);
 
-  // Computar acumulaciones desde reportes_actividad
+  // Los totales financieros vienen del resumen canónico del servidor. Los
+  // reportes del período se cargan aparte y solo alimentan el detalle de cada
+  // líder; así evitamos traer todo el histórico y sumar dos veces los mismos
+  // valores.
   const defaultExtraPct = companySettings?.porcentajeExtraLider || 0;
   const defaultExtraActivo = companySettings?.extraLiderActivo ?? false;
   const costoRevision = companySettings?.costoRevisionLider || 0;
 
   const periodAccumulations = useMemo(() => {
-    const accMap = new Map<string, {
-      liderId: string;
-      totalAprobadoPago: number;
-      totalPendientePago: number;
-      extraLider: number;
-      totalRecorridos: number;
-      totalAcumulado: number;
-      porcentajeExtraLiderAplicado: number;
-      extraLiderActivo: boolean;
-      tecnicosExcluidosExtraIds?: string[];
-      reportesAprobados: number;
-    }>();
-
-    leaders.forEach((leader) => {
-      const persisted = periodAccumulationSettings.get(leader.id);
-      accMap.set(leader.id, {
-        liderId: leader.id,
+    const leaderIds = new Set([
+      ...leaders.map((leader) => leader.id),
+      ...periodAccumulationSettings.keys(),
+    ]);
+    return Array.from(leaderIds).map((liderId) => {
+      const persisted = periodAccumulationSettings.get(liderId);
+      return {
+        liderId,
         totalAprobadoPago: persisted?.totalAprobadoPago ?? 0,
         totalPendientePago: persisted?.totalPendientePago ?? 0,
         extraLider: persisted?.extraLider ?? 0,
@@ -153,64 +175,12 @@ export default function AcumuladosPage() {
         porcentajeExtraLiderAplicado: persisted?.porcentajeExtraLiderAplicado ?? defaultExtraPct,
         extraLiderActivo: persisted?.extraLiderActivo ?? defaultExtraActivo,
         tecnicosExcluidosExtraIds: persisted?.tecnicosExcluidosExtraIds,
-        reportesAprobados: 0,
-      });
-    });
-
-    // Agrupar reportes por líder
-    periodReports.forEach((r) => {
-      const liderId = r.liderGrupoId;
-      if (!liderId) return;
-      const persisted = periodAccumulationSettings.get(liderId);
-      const acc = accMap.get(liderId) || {
-        liderId,
-        totalAprobadoPago: 0,
-        totalPendientePago: 0,
-        extraLider: 0,
-        totalRecorridos: 0,
-        totalAcumulado: 0,
-        porcentajeExtraLiderAplicado: persisted?.porcentajeExtraLiderAplicado ?? defaultExtraPct,
-        extraLiderActivo: persisted?.extraLiderActivo ?? defaultExtraActivo,
-        tecnicosExcluidosExtraIds: persisted?.tecnicosExcluidosExtraIds,
-        reportesAprobados: 0,
+        reportesAprobados: periodReports.filter(
+          (report) => report.liderGrupoId === liderId && report.estadoAprobacionLider === "aprobado",
+        ).length,
       };
-
-      if (r.tipo === "recorrido") {
-        acc.totalRecorridos += r.costoActividad;
-      }
-
-      if (r.estadoAprobacionLider === "aprobado") {
-        acc.totalAprobadoPago += r.costoActividad;
-        acc.reportesAprobados += 1;
-      } else {
-        acc.totalPendientePago += r.costoActividad;
-      }
-
-      accMap.set(liderId, acc);
     });
-
-    // Calcular extra líder y totales
-    accMap.forEach((acc) => {
-      if (acc.extraLiderActivo && acc.porcentajeExtraLiderAplicado > 0) {
-        // Extra se calcula sobre actividades aprobadas (excluidos recorridos) del grupo, excluyendo al técnico configurado.
-        const group = groups.find((g) => g.liderId === acc.liderId);
-        const groupMembers = group ? users.filter((u) => group.miembros.includes(u.id) && u.id !== acc.liderId) : [];
-        const excludedTechnicianIds = acc.tecnicosExcluidosExtraIds?.length ? acc.tecnicosExcluidosExtraIds : [];
-        let extraBase = 0;
-        groupMembers.forEach((member) => {
-          if (excludedTechnicianIds.includes(member.id)) return;
-          const memberReports = periodReports.filter(
-            (r) => r.tecnicoId === member.id && r.tipo !== "recorrido" && r.estadoAprobacionLider === "aprobado" && r.liderGrupoId === acc.liderId
-          );
-          extraBase += memberReports.reduce((s, r) => s + r.costoActividad, 0);
-        });
-        acc.extraLider = Math.round(extraBase * acc.porcentajeExtraLiderAplicado / 100);
-      }
-      acc.totalAcumulado = acc.totalAprobadoPago + acc.totalPendientePago + acc.extraLider + acc.totalRecorridos;
-    });
-
-    return Array.from(accMap.values());
-  }, [periodReports, periodAccumulationSettings, defaultExtraPct, defaultExtraActivo, groups, users, leaders]);
+  }, [periodAccumulationSettings, periodReports, defaultExtraPct, defaultExtraActivo, leaders]);
 
   const handleLeaderExtraDraftChange = (
     liderId: string,
@@ -420,6 +390,10 @@ export default function AcumuladosPage() {
             </CardContent>
           </Card>
         </div>
+
+        {reportsLoading && (
+          <p className="text-xs text-muted-foreground">Cargando el detalle del período seleccionado…</p>
+        )}
 
         {saveError && (
           <Alert variant="destructive" className="border-destructive/40 bg-destructive/5">

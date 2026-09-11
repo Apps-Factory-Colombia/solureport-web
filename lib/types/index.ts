@@ -157,6 +157,9 @@ export interface LiquidationPeriod {
   fechaFin: string;
   estado: "abierto" | "cerrado";
   fechaCierre?: string;
+  liquidacionCongeladaEn?: string;
+  arrastrePendientesEn?: string;
+  liquidacionVersion?: number;
 }
 
 export interface CompanySettings {

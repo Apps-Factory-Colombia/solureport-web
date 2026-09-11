@@ -20,6 +20,22 @@ const numberToDay = ["", "lunes", "martes", "miercoles", "jueves", "viernes", "s
 // grupos ni para vigencia de sus miembros.
 const BOGOTA_DATE_SQL = "(now() AT TIME ZONE 'America/Bogota')::date";
 const BOGOTA_NOW_SQL = "(now() AT TIME ZONE 'America/Bogota')";
+let liquidationFreezeSchemaPromise: Promise<boolean> | null = null;
+
+async function hasLiquidationFreezeSchema() {
+  if (!liquidationFreezeSchemaPromise) {
+    liquidationFreezeSchemaPromise = dbQuery(
+      `SELECT to_regclass('public.liquidacion_periodo_items') IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'liquidacion_items'
+               AND column_name = 'es_arrastre'
+          ) AS ready`,
+    ).then(({ rows }) => Boolean(rows[0]?.ready)).catch(() => false);
+  }
+  return liquidationFreezeSchemaPromise;
+}
 
 // La fecha de vencimiento operativa incluye la hora programada. Cuando una
 // fila histórica no tiene hora, se considera vigente hasta el final de ese
@@ -291,6 +307,9 @@ function mapPeriod(row: any): any {
     fechaFin: dateOnly(row.fecha_fin) || "",
     estado: row.estado,
     fechaCierre: row.fecha_cierre ? dateOnly(row.fecha_cierre) : undefined,
+    liquidacionCongeladaEn: row.liquidacion_congelada_en || undefined,
+    arrastrePendientesEn: row.arrastre_pendientes_en || undefined,
+    liquidacionVersion: number(row.liquidacion_version, 1),
   };
 }
 
@@ -1052,7 +1071,9 @@ async function overdueMaintenanceRows(payload: Payload = {}) {
   };
 }
 
-async function getApprovedLiquidationRows(periodId: string, technicianIds?: string[] | null) {
+async function getLiveLiquidationRows(periodId: string, technicianIds?: string[] | null) {
+  const freezeSchemaReady = await hasLiquidationFreezeSchema();
+  const carryExpression = freezeSchemaReady ? "COALESCE(li.es_arrastre, false)" : "false";
   const values: unknown[] = [periodId];
   const scope = technicianIds && technicianIds.length > 0
     ? (() => {
@@ -1089,10 +1110,25 @@ async function getApprovedLiquidationRows(periodId: string, technicianIds?: stri
         COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100) AS valor_ganado_original,
         COALESCE(li.descuento_tardanza, 0) AS descuento_tardanza,
         COALESCE(li.porcentaje_descuento_tardanza, 0) AS porcentaje_descuento_tardanza,
+        CASE
+          WHEN li.estado IN ('anulado', 'rechazado') THEN 'anulado'
+          WHEN li.estado IN ('aprobado', 'pagado')
+            OR EXISTS (
+              SELECT 1 FROM public.actividades_operativas_aprobaciones ap
+               WHERE ap.actividad_id = a.id AND ap.participante_id = p.id AND ap.estado = 'aprobada'
+            )
+            OR (a.tipo = 'mantenimiento' AND EXISTS (
+              SELECT 1 FROM public.actividades_operativas_aprobaciones ap
+               WHERE ap.actividad_id = a.id AND ap.participante_id IS NULL AND ap.estado = 'aprobada'
+            )) THEN 'aprobado'
+          ELSE 'pendiente'
+        END AS estado_liquidacion,
+        ${carryExpression} AS es_arrastre,
+        0::numeric AS extra_lider_porcentaje,
+        false AS extra_lider_activo,
         COALESCE(li.created_at, a.created_at) AS created_at
      FROM public.actividades_operativas a
-     JOIN public.periodos_liquidacion pl
-       ON pl.id = $1 AND a.fecha_operacion BETWEEN pl.fecha_inicio AND pl.fecha_fin
+     JOIN public.periodos_liquidacion pl ON pl.id = $1
      JOIN public.actividades_operativas_participantes p ON p.actividad_id = a.id
      JOIN public.usuarios u ON u.id = p.tecnico_id
      LEFT JOIN public.liquidacion_items li
@@ -1103,32 +1139,211 @@ async function getApprovedLiquidationRows(periodId: string, technicianIds?: stri
      LEFT JOIN public.clientes c ON c.id = a.cliente_id
      LEFT JOIN public.cliente_sedes s ON s.id = a.sede_id
     WHERE a.estado NOT IN ('cancelada', 'rechazada')
-      AND (
-        li.estado IN ('aprobado', 'pagado')
-        OR EXISTS (
-          SELECT 1
-            FROM public.actividades_operativas_aprobaciones ap
-           WHERE ap.actividad_id = a.id
-             AND ap.participante_id = p.id
-             AND ap.estado = 'aprobada'
-        )
-        OR (
-          a.tipo = 'mantenimiento'
-          AND EXISTS (
-            SELECT 1
-              FROM public.actividades_operativas_aprobaciones ap
-             WHERE ap.actividad_id = a.id
-               AND ap.participante_id IS NULL
-               AND ap.estado = 'aprobada'
-          )
-        )
-      )
+      AND (a.fecha_operacion BETWEEN pl.fecha_inicio AND pl.fecha_fin OR ${carryExpression})
       ${scope}
     ORDER BY a.fecha_operacion DESC, COALESCE(li.created_at, a.created_at) DESC, p.id` ,
     values,
   );
 
   return rows;
+}
+
+function isMissingLiquidationSnapshot(error: unknown) {
+  const candidate = error as { code?: string; message?: string } | null;
+  const message = String(candidate?.message || error || "").toLowerCase();
+  return candidate?.code === "42P01" || message.includes("liquidacion_periodo_items") || message.includes("es_arrastre");
+}
+
+async function getLiquidationSnapshotRows(periodId: string, technicianIds?: string[] | null): Promise<any[] | null> {
+  const values: unknown[] = [periodId];
+  const scope = technicianIds && technicianIds.length > 0
+    ? (() => {
+        values.push(technicianIds);
+        return "AND s.tecnico_id = ANY($2::uuid[])";
+      })()
+    : "";
+
+  try {
+    const { rows } = await dbQuery(
+      `SELECT
+          s.id,
+          s.actividad_id,
+          COALESCE(s.codigo_snapshot, a.codigo) AS codigo,
+          s.descripcion_snapshot AS descripcion,
+          s.tipo,
+          s.fecha_operacion,
+          s.cliente_id,
+          s.sede_id,
+          s.grupo_id,
+          COALESCE(s.grupo_lider_id, g.lider_id) AS grupo_lider_id,
+          g.nombre AS grupo_nombre,
+          c.nombre AS cliente_nombre,
+          COALESCE(s.sede_snapshot, sede.nombre) AS sede_nombre,
+          s.periodo_id,
+          s.participante_id,
+          s.tecnico_id,
+          u.nombre,
+          u.apellido,
+          u.email,
+          u.rol,
+          s.porcentaje,
+          s.valor_base,
+          s.valor_ganado,
+          s.valor_ganado_original,
+          s.descuento_tardanza,
+          s.porcentaje_descuento_tardanza,
+          s.estado AS estado_liquidacion,
+          s.extra_lider_porcentaje,
+          s.extra_lider_activo,
+          s.es_arrastre,
+          s.fecha_snapshot AS created_at
+       FROM public.liquidacion_periodo_items s
+       LEFT JOIN public.actividades_operativas a ON a.id = s.actividad_id
+       LEFT JOIN public.usuarios u ON u.id = s.tecnico_id
+       LEFT JOIN public.grupos_trabajo g ON g.id = s.grupo_id
+       LEFT JOIN public.clientes c ON c.id = s.cliente_id
+       LEFT JOIN public.cliente_sedes sede ON sede.id = s.sede_id
+      WHERE s.periodo_id = $1 ${scope}
+      ORDER BY s.fecha_operacion DESC, s.fecha_snapshot DESC, s.participante_id` ,
+      values,
+    );
+    if (rows.length > 0) return rows;
+    const { rows: periodRows } = await dbQuery(
+      "SELECT estado FROM public.periodos_liquidacion WHERE id = $1",
+      [periodId],
+    );
+    // Un periodo abierto sin fotografía todavía debe usar la fuente viva.
+    // Un periodo cerrado vacío sí tiene una fotografía válida: simplemente no
+    // contiene participaciones liquidables.
+    return periodRows[0]?.estado === "cerrado" ? rows : null;
+  } catch (error) {
+    if (isMissingLiquidationSnapshot(error)) return null;
+    throw error;
+  }
+}
+
+async function getLiquidationRows(periodId: string, technicianIds?: string[] | null) {
+  const snapshotRows = await getLiquidationSnapshotRows(periodId, technicianIds);
+  return snapshotRows !== null ? snapshotRows : getLiveLiquidationRows(periodId, technicianIds);
+}
+
+async function getApprovedLiquidationRows(periodId: string, technicianIds?: string[] | null) {
+  const rows = await getLiquidationRows(periodId, technicianIds);
+  return rows.filter((row) => ["aprobado", "pagado"].includes(String(row.estado_liquidacion || row.estado || "")));
+}
+
+async function freezeLiquidationPeriod(periodId: string) {
+  if (!(await hasLiquidationFreezeSchema())) {
+    throw new Error("Falta aplicar la migración 029 de congelamiento de liquidaciones antes de cerrar el período.");
+  }
+  return withTransaction(async (client) => {
+    const { rows: periodRows } = await client.query(
+      `SELECT id, fecha_inicio, fecha_fin, estado, fecha_cierre
+         FROM public.periodos_liquidacion
+        WHERE id = $1
+        FOR UPDATE`,
+      [periodId],
+    );
+    const period = periodRows[0];
+    if (!period) throw new Error("No se encontró el período de liquidación.");
+    if (period.estado === "cerrado") return { ...period, congelado: true, snapshotRows: 0, arrastreRows: 0 };
+
+    const { rows: configRows } = await client.query(
+      "SELECT porcentaje_extra_lider, extra_lider_activo FROM public.configuracion_empresa WHERE id = 1",
+    );
+    const extraPercentage = Math.max(0, Math.min(100, number(configRows[0]?.porcentaje_extra_lider)));
+    const extraActive = Boolean(configRows[0]?.extra_lider_activo);
+
+    const { rows: snapshotRows } = await client.query(
+      `INSERT INTO public.liquidacion_periodo_items (
+          periodo_id, liquidacion_item_id, actividad_id, participante_id, tecnico_id,
+          cliente_id, sede_id, grupo_id, grupo_lider_id, codigo_snapshot,
+          fecha_operacion, tipo, descripcion_snapshot, sede_snapshot, porcentaje,
+          valor_base, valor_ganado, valor_ganado_original, descuento_tardanza,
+          porcentaje_descuento_tardanza, estado, extra_lider_porcentaje,
+          extra_lider_activo, es_arrastre, fecha_snapshot
+       )
+       SELECT
+          $1, li.id, a.id, p.id, p.tecnico_id,
+          a.cliente_id, a.sede_id, a.grupo_id, g.lider_id, a.codigo,
+          a.fecha_operacion, a.tipo, a.descripcion, s.nombre,
+          COALESCE(li.porcentaje, p.porcentaje, 0),
+          COALESCE(li.valor_base, p.valor_base, a.valor_base, 0),
+          COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100, 0),
+          COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100, 0),
+          COALESCE(li.descuento_tardanza, 0), COALESCE(li.porcentaje_descuento_tardanza, 0),
+          CASE
+            WHEN li.estado IN ('anulado', 'rechazado') THEN 'anulado'
+            WHEN li.estado IN ('aprobado', 'pagado')
+              OR EXISTS (
+                SELECT 1 FROM public.actividades_operativas_aprobaciones ap
+                 WHERE ap.actividad_id = a.id AND ap.participante_id = p.id AND ap.estado = 'aprobada'
+              )
+              OR (a.tipo = 'mantenimiento' AND EXISTS (
+                SELECT 1 FROM public.actividades_operativas_aprobaciones ap
+                 WHERE ap.actividad_id = a.id AND ap.participante_id IS NULL AND ap.estado = 'aprobada'
+              )) THEN 'aprobado'
+            ELSE 'pendiente'
+          END,
+          $2, $3, COALESCE(li.es_arrastre, false), clock_timestamp()
+         FROM public.actividades_operativas a
+         JOIN public.actividades_operativas_participantes p ON p.actividad_id = a.id
+         LEFT JOIN public.liquidacion_items li
+           ON li.periodo_id = $1 AND li.actividad_id = a.id AND li.participante_id = p.id
+         LEFT JOIN public.grupos_trabajo g ON g.id = a.grupo_id
+         LEFT JOIN public.cliente_sedes s ON s.id = a.sede_id
+        WHERE a.estado NOT IN ('cancelada', 'rechazada')
+          AND (a.fecha_operacion BETWEEN $4 AND $5 OR COALESCE(li.es_arrastre, false))
+       ON CONFLICT (periodo_id, actividad_id, participante_id) DO NOTHING
+       RETURNING id`,
+      [period.id, extraPercentage, extraActive, period.fecha_inicio, period.fecha_fin],
+    );
+
+    const { rows: nextPeriods } = await client.query(
+      `SELECT id
+         FROM public.periodos_liquidacion
+        WHERE estado = 'abierto' AND fecha_inicio > $1
+        ORDER BY fecha_inicio ASC
+        LIMIT 1
+        FOR UPDATE`,
+      [period.fecha_fin],
+    );
+    let carriedRows = 0;
+    if (nextPeriods[0]) {
+      const result = await client.query(
+        `INSERT INTO public.liquidacion_items (
+            periodo_id, actividad_id, participante_id, tecnico_id, fecha_operacion,
+            tipo, porcentaje, valor_base, valor_ganado, valor_ganado_original,
+            estado, descripcion_snapshot, sede_snapshot, descuento_tardanza,
+            porcentaje_descuento_tardanza, es_arrastre, periodo_origen_id, item_origen_id
+         )
+         SELECT
+            $1, s.actividad_id, s.participante_id, s.tecnico_id, s.fecha_operacion,
+            s.tipo, s.porcentaje, s.valor_base, s.valor_ganado, s.valor_ganado_original,
+            'pendiente', s.descripcion_snapshot, s.sede_snapshot, s.descuento_tardanza,
+            s.porcentaje_descuento_tardanza, true, s.periodo_id, s.liquidacion_item_id
+           FROM public.liquidacion_periodo_items s
+          WHERE s.periodo_id = $2 AND s.estado = 'pendiente'
+         ON CONFLICT DO NOTHING`,
+        [nextPeriods[0].id, period.id],
+      );
+      carriedRows = result.rowCount || 0;
+    }
+
+    const { rows: closedRows } = await client.query(
+      `UPDATE public.periodos_liquidacion
+          SET estado = 'cerrado',
+              fecha_cierre = COALESCE(fecha_cierre, clock_timestamp()),
+              liquidacion_congelada_en = clock_timestamp(),
+              arrastre_pendientes_en = CASE WHEN $2::int > 0 THEN clock_timestamp() ELSE arrastre_pendientes_en END,
+              liquidacion_version = COALESCE(liquidacion_version, 1) + 1,
+              updated_at = clock_timestamp()
+        WHERE id = $1
+        RETURNING *`,
+      [period.id, carriedRows],
+    );
+    return { ...closedRows[0], congelado: true, snapshotRows: snapshotRows.length, arrastreRows: carriedRows };
+  });
 }
 
 async function canonicalLiquidationSummary(payload: Payload, user: UserContext, scopeOverride?: string[] | null) {
@@ -1147,12 +1362,17 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
   );
   if (!periodRowsResult[0]) throw new Error("No se encontró el período de liquidación.");
 
-  const approvedRows = await getApprovedLiquidationRows(periodId, userScope);
+  const snapshotRows = await getLiquidationSnapshotRows(periodId, userScope);
+  const liquidationRows = snapshotRows !== null
+    ? snapshotRows
+    : await getLiveLiquidationRows(periodId, userScope);
   const settings = await getConfig();
   const grouped = new Map<string, any>();
-  const extraBaseByLeader = new Map<string, number>();
+  const extraBaseByLeader = new Map<string, { approved: number; pending: number; percentage: number; active: boolean }>();
 
-  for (const row of approvedRows) {
+  for (const row of liquidationRows) {
+    const state = String(row.estado_liquidacion || row.estado || "pendiente");
+    if (state === "anulado" || state === "rechazado") continue;
     const current = grouped.get(row.tecnico_id) || {
       tecnicoId: row.tecnico_id,
       nombre: `${row.nombre || ""} ${row.apellido || ""}`.trim(),
@@ -1167,33 +1387,91 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
       descuentoValor: 0,
       totalAprobado: 0,
       totalPendiente: 0,
+      totalRecorridosPendientes: 0,
       extraLider: 0,
+      extraLiderPendiente: 0,
+      porcentajeExtraLiderAplicado: snapshotRows !== null
+        ? number(row.extra_lider_porcentaje)
+        : number(settings.porcentajeExtraLider),
+      extraLiderActivo: snapshotRows !== null
+        ? Boolean(row.extra_lider_activo)
+        : Boolean(settings.extraLiderActivo),
       total: 0,
     };
     const gross = number(row.valor_ganado_original);
-    const earned = row.tipo === "recorrido" ? gross : number(row.valor_ganado);
+    const earned = number(row.valor_ganado);
+    const isApproved = state === "aprobado" || state === "pagado";
     current.actividades += 1;
-    current.actividadesAprobadas += 1;
+    if (isApproved) current.actividadesAprobadas += 1;
     current.totalBruto += gross;
-    current.totalAprobado += earned;
-    if (row.tipo === "recorrido") current.totalRecorridos += gross;
+    if (isApproved) current.totalAprobado += earned;
+    else current.totalPendiente += earned;
+    if (row.tipo === "recorrido" && isApproved) current.totalRecorridos += earned;
+    else if (row.tipo === "recorrido") current.totalRecorridosPendientes += earned;
     else {
       current.totalNoRecorridos += gross;
-      current.descuentoValor += number(row.descuento_tardanza);
+      if (isApproved) current.descuentoValor += number(row.descuento_tardanza);
     }
     if (row.grupo_lider_id && row.grupo_lider_id === row.tecnico_id) current.esLider = true;
     if (row.grupo_lider_id && row.grupo_lider_id !== row.tecnico_id && row.tipo !== "recorrido") {
-      extraBaseByLeader.set(row.grupo_lider_id, (extraBaseByLeader.get(row.grupo_lider_id) || 0) + number(row.valor_ganado));
+      const existingExtra = extraBaseByLeader.get(row.grupo_lider_id) || {
+        approved: 0,
+        pending: 0,
+        percentage: snapshotRows !== null ? number(row.extra_lider_porcentaje) : number(settings.porcentajeExtraLider),
+        active: snapshotRows !== null ? Boolean(row.extra_lider_activo) : Boolean(settings.extraLiderActivo),
+      };
+      if (isApproved) existingExtra.approved += earned;
+      else existingExtra.pending += earned;
+      extraBaseByLeader.set(row.grupo_lider_id, existingExtra);
     }
     grouped.set(row.tecnico_id, current);
   }
 
+  const extraLeaderIds = [...extraBaseByLeader.keys()].filter((leaderId) => userScope === null || userScope.includes(leaderId));
+  if (extraLeaderIds.length > 0) {
+    const missingLeaderIds = extraLeaderIds.filter((leaderId) => !grouped.has(leaderId));
+    if (missingLeaderIds.length > 0) {
+      const { rows: leaderRows } = await dbQuery(
+        "SELECT id, nombre, apellido, email, rol FROM public.usuarios WHERE id = ANY($1::uuid[])",
+        [missingLeaderIds],
+      );
+      for (const leader of leaderRows) {
+        grouped.set(leader.id, {
+          tecnicoId: leader.id,
+          nombre: `${leader.nombre || ""} ${leader.apellido || ""}`.trim(),
+          email: leader.email || "",
+          rol: leader.rol,
+          esLider: true,
+          actividades: 0,
+          actividadesAprobadas: 0,
+          totalBruto: 0,
+          totalNoRecorridos: 0,
+          totalRecorridos: 0,
+          descuentoValor: 0,
+          totalAprobado: 0,
+          totalPendiente: 0,
+          totalRecorridosPendientes: 0,
+          extraLider: 0,
+          extraLiderPendiente: 0,
+          porcentajeExtraLiderAplicado: extraBaseByLeader.get(leader.id)?.percentage || 0,
+          extraLiderActivo: extraBaseByLeader.get(leader.id)?.active || false,
+          total: 0,
+        });
+      }
+    }
+  }
+
   const technicians = [...grouped.values()].map((row) => {
-    const extraLider = settings.extraLiderActivo
-      ? roundCurrency((extraBaseByLeader.get(row.tecnicoId) || 0) * number(settings.porcentajeExtraLider) / 100)
+    const extraConfig = extraBaseByLeader.get(row.tecnicoId);
+    const extraLider = extraConfig?.active
+      ? roundCurrency(extraConfig.approved * extraConfig.percentage / 100)
+      : 0;
+    const extraLiderPendiente = extraConfig?.active
+      ? roundCurrency(extraConfig.pending * extraConfig.percentage / 100)
       : 0;
     row.extraLider = extraLider;
-    row.total = roundCurrency(row.totalAprobado + extraLider);
+    row.extraLiderPendiente = extraLiderPendiente;
+    row.total = roundCurrency(row.totalAprobado + extraLider - row.descuentoValor);
     return {
       tecnicoId: row.tecnicoId,
       nombre: row.nombre,
@@ -1207,8 +1485,12 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
       totalRecorridos: number(row.totalRecorridos),
       descuentoValor: number(row.descuentoValor),
       totalAprobado: number(row.totalAprobado),
-      totalPendiente: 0,
+      totalPendiente: number(row.totalPendiente),
+      totalRecorridosPendientes: number(row.totalRecorridosPendientes),
       extraLider,
+      extraLiderPendiente,
+      porcentajeExtraLiderAplicado: number(row.porcentajeExtraLiderAplicado),
+      extraLiderActivo: Boolean(row.extraLiderActivo),
       total: number(row.total),
     };
   }).sort((a, b) => `${a.nombre} ${a.tecnicoId}`.localeCompare(`${b.nombre} ${b.tecnicoId}`));
@@ -1218,15 +1500,17 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     totalBruto: acc.totalBruto + row.totalBruto,
     totalNoRecorridos: acc.totalNoRecorridos + row.totalNoRecorridos,
     totalRecorridos: acc.totalRecorridos + row.totalRecorridos,
+    totalRecorridosPendientes: acc.totalRecorridosPendientes + row.totalRecorridosPendientes,
     descuentoValor: acc.descuentoValor + row.descuentoValor,
     totalAprobado: acc.totalAprobado + row.totalAprobado,
     totalPendiente: acc.totalPendiente + row.totalPendiente,
     extraLider: acc.extraLider + row.extraLider,
+    extraLiderPendiente: acc.extraLiderPendiente + row.extraLiderPendiente,
     total: acc.total + row.total,
   }), {
     actividades: 0, actividadesAprobadas: 0, totalBruto: 0, totalNoRecorridos: 0,
-    totalRecorridos: 0, descuentoValor: 0, totalAprobado: 0, totalPendiente: 0,
-    extraLider: 0, total: 0,
+    totalRecorridos: 0, totalRecorridosPendientes: 0, descuentoValor: 0, totalAprobado: 0,
+    totalPendiente: 0, extraLider: 0, extraLiderPendiente: 0, total: 0,
   });
 
   return {
@@ -1234,6 +1518,8 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     fechaInicio: dateOnly(periodRowsResult[0].fecha_inicio) || "",
     fechaFin: dateOnly(periodRowsResult[0].fecha_fin) || "",
     estado: periodRowsResult[0].estado,
+    congelado: snapshotRows !== null,
+    congeladoEn: null,
     generatedAt: new Date().toISOString(),
     totals,
     technicians,
@@ -2473,7 +2759,12 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "periods.list": return (await periodRows()).map(mapPeriod);
     case "periods.create": { await requireAdmin(user); const { rows } = await dbQuery("INSERT INTO public.periodos_liquidacion (fecha_inicio, fecha_fin, estado, fecha_cierre) VALUES ($1,$2,$3,$4) RETURNING *", [payload.fechaInicio, payload.fechaFin, payload.estado || "abierto", payload.estado === "cerrado" ? new Date().toISOString() : null]); return mapPeriod(rows[0]); }
     case "periods.update": { await requireAdmin(user); const { rows } = await dbQuery("UPDATE public.periodos_liquidacion SET fecha_inicio = COALESCE($2,fecha_inicio), fecha_fin = COALESCE($3,fecha_fin), estado = COALESCE($4,estado), fecha_cierre = CASE WHEN $4 = 'cerrado' THEN COALESCE(fecha_cierre,clock_timestamp()) WHEN $4 = 'abierto' THEN NULL ELSE fecha_cierre END, updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id, payload.fechaInicio, payload.fechaFin, payload.estado]); return mapPeriod(rows[0]); }
-    case "periods.close": { await requireAdmin(user); const { rows } = await dbQuery("UPDATE public.periodos_liquidacion SET estado = 'cerrado', fecha_cierre = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [payload.id]); return mapPeriod(rows[0]); }
+    case "periods.close": {
+      await requireAdmin(user);
+      await freezeLiquidationPeriod(String(payload.id || ""));
+      const { rows } = await dbQuery("SELECT * FROM public.periodos_liquidacion WHERE id = $1", [payload.id]);
+      return mapPeriod(rows[0]);
+    }
     case "periods.delete": { await requireAdmin(user); await dbQuery("DELETE FROM public.periodos_liquidacion WHERE id = $1", [payload.id]); return true; }
 
     case "permissions.canReport": {
@@ -2794,7 +3085,34 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     }
     case "reports.accumulations": {
       const { rows } = await dbQuery("SELECT u.id AS lider_id, p.id AS periodo_id FROM public.usuarios u CROSS JOIN public.periodos_liquidacion p WHERE u.rol = 'lider' OR EXISTS (SELECT 1 FROM public.grupos_trabajo g WHERE g.lider_id = u.id AND g.estado = 'activo') ORDER BY p.fecha_inicio DESC, u.email");
-      return Promise.all(rows.map((row) => getLeaderLiquidationSummary(row.lider_id, row.periodo_id)));
+      // Every leader/period pair used to execute the complete canonical
+      // liquidation query. With several leaders and periods that created an
+      // N+1 waterfall and made this screen noticeably slower than the other
+      // admin modules. The canonical summary already contains every
+      // technician for a period, so calculate one summary per period and
+      // project the requested leaders from it.
+      const summaries = new Map<string, Promise<Awaited<ReturnType<typeof canonicalLiquidationSummary>>>>();
+      for (const row of rows) {
+        if (!summaries.has(row.periodo_id)) {
+          summaries.set(
+            row.periodo_id,
+            canonicalLiquidationSummary(
+              { periodoId: row.periodo_id },
+              { id: user.id, rol: "admin" } as UserContext,
+              null,
+            ),
+          );
+        }
+      }
+      const resolvedSummaries = new Map<string, Awaited<ReturnType<typeof canonicalLiquidationSummary>>>();
+      await Promise.all([...summaries.entries()].map(async ([periodoId, promise]) => {
+        resolvedSummaries.set(periodoId, await promise);
+      }));
+      return rows.map((row) => mapLeaderLiquidationSummary(
+        row.lider_id,
+        row.periodo_id,
+        resolvedSummaries.get(row.periodo_id)!,
+      ));
     }
     case "reports.leaderConfig": { await requireAdmin(user); const current = await getConfig(); await updateConfig({ ...current, porcentajeExtraLider: payload.porcentaje, extraLiderActivo: payload.activo }); return true; }
     case "reports.saveEvidence": { await saveEvidence(payload, user); return true; }
@@ -2892,8 +3210,10 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       return [...byActivity.values()];
     }
     case "liquidation.items": {
-      const rows = await getApprovedLiquidationRows(String(payload.periodoId || ""), [String(payload.usuarioId || user.id)]);
-      return rows.map((row) => ({ id: row.id, codigoRegistro: row.codigo, tecnicoId: row.tecnico_id, periodoId: row.periodo_id, nombreActividad: row.descripcion, edificio: row.sede_nombre || "", fecha: dateOnly(row.fecha_operacion) || "", porcentaje: number(row.porcentaje), valorBase: number(row.valor_base), valorGanado: number(row.valor_ganado), valorGanadoOriginal: number(row.valor_ganado_original), descuentoTardanzaAplicado: number(row.descuento_tardanza), porcentajeDescuentoTardanzaAplicado: number(row.porcentaje_descuento_tardanza), tipo: row.tipo, estado: "aprobado", referenciaId: row.actividad_id, fechaCreacion: dateOnly(row.created_at) || "" }));
+      const rows = await getLiquidationRows(String(payload.periodoId || ""), [String(payload.usuarioId || user.id)]);
+      return rows
+        .filter((row) => !["anulado", "rechazado"].includes(String(row.estado_liquidacion || row.estado || "")))
+        .map((row) => ({ id: row.id, codigoRegistro: row.codigo, tecnicoId: row.tecnico_id, periodoId: row.periodo_id, nombreActividad: row.descripcion, edificio: row.sede_nombre || "", fecha: dateOnly(row.fecha_operacion) || "", porcentaje: number(row.porcentaje), valorBase: number(row.valor_base), valorGanado: number(row.valor_ganado), valorGanadoOriginal: number(row.valor_ganado_original), descuentoTardanzaAplicado: number(row.descuento_tardanza), porcentajeDescuentoTardanzaAplicado: number(row.porcentaje_descuento_tardanza), tipo: row.tipo, estado: row.estado_liquidacion || row.estado || "pendiente", referenciaId: row.actividad_id, fechaCreacion: dateOnly(row.created_at) || "" }));
     }
     case "liquidation.summary": {
       const canonical = await canonicalLiquidationSummary({ periodoId: payload.periodoId }, user, [String(payload.usuarioId || user.id)]);
@@ -2907,14 +3227,19 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       const tardinessPercentage = Math.min(100, tardinessRows.reduce((max, item) => Math.max(max, number(item.porcentaje_descuento)), 0));
       return {
         totalAprobadoGenerado: approved,
-        totalPendienteGenerado: 0,
+        totalPendienteGenerado: number(row.totalPendiente),
         totalRecorridos: number(row.totalRecorridos),
+        totalRecorridosPendientes: number(row.totalRecorridosPendientes),
         totalAcumuladoBruto: number(row.totalBruto),
+        totalExtraLider: number(row.extraLider),
+        totalExtraLiderPendiente: number(row.extraLiderPendiente),
         totalMultasTardanza: discounts,
         totalPorcentajeDescuentoTardanza: tardinessPercentage,
         tardanzas: tardinessRows.map((item) => ({ fecha: dateOnly(item.fecha) || "", porcentaje: number(item.porcentaje_descuento), minutos_retraso: number(item.minutos_retraso), razon_tardanza: item.razon_tardanza || undefined })),
-        totalAcumulado: number(row.totalBruto),
+        totalAcumulado: number(row.totalBruto) + number(row.extraLider) + number(row.extraLiderPendiente),
         totalAPagar: Math.max(0, number(row.total)),
+        congelado: Boolean(canonical.congelado),
+        congeladoEn: canonical.congeladoEn || null,
       };
     }
     case "liquidation.periodSummary": { return canonicalLiquidationSummary(payload, user); }
@@ -2973,25 +3298,39 @@ function mapConfig(row: any): any {
 async function getConfig() { const { rows } = await dbQuery("SELECT * FROM public.configuracion_empresa WHERE id = 1"); return rows[0] ? mapConfig(rows[0]) : configDefaults(); }
 
 async function getLeaderLiquidationSummary(liderId: string, periodoId: string) {
-  // Build the leader's extra from the complete approved set, then return only
-  // that leader. Scoping the source rows to the leader would omit the team's
-  // approved work used to calculate the extra leader amount.
+  // El líder se calcula sobre el conjunto completo del periodo: su extra usa
+  // el trabajo aprobado y pendiente de los demás participantes, incluso si
+  // todavía no han entregado todos. Para periodos cerrados la fuente ya es la
+  // fotografía inmutable tomada al cierre.
   const summary = await canonicalLiquidationSummary({ periodoId }, { id: liderId, rol: "admin" } as UserContext, null);
+  return mapLeaderLiquidationSummary(liderId, periodoId, summary);
+}
+
+function mapLeaderLiquidationSummary(
+  liderId: string,
+  periodoId: string,
+  summary: Awaited<ReturnType<typeof canonicalLiquidationSummary>>,
+) {
   const row: any = summary.technicians.find((item) => item.tecnicoId === liderId) || {};
+  const extraPercentage = number(row.porcentajeExtraLiderAplicado);
   return {
     id: `${liderId}:${periodoId}`,
     liderId,
     periodoId,
     totalAprobadoPago: number(row.totalAprobado),
-    totalPendientePago: 0,
+    totalPendientePago: number(row.totalPendiente),
     extraLider: number(row.extraLider),
+    extraLiderPendiente: number(row.extraLiderPendiente),
     totalRecorridos: number(row.totalRecorridos),
-    totalAcumulado: number(row.totalBruto),
+    totalRecorridosPendientes: number(row.totalRecorridosPendientes),
+    totalAcumulado: number(row.totalBruto) + number(row.extraLider) + number(row.extraLiderPendiente),
     totalAcumuladoBruto: number(row.totalBruto),
     totalDescuentosTardanza: number(row.descuentoValor),
-    porcentajeExtraLiderAplicado: 0,
-    extraLiderActivo: number(row.extraLider) > 0,
+    porcentajeExtraLiderAplicado: extraPercentage,
+    extraLiderActivo: Boolean(row.extraLiderActivo),
     tecnicosExcluidosExtraIds: [],
+    congelado: Boolean(summary.congelado),
+    congeladoEn: summary.congeladoEn || null,
   };
 }
 
@@ -3836,6 +4175,7 @@ async function syncActivityParticipantValue(client: any, activityId: string, par
     `SELECT id, tipo, porcentaje_descuento_tardanza
        FROM public.liquidacion_items
       WHERE actividad_id = $1 AND participante_id = $2
+        AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')
       FOR UPDATE`,
     [activityId, participantId],
   );
@@ -4054,7 +4394,8 @@ async function updateMaintenanceApproval(activityId: string, state: "aprobada" |
       `UPDATE public.liquidacion_items
           SET estado = CASE WHEN $2 = 'aprobada' THEN 'aprobado' WHEN $2 = 'rechazada' THEN 'anulado' ELSE 'pendiente' END,
               updated_at = clock_timestamp()
-        WHERE actividad_id = $1`,
+        WHERE actividad_id = $1
+          AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')`,
       [activityId, state],
     );
     await client.query(
@@ -4117,7 +4458,14 @@ async function updateApproval(payload: Payload, user: UserContext) {
       ? "aprobada"
       : "pendiente_aprobacion";
   await dbQuery("UPDATE public.actividades_operativas SET estado = $2, updated_at = clock_timestamp() WHERE id = $1", [activityId, activityState]);
-  await dbQuery("UPDATE public.liquidacion_items SET estado = CASE WHEN $2 = 'aprobada' THEN 'aprobado' WHEN $2 = 'rechazada' THEN 'anulado' ELSE 'pendiente' END, updated_at = clock_timestamp() WHERE actividad_id = $1 AND participante_id = $3", [activityId, state, participant.id]);
+  await dbQuery(
+    `UPDATE public.liquidacion_items
+        SET estado = CASE WHEN $2 = 'aprobada' THEN 'aprobado' WHEN $2 = 'rechazada' THEN 'anulado' ELSE 'pendiente' END,
+            updated_at = clock_timestamp()
+      WHERE actividad_id = $1 AND participante_id = $3
+        AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')`,
+    [activityId, state, participant.id],
+  );
   return true;
 }
 
@@ -4463,21 +4811,21 @@ function mapArrival(row: any): any {
 
 async function syncAttendanceDiscount(attendanceId: string, technicianId: string, fecha: string, applies: boolean, percentage: number) {
   const { rows: periodRows } = await dbQuery(
-    "SELECT id FROM public.periodos_liquidacion WHERE fecha_inicio <= $1::date AND fecha_fin >= $1::date ORDER BY fecha_inicio DESC LIMIT 1",
+    "SELECT id, estado FROM public.periodos_liquidacion WHERE fecha_inicio <= $1::date AND fecha_fin >= $1::date ORDER BY fecha_inicio DESC LIMIT 1",
     [fecha],
   );
   const periodId = periodRows[0]?.id;
-  if (!periodId) return;
+  if (!periodId || periodRows[0]?.estado === "cerrado") return;
 
   const normalizedPercentage = Math.max(0, Math.min(100, number(percentage)));
   if (!applies || normalizedPercentage <= 0) {
     await dbQuery("DELETE FROM public.asistencia_descuentos WHERE asistencia_id = $1 AND periodo_id = $2", [attendanceId, periodId]);
     await dbQuery(
-      "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND porcentaje_descuento_tardanza > 0",
+      "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND porcentaje_descuento_tardanza > 0 AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')",
       [technicianId, periodId],
     );
     await dbQuery(
-      "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo = 'recorrido' AND (descuento_tardanza > 0 OR porcentaje_descuento_tardanza > 0)",
+      "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo = 'recorrido' AND (descuento_tardanza > 0 OR porcentaje_descuento_tardanza > 0) AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')",
       [technicianId, periodId],
     );
     return;
@@ -4491,15 +4839,16 @@ async function syncAttendanceDiscount(attendanceId: string, technicianId: string
             valor_ganado = ROUND(valor_ganado_original * (1 - $3 / 100), 2),
             porcentaje_descuento_tardanza = $3,
             updated_at = clock_timestamp()
-      WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND estado <> 'anulado'`,
+      WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND estado <> 'anulado'
+        AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')`,
     [technicianId, periodId, normalizedPercentage],
   );
   await dbQuery(
-    "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo = 'recorrido' AND estado <> 'anulado'",
+    "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo = 'recorrido' AND estado <> 'anulado' AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')",
     [technicianId, periodId],
   );
   const { rows: discountRows } = await dbQuery(
-    "SELECT COALESCE(SUM(descuento_tardanza), 0) AS value FROM public.liquidacion_items WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND estado <> 'anulado'",
+    "SELECT COALESCE(SUM(descuento_tardanza), 0) AS value FROM public.liquidacion_items WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND estado <> 'anulado' AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')",
     [technicianId, periodId],
   );
   await dbQuery(

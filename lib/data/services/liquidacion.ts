@@ -12,10 +12,14 @@ export type CanonicalLiquidationTechnician = {
   totalBruto: number;
   totalNoRecorridos: number;
   totalRecorridos: number;
+  totalRecorridosPendientes: number;
   descuentoValor: number;
   totalAprobado: number;
   totalPendiente: number;
   extraLider: number;
+  extraLiderPendiente: number;
+  porcentajeExtraLiderAplicado: number;
+  extraLiderActivo: boolean;
   total: number;
 };
 
@@ -24,6 +28,8 @@ export type CanonicalLiquidationSummary = {
   fechaInicio: string;
   fechaFin: string;
   estado: LiquidationPeriod["estado"];
+  congelado: boolean;
+  congeladoEn?: string | null;
   generatedAt: string;
   totals: Omit<CanonicalLiquidationTechnician, "tecnicoId" | "nombre" | "email" | "rol" | "esLider">;
   technicians: CanonicalLiquidationTechnician[];

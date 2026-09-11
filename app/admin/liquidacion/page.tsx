@@ -116,7 +116,10 @@ type TechLiquidationSummary = {
   totalBruto: number;
   totalNoRecorridos: number;
   totalRecorridos: number;
+  pendiente?: number;
+  recorridosPendientes?: number;
   extraLider: number;
+  extraLiderPendiente?: number;
   descuentoPorcentaje: number;
   descuentoValor: number;
   total: number;
@@ -508,7 +511,7 @@ export default function LiquidacionPage() {
   const defaultExtraPct = companySettings?.porcentajeExtraLider || 0;
   const defaultExtraActivo = companySettings?.extraLiderActivo ?? false;
 
-  const leaderExtraByTech = groups.reduce<Map<string, number>>((acc, group) => {
+  const liveLeaderExtraByTech = groups.reduce<Map<string, number>>((acc, group) => {
     const liderId = group.liderId;
     if (!liderId) return acc;
 
@@ -541,6 +544,13 @@ export default function LiquidacionPage() {
     acc.set(liderId, Math.round(extraBase * porcentajeExtraLiderAplicado / 100));
     return acc;
   }, new Map());
+
+  // En un periodo cerrado, la API devuelve el extra calculado al cierre.
+  // Nunca reconstruirlo con la configuración vigente: esa configuración puede
+  // haber cambiado después y alteraría el histórico/PDF.
+  const leaderExtraByTech = canonicalSummary
+    ? new Map(canonicalSummary.technicians.map((row) => [row.tecnicoId, row.extraLider]))
+    : liveLeaderExtraByTech;
 
   const leaderGroupByTech = groups.reduce<Map<string, string>>((acc, group) => {
     if (group.liderId && !acc.has(group.liderId)) {
@@ -801,7 +811,10 @@ export default function LiquidacionPage() {
         totalBruto: row?.totalBruto || 0,
         totalNoRecorridos: row?.totalNoRecorridos || 0,
         totalRecorridos: row?.totalRecorridos || 0,
+        pendiente: row?.totalPendiente || 0,
+        recorridosPendientes: row?.totalRecorridosPendientes || 0,
         extraLider: row?.extraLider || 0,
+        extraLiderPendiente: row?.extraLiderPendiente || 0,
         descuentoPorcentaje: row && row.totalNoRecorridos > 0
           ? Math.round((row.descuentoValor / row.totalNoRecorridos) * 100)
           : 0,
@@ -814,11 +827,13 @@ export default function LiquidacionPage() {
 
   const techSummary = canonicalTechSummary || buildTechDisplaySummary(liquidationUsers, liquidablePeriodReports, liquidablePeriodReports, true);
 
-  const totalPeriod = canonicalSummary?.totals.total || Array.from(techSummary.values()).reduce(
-    (sum, t) => sum + t.total,
-    0,
-  );
-  const totalPenaltyPeriod = canonicalSummary?.totals.descuentoValor || Array.from(techSummary.values()).reduce((sum, t) => sum + t.descuentoValor, 0);
+  const totalPeriod = canonicalSummary
+    ? canonicalSummary.totals.total
+    : Array.from(techSummary.values()).reduce((sum, t) => sum + t.total, 0);
+  const totalPendingPeriod = canonicalSummary?.totals.totalPendiente || 0;
+  const totalPenaltyPeriod = canonicalSummary
+    ? canonicalSummary.totals.descuentoValor
+    : Array.from(techSummary.values()).reduce((sum, t) => sum + t.descuentoValor, 0);
 
   const applyStableReportOrder = (reports: ActivityReport[]) => {
     reports.forEach((report) => {
@@ -1151,7 +1166,7 @@ export default function LiquidacionPage() {
 
         {hasSelectedPeriod ? (
           <>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-5">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-6">
               <Card className="border-border/50 bg-card/80">
                 <CardContent className="p-4 flex items-center gap-3">
                   <div className="rounded-lg bg-gold/10 p-2.5">
@@ -1163,6 +1178,17 @@ export default function LiquidacionPage() {
                     {totalExtraLeaderPeriod > 0 && (
                       <p className="text-[10px] text-violet-400">Incluye extra líder: {formatCurrency(totalExtraLeaderPeriod)}</p>
                     )}
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="border-border/50 bg-card/80">
+                <CardContent className="p-4 flex items-center gap-3">
+                  <div className="rounded-lg bg-amber-500/10 p-2.5">
+                    <Clock className="h-5 w-5 text-amber-400" />
+                  </div>
+                  <div>
+                    <p className="text-xl font-bold text-amber-400">{formatCurrency(totalPendingPeriod)}</p>
+                    <p className="text-xs text-muted-foreground">Pendiente por aprobación</p>
                   </div>
                 </CardContent>
               </Card>
@@ -1776,6 +1802,9 @@ export default function LiquidacionPage() {
                             <p className="font-medium text-foreground">{data.nombre}</p>
                             <p className="text-xs text-muted-foreground">{data.actividadesVisibles} registradas</p>
                             <p className="text-[10px] text-emerald-400">{data.actividadesAprobadas} aprobadas para pago</p>
+                            {(data.pendiente || 0) > 0 && (
+                              <p className="text-[10px] text-amber-400">Pendiente por aprobación: {formatCurrency(data.pendiente || 0)}</p>
+                            )}
                           </div>
                           <Printer className="h-5 w-5 text-gold" />
                         </div>
