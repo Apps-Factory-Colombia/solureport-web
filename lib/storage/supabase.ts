@@ -1,10 +1,60 @@
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-if (!supabaseUrl || !supabaseAnonKey) throw new Error("Falta la configuración de Supabase Storage.");
+type StorageClient = ReturnType<typeof createClient>;
 
-export const storageClient = createClient(supabaseUrl, supabaseAnonKey);
+function createConfiguredClient(url?: string, publishableKey?: string): StorageClient | null {
+  if (!url || !publishableKey) return null;
+  return createClient(url, publishableKey);
+}
+
+// If build arguments were supplied, keep the zero-request fast path. When a
+// Docker image is built without them, initialize from the runtime endpoint
+// below instead of crashing the whole application at import time.
+const embeddedStorageClient = createConfiguredClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+);
+let resolvedStorageClient: StorageClient | null = embeddedStorageClient;
+let storageClientPromise: Promise<StorageClient> | null = null;
+
+// Kept as a compatible export for any future consumer; operations below
+// resolve the runtime client before using it.
+export const storageClient = embeddedStorageClient;
+
+function storageConfigurationError(): Error {
+  return new Error("Supabase Storage no está configurado. Define las variables públicas en Dockploy.");
+}
+
+async function getStorageClient(): Promise<StorageClient> {
+  if (resolvedStorageClient) return resolvedStorageClient;
+  if (storageClientPromise) return storageClientPromise;
+
+  storageClientPromise = (async () => {
+    if (typeof window === "undefined") {
+      const env = process.env as Record<string, string | undefined>;
+      const client = createConfiguredClient(
+        env.SOLUREPORT_SUPABASE_URL || env["NEXT_PUBLIC_" + "SUPABASE_URL"],
+        env.SOLUREPORT_SUPABASE_PUBLISHABLE_KEY
+          || env["NEXT_PUBLIC_" + "SUPABASE_ANON_KEY"]
+          || env["NEXT_PUBLIC_" + "SUPABASE_PUBLISHABLE_KEY"],
+      );
+      if (!client) throw storageConfigurationError();
+      resolvedStorageClient = client;
+      return client;
+    }
+
+    const response = await fetch("/api/config/storage", { cache: "no-store" });
+    const config = await response.json() as { configured?: boolean; url?: string; publishableKey?: string };
+    const client = createConfiguredClient(config.url, config.publishableKey);
+    if (!response.ok || !config.configured || !client) throw storageConfigurationError();
+    resolvedStorageClient = client;
+    return client;
+  })().finally(() => {
+    storageClientPromise = null;
+  });
+
+  return storageClientPromise;
+}
 
 export const BUCKETS = {
   FOTOS_MANTENIMIENTOS: "fotos-mantenimientos",
@@ -16,28 +66,33 @@ export const BUCKETS = {
 export type BucketName = (typeof BUCKETS)[keyof typeof BUCKETS];
 
 export async function uploadFile(bucket: BucketName, path: string, file: File | Blob): Promise<string> {
-  const { error } = await storageClient.storage.from(bucket).upload(path, file, { upsert: true, cacheControl: "3600" });
+  const client = await getStorageClient();
+  const { error } = await client.storage.from(bucket).upload(path, file, { upsert: true, cacheControl: "3600" });
   if (error) throw error;
   return getPublicUrl(bucket, path);
 }
 
 export function getPublicUrl(bucket: BucketName, path: string): string {
-  return storageClient.storage.from(bucket).getPublicUrl(path).data.publicUrl;
+  if (!resolvedStorageClient) throw storageConfigurationError();
+  return resolvedStorageClient.storage.from(bucket).getPublicUrl(path).data.publicUrl;
 }
 
 export async function deleteFile(bucket: BucketName, path: string): Promise<void> {
-  const { error } = await storageClient.storage.from(bucket).remove([path]);
+  const client = await getStorageClient();
+  const { error } = await client.storage.from(bucket).remove([path]);
   if (error) throw error;
 }
 
 export async function deleteFiles(bucket: BucketName, paths: string[]): Promise<void> {
   if (!paths.length) return;
-  const { error } = await storageClient.storage.from(bucket).remove(paths);
+  const client = await getStorageClient();
+  const { error } = await client.storage.from(bucket).remove(paths);
   if (error) throw error;
 }
 
 export async function listFiles(bucket: BucketName, folder: string): Promise<string[]> {
-  const { data, error } = await storageClient.storage.from(bucket).list(folder);
+  const client = await getStorageClient();
+  const { data, error } = await client.storage.from(bucket).list(folder);
   if (error) throw error;
   return (data || []).map((file) => `${folder}/${file.name}`);
 }
