@@ -1,0 +1,15 @@
+.git
+.gitignore
+.next
+node_modules
+coverage
+playwright-report
+test-results
+playwright/.auth
+*.log
+.env*
+!.env.example
+Dockerfile
+docker-compose*.yml
+*.tsbuildinfo
+next-env.d.ts

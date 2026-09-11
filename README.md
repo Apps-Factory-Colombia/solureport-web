@@ -1,36 +1,33 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SoluReport Web
 
-## Getting Started
+Aplicación Next.js para la gestión administrativa y la API de SoluReport.
 
-First, run the development server:
+## Desarrollo local
+
+Las variables locales deben estar en `.env.local`. Ese archivo está ignorado por Git y no debe copiarse al contenedor.
 
 ```bash
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Abre http://localhost:3000.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Despliegue en Dockploy/VPS
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+El repositorio incluye un `Dockerfile` de producción con el puerto `3000` y salida `standalone`. En Dockploy configura el proyecto para construir desde la rama `master`, publica el puerto del contenedor `3000` y agrega estas variables:
 
-## Learn More
+- Como argumentos de construcción: `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+- Como variables de ejecución: `SOLUREPORT_DATABASE_URL`, `SOLUREPORT_DATABASE_SSL=true`, `SOLUREPORT_DB_POOL_MAX=2`, `SOLUREPORT_COOKIE_SECURE=true`, `RESEND_API_KEY`, `RESEND_FROM_EMAIL` y `RESEND_REPLY_TO`.
 
-To learn more about Next.js, take a look at the following resources:
+`SOLUREPORT_DATABASE_URL` debe ser la cadena real de Supabase, con el usuario y contraseña vigentes. No uses usuarios inventados como `app` o `guest`; la base actual no tiene esos roles. Para el pooler de transacciones usa la cadena oficial de Supabase y el puerto `6543`. No guardes contraseñas en el repositorio ni en argumentos visibles de la imagen.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+La comprobación de salud es `GET /api/health`. Después de desplegar, debe responder HTTP 200 y mostrar `ok: true`; si responde 503, revisa primero `SOLUREPORT_DATABASE_URL`, SSL y la contraseña configurada en Dockploy.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Comandos útiles
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npm ci
+npm run build
+npm start
+```
