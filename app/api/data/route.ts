@@ -509,7 +509,9 @@ function canonicalParticipantId(id: unknown): string | null {
 }
 
 async function activityRows(payload: Payload = {}) {
+  const freezeSchemaReady = payload.periodoId ? await hasLiquidationFreezeSchema() : false;
   const values: unknown[] = [];
+  let selectedPeriodParam: number | null = null;
   const filters: string[] = [
     // During the legacy migration, scheduled maintenance rows were copied to
     // actividades_operativas so the old screens could still find them. They
@@ -525,7 +527,13 @@ async function activityRows(payload: Payload = {}) {
   if (payload.endDate) { values.push(payload.endDate); filters.push(`a.fecha_operacion <= $${values.length}`); }
   if (payload.periodoId) {
     values.push(payload.periodoId);
-    filters.push(`EXISTS (SELECT 1 FROM public.periodos_liquidacion pp WHERE pp.id = $${values.length} AND a.fecha_operacion BETWEEN pp.fecha_inicio AND pp.fecha_fin)`);
+    selectedPeriodParam = values.length;
+    const periodDateFilter = `EXISTS (SELECT 1 FROM public.periodos_liquidacion pp WHERE pp.id = $${selectedPeriodParam} AND a.fecha_operacion BETWEEN pp.fecha_inicio AND pp.fecha_fin)`;
+    const carriedActivityFilter = freezeSchemaReady
+      ? `OR EXISTS (SELECT 1 FROM public.liquidacion_items li_carry WHERE li_carry.periodo_id = $${selectedPeriodParam} AND li_carry.actividad_id = a.id AND COALESCE(li_carry.es_arrastre, false))
+         OR EXISTS (SELECT 1 FROM public.liquidacion_periodo_items snapshot_carry WHERE snapshot_carry.periodo_id = $${selectedPeriodParam} AND snapshot_carry.actividad_id = a.id AND snapshot_carry.es_arrastre)`
+      : "";
+    filters.push(`(${periodDateFilter}${carriedActivityFilter})`);
   }
   if (payload.activityId) { values.push(payload.activityId); filters.push(`a.id = $${values.length}`); }
   if (payload.tecnicoId) { values.push(payload.tecnicoId); filters.push(`EXISTS (SELECT 1 FROM public.actividades_operativas_participantes fp WHERE fp.actividad_id = a.id AND fp.tecnico_id = $${values.length})`); }
@@ -541,6 +549,53 @@ async function activityRows(payload: Payload = {}) {
       filters.push(`a.tipo = ANY($${values.length}::text[])`);
     }
   }
+
+  // Liquidación, reportes y comprobantes deben leer el mismo valor por período.
+  // Para períodos congelados la fotografía es la fuente de verdad; para períodos
+  // abiertos se usan los ítems vivos y mapReport aplica el fallback de aprobaciones
+  // cuando todavía no existe una fila materializada.
+  const periodLiquidationRows = selectedPeriodParam !== null
+    ? freezeSchemaReady
+      ? `COALESCE((SELECT json_agg(json_build_object(
+          'id', effective_liquidation.id,
+          'participanteId', effective_liquidation.participante_id,
+          'tecnicoId', effective_liquidation.tecnico_id,
+          'estado', effective_liquidation.estado,
+          'valorBase', effective_liquidation.valor_base,
+          'valorGanado', effective_liquidation.valor_ganado,
+          'valorGanadoOriginal', effective_liquidation.valor_ganado_original,
+          'descuentoTardanza', effective_liquidation.descuento_tardanza,
+          'porcentajeDescuentoTardanza', effective_liquidation.porcentaje_descuento_tardanza
+        ) ORDER BY effective_liquidation.created_at)
+        FROM (
+          SELECT s.id, s.participante_id, s.tecnico_id, s.estado, s.valor_base,
+                 s.valor_ganado, s.valor_ganado_original, s.descuento_tardanza,
+                 s.porcentaje_descuento_tardanza, s.fecha_snapshot AS created_at
+            FROM public.liquidacion_periodo_items s
+           WHERE s.periodo_id = $${selectedPeriodParam} AND s.actividad_id = a.id
+          UNION ALL
+          SELECT li.id, li.participante_id, li.tecnico_id, li.estado, li.valor_base,
+                 li.valor_ganado, li.valor_ganado_original, li.descuento_tardanza,
+                 li.porcentaje_descuento_tardanza, li.created_at
+            FROM public.liquidacion_items li
+           WHERE li.periodo_id = $${selectedPeriodParam} AND li.actividad_id = a.id
+             AND (SELECT pp.estado FROM public.periodos_liquidacion pp WHERE pp.id = $${selectedPeriodParam}) = 'abierto'
+             AND NOT EXISTS (SELECT 1 FROM public.liquidacion_periodo_items s2 WHERE s2.periodo_id = $${selectedPeriodParam})
+        ) effective_liquidation), '[]'::json)`
+      : `COALESCE((SELECT json_agg(json_build_object(
+          'id', li.id, 'participanteId', li.participante_id, 'tecnicoId', li.tecnico_id,
+          'estado', li.estado, 'valorBase', li.valor_base, 'valorGanado', li.valor_ganado,
+          'valorGanadoOriginal', li.valor_ganado_original, 'descuentoTardanza', li.descuento_tardanza,
+          'porcentajeDescuentoTardanza', li.porcentaje_descuento_tardanza
+        ) ORDER BY li.created_at)
+        FROM public.liquidacion_items li
+       WHERE li.periodo_id = $${selectedPeriodParam} AND li.actividad_id = a.id), '[]'::json)`
+    : `COALESCE((SELECT json_agg(json_build_object(
+          'id', li.id, 'participanteId', li.participante_id, 'tecnicoId', li.tecnico_id,
+          'estado', li.estado, 'valorBase', li.valor_base, 'valorGanado', li.valor_ganado,
+          'valorGanadoOriginal', li.valor_ganado_original, 'descuentoTardanza', li.descuento_tardanza,
+          'porcentajeDescuentoTardanza', li.porcentaje_descuento_tardanza
+        ) ORDER BY li.created_at) FROM public.liquidacion_items li WHERE li.actividad_id = a.id), '[]'::json)`;
   const hasPagination = payload.limit !== undefined || payload.offset !== undefined;
   let pagination = "";
   if (hasPagination) {
@@ -606,13 +661,13 @@ async function activityRows(payload: Payload = {}) {
               'fotoBitacoraUrl', d.foto_bitacora_url, 'enviadoPorId', d.enviado_por_id,
               'enviadoEn', d.enviado_en
             ) ORDER BY d.created_at) FROM public.actividades_operativas_entregas d WHERE d.actividad_id = a.id), '[]'::json) AS entregas,
-            COALESCE((SELECT json_agg(json_build_object(
-              'id', li.id, 'participanteId', li.participante_id, 'tecnicoId', li.tecnico_id,
-              'estado', li.estado, 'valorBase', li.valor_base, 'valorGanado', li.valor_ganado,
-              'valorGanadoOriginal', li.valor_ganado_original, 'descuentoTardanza', li.descuento_tardanza,
-              'porcentajeDescuentoTardanza', li.porcentaje_descuento_tardanza
-            ) ORDER BY li.created_at) FROM public.liquidacion_items li WHERE li.actividad_id = a.id), '[]'::json) AS liquidaciones,
-            (SELECT p.id FROM public.periodos_liquidacion p WHERE a.fecha_operacion BETWEEN p.fecha_inicio AND p.fecha_fin ORDER BY p.fecha_inicio DESC LIMIT 1) AS periodo_id,
+            ${periodLiquidationRows} AS liquidaciones,
+            ${selectedPeriodParam !== null
+              ? `(SELECT $${selectedPeriodParam}::uuid)`
+              : `(SELECT p.id FROM public.periodos_liquidacion p WHERE a.fecha_operacion BETWEEN p.fecha_inicio AND p.fecha_fin ORDER BY p.fecha_inicio DESC LIMIT 1)`} AS periodo_id,
+            ${selectedPeriodParam !== null && freezeSchemaReady
+              ? `(SELECT (pp.estado = 'cerrado' OR EXISTS (SELECT 1 FROM public.liquidacion_periodo_items frozen_items WHERE frozen_items.periodo_id = pp.id)) FROM public.periodos_liquidacion pp WHERE pp.id = $${selectedPeriodParam})`
+              : "false"} AS liquidacion_congelada,
             COUNT(*) OVER() AS total_count
        FROM public.actividades_operativas a
        LEFT JOIN public.clientes c ON c.id = a.cliente_id
@@ -666,7 +721,7 @@ function mapReport(row: any, participant: any, index: number): any {
   // Older approved reports can exist without a corresponding liquidation row.
   // Keep them visible in the same approved-only source used by the mobile app;
   // the fallback is deterministic and does not create a duplicate database row.
-  const effectiveLiquidation = liquidation || (approval?.estado === "aprobada"
+  const effectiveLiquidation = liquidation || (!row.liquidacion_congelada && approval?.estado === "aprobada"
     ? {
         id: `fallback:${row.id}:${participant?.id || "activity"}:${row.periodo_id || "period"}`,
         estado: "aprobado",
@@ -3248,9 +3303,34 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "notifications.read": { await dbQuery("UPDATE public.notificaciones SET leida_en = COALESCE(leida_en, clock_timestamp()) WHERE id = $1", [payload.id]); return true; }
 
     case "liquidation.periodEntries": {
-      const { rows } = await dbQuery("SELECT * FROM public.v_liquidacion_tecnico ORDER BY fecha_operacion DESC");
+      const requestedPeriodId = String(payload.periodoId || "").trim();
+      const { rows: periodRows } = requestedPeriodId
+        ? await dbQuery("SELECT id FROM public.periodos_liquidacion WHERE id = $1", [requestedPeriodId])
+        : await dbQuery("SELECT id FROM public.periodos_liquidacion ORDER BY fecha_inicio DESC LIMIT 1");
+      const periodId = String(periodRows[0]?.id || "");
+      if (!periodId) return [];
+      const rows = (await getLiquidationRows(periodId))
+        .filter((row) => !["anulado", "rechazado"].includes(String(row.estado_liquidacion || row.estado || "")));
       const byActivity = new Map<string, any>();
-      for (const row of rows) { const current = byActivity.get(row.actividad_id) || { id: row.actividad_id, codigoRegistro: row.codigo, actividadId: row.actividad_id, grupoId: "", lugar: row.sede_snapshot || "", fecha: dateOnly(row.fecha_operacion), fotoEvidencia: undefined, participantes: [], periodoId: row.periodo_id }; current.participantes.push({ tecnicoId: row.tecnico_id, porcentaje: number(row.porcentaje), valorCalculado: number(row.valor_ganado) }); byActivity.set(row.actividad_id, current); }
+      for (const row of rows) {
+        const current = byActivity.get(row.actividad_id) || {
+          id: row.actividad_id,
+          codigoRegistro: row.codigo,
+          actividadId: row.actividad_id,
+          grupoId: row.grupo_id || "",
+          lugar: row.sede_nombre || row.sede_snapshot || "",
+          fecha: dateOnly(row.fecha_operacion),
+          fotoEvidencia: undefined,
+          participantes: [],
+          periodoId: row.periodo_id || periodId,
+        };
+        current.participantes.push({
+          tecnicoId: row.tecnico_id,
+          porcentaje: number(row.porcentaje),
+          valorCalculado: number(row.valor_ganado),
+        });
+        byActivity.set(row.actividad_id, current);
+      }
       return [...byActivity.values()];
     }
     case "liquidation.items": {
