@@ -1300,7 +1300,7 @@ async function freezeLiquidationPeriod(periodId: string) {
     );
 
     const { rows: nextPeriods } = await client.query(
-      `SELECT id
+      `SELECT id, fecha_inicio
          FROM public.periodos_liquidacion
         WHERE estado = 'abierto' AND fecha_inicio > $1
         ORDER BY fecha_inicio ASC
@@ -1318,14 +1318,15 @@ async function freezeLiquidationPeriod(periodId: string) {
             porcentaje_descuento_tardanza, es_arrastre, periodo_origen_id, item_origen_id
          )
          SELECT
-            $1, s.actividad_id, s.participante_id, s.tecnico_id, s.fecha_operacion,
+            $1, s.actividad_id, s.participante_id, s.tecnico_id,
+            GREATEST(s.fecha_operacion, $3::date),
             s.tipo, s.porcentaje, s.valor_base, s.valor_ganado, s.valor_ganado_original,
             'pendiente', s.descripcion_snapshot, s.sede_snapshot, s.descuento_tardanza,
             s.porcentaje_descuento_tardanza, true, s.periodo_id, s.liquidacion_item_id
            FROM public.liquidacion_periodo_items s
           WHERE s.periodo_id = $2 AND s.estado = 'pendiente'
          ON CONFLICT DO NOTHING`,
-        [nextPeriods[0].id, period.id],
+        [nextPeriods[0].id, period.id, nextPeriods[0].fecha_inicio],
       );
       carriedRows = result.rowCount || 0;
     }
@@ -1656,6 +1657,13 @@ async function deleteOperationalActivities(client: any, activityIds: string[]) {
 async function deleteScheduledMaintenances(client: any, maintenanceIds: string[]) {
   if (!maintenanceIds.length) return;
 
+  // The assignment table cascades in the current schema, but delete it
+  // explicitly so this operation remains deterministic across environments
+  // and never leaves a participant row pointing at a deleted maintenance.
+  await client.query(
+    "DELETE FROM public.mantenimientos_programados_participantes WHERE mantenimiento_id = ANY($1::uuid[])",
+    [maintenanceIds],
+  );
   await client.query(
     "DELETE FROM public.notificaciones WHERE entidad_tipo = 'mantenimiento_programado' AND entidad_id = ANY($1::uuid[])",
     [maintenanceIds],
@@ -3038,7 +3046,43 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
         WHERE m.id = $1`, [payload.id]);
       return rows[0] ? enrichMaintenance(rows[0]) : null;
     }
-    case "maintenances.delete": { await requireAdmin(user); await dbQuery("UPDATE public.mantenimientos_programados SET estado = 'cancelado', updated_at = clock_timestamp() WHERE id = $1", [payload.id]); return true; }
+    case "maintenances.delete": {
+      await requireAdmin(user);
+      const maintenanceId = String(payload.id || "").trim();
+      if (!maintenanceId) throw new Error("Debes indicar el mantenimiento que deseas eliminar.");
+
+      return withTransaction(async (client) => {
+        const { rows: maintenanceRows } = await client.query(
+          "SELECT id FROM public.mantenimientos_programados WHERE id = $1 FOR UPDATE",
+          [maintenanceId],
+        );
+        const target = maintenanceRows[0];
+        if (!target) throw new Error("No se encontró el mantenimiento que intentas eliminar.");
+
+        // A preventive maintenance may already have a consolidated operational
+        // report, approvals, deliveries, evidence and liquidation items. Find
+        // those activities before removing the maintenance link, then delete
+        // everything in the same transaction so approvals cannot survive as
+        // orphaned rows.
+        const { rows: activityRows } = await client.query(
+          `SELECT a.id
+             FROM public.actividades_operativas_mantenimientos am
+             JOIN public.actividades_operativas a ON a.id = am.actividad_id
+            WHERE am.mantenimiento_programado_id = $1
+            FOR UPDATE OF a`,
+          [maintenanceId],
+        );
+        await deleteOperationalActivities(client, activityRows.map((row: any) => row.id));
+        await deleteScheduledMaintenances(client, [maintenanceId]);
+
+        return {
+          deleted: true,
+          archived: false,
+          id: maintenanceId,
+          message: `Mantenimiento ${maintenanceId} eliminado definitivamente junto con sus reportes, aprobaciones y liquidaciones.`,
+        };
+      });
+    }
     case "maintenances.reports": {
       const rows = await activityRows({});
       return rows.filter((row) => row.tipo === "mantenimiento").flatMap((row) => {
@@ -4368,7 +4412,7 @@ async function updateMaintenanceApproval(activityId: string, state: "aprobada" |
     if (legacyApprovalIds.length > 0 && globalApprovalId) {
       await client.query(
         `INSERT INTO public.lote_aprobacion_items (lote_id, aprobacion_id)
-         SELECT DISTINCT lote_id, $1
+         SELECT DISTINCT lote_id, $1::uuid
            FROM public.lote_aprobacion_items
           WHERE aprobacion_id = ANY($2::uuid[])
          ON CONFLICT DO NOTHING`,

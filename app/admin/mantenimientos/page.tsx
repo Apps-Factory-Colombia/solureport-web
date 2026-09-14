@@ -2090,7 +2090,9 @@ export default function MantenimientosPage() {
           <DialogHeader>
             <DialogTitle className="text-foreground">Confirmar eliminación</DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              ¿Seguro que quieres eliminar este mantenimiento? Esta acción no se puede deshacer.
+              ¿Seguro que quieres eliminar este mantenimiento? Se eliminarán definitivamente sus asignaciones,
+              reportes, entregas, evidencias, aprobaciones y liquidaciones. No quedará archivado ni como inactivo.
+              Esta acción no se puede deshacer.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
