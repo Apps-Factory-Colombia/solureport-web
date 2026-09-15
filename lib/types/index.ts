@@ -344,6 +344,8 @@ export interface LeaderAccumulation {
   extraLider: number;
   totalRecorridos: number;
   totalAcumulado: number;
+  baseExtraLiderAprobado?: number;
+  baseExtraLiderPendiente?: number;
   porcentajeExtraLiderAplicado: number;
   extraLiderActivo: boolean;
   tecnicosExcluidosExtraIds?: string[];

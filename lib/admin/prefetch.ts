@@ -64,7 +64,6 @@ const routeWarmers: Record<string, Warmer[]> = {
     ],
     "/admin/liquidacion": [
         () => import("@/lib/data/services/liquidacion").then((module) => module.getPeriodos()),
-        () => import("@/lib/data/services/reportes-actividad").then((module) => module.getAcumulacionesLider()),
         () => import("@/lib/data/services/reportes-actividad").then((module) => module.getReportesActividad()),
         () => import("@/lib/data/services/llegadas").then((module) => module.getLlegadas()),
         () => import("@/lib/data/services/usuarios").then((module) => module.getUsuarios()),
@@ -73,8 +72,6 @@ const routeWarmers: Record<string, Warmer[]> = {
     ],
     "/admin/acumulados": [
         () => import("@/lib/data/services/liquidacion").then((module) => module.getPeriodos()),
-        () => import("@/lib/data/services/reportes-actividad").then((module) => module.getAcumulacionesLider()),
-        () => import("@/lib/data/services/reportes-actividad").then((module) => module.getLotesAprobacion()),
         () => import("@/lib/data/services/reportes-actividad").then((module) => module.getReportesActividad()),
         () => import("@/lib/data/services/usuarios").then((module) => module.getUsuarios()),
         () => import("@/lib/data/services/grupos").then((module) => module.getGrupos()),

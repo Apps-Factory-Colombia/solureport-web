@@ -529,11 +529,20 @@ async function activityRows(payload: Payload = {}) {
     values.push(payload.periodoId);
     selectedPeriodParam = values.length;
     const periodDateFilter = `EXISTS (SELECT 1 FROM public.periodos_liquidacion pp WHERE pp.id = $${selectedPeriodParam} AND a.fecha_operacion BETWEEN pp.fecha_inicio AND pp.fecha_fin)`;
-    const carriedActivityFilter = freezeSchemaReady
-      ? `OR EXISTS (SELECT 1 FROM public.liquidacion_items li_carry WHERE li_carry.periodo_id = $${selectedPeriodParam} AND li_carry.actividad_id = a.id AND COALESCE(li_carry.es_arrastre, false))
-         OR EXISTS (SELECT 1 FROM public.liquidacion_periodo_items snapshot_carry WHERE snapshot_carry.periodo_id = $${selectedPeriodParam} AND snapshot_carry.actividad_id = a.id AND snapshot_carry.es_arrastre)`
-      : "";
-    filters.push(`(${periodDateFilter}${carriedActivityFilter})`);
+    // La pertenencia a un corte queda registrada en la liquidación. La fecha
+    // de la actividad es el respaldo para actividades aún no materializadas;
+    // no se debe descartar un item que el administrador ya asignó al período.
+    const periodMembershipFilter = `OR EXISTS (
+      SELECT 1 FROM public.liquidacion_items li_period
+       WHERE li_period.periodo_id = $${selectedPeriodParam}
+         AND li_period.actividad_id = a.id
+    )${freezeSchemaReady ? `
+      OR EXISTS (
+        SELECT 1 FROM public.liquidacion_periodo_items snapshot_period
+         WHERE snapshot_period.periodo_id = $${selectedPeriodParam}
+           AND snapshot_period.actividad_id = a.id
+      )` : ""}`;
+    filters.push(`(${periodDateFilter} ${periodMembershipFilter})`);
   }
   if (payload.activityId) { values.push(payload.activityId); filters.push(`a.id = $${values.length}`); }
   if (payload.tecnicoId) { values.push(payload.tecnicoId); filters.push(`EXISTS (SELECT 1 FROM public.actividades_operativas_participantes fp WHERE fp.actividad_id = a.id AND fp.tecnico_id = $${values.length})`); }
@@ -1129,6 +1138,16 @@ async function overdueMaintenanceRows(payload: Payload = {}) {
 async function getLiveLiquidationRows(periodId: string, technicianIds?: string[] | null) {
   const freezeSchemaReady = await hasLiquidationFreezeSchema();
   const carryExpression = freezeSchemaReady ? "COALESCE(li.es_arrastre, false)" : "false";
+  const periodMembershipExpression = `EXISTS (
+      SELECT 1 FROM public.liquidacion_items li_period
+       WHERE li_period.periodo_id = pl.id
+         AND li_period.actividad_id = a.id
+    )${freezeSchemaReady ? `
+      OR EXISTS (
+        SELECT 1 FROM public.liquidacion_periodo_items snapshot_period
+         WHERE snapshot_period.periodo_id = pl.id
+           AND snapshot_period.actividad_id = a.id
+      )` : ""}`;
   const values: unknown[] = [periodId];
   const scope = technicianIds && technicianIds.length > 0
     ? (() => {
@@ -1194,7 +1213,7 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
      LEFT JOIN public.clientes c ON c.id = a.cliente_id
      LEFT JOIN public.cliente_sedes s ON s.id = a.sede_id
     WHERE a.estado NOT IN ('cancelada', 'rechazada')
-      AND (a.fecha_operacion BETWEEN pl.fecha_inicio AND pl.fecha_fin OR ${carryExpression})
+      AND (a.fecha_operacion BETWEEN pl.fecha_inicio AND pl.fecha_fin OR ${periodMembershipExpression} OR ${carryExpression})
       ${scope}
     ORDER BY a.fecha_operacion DESC, COALESCE(li.created_at, a.created_at) DESC, p.id` ,
     values,
@@ -1280,11 +1299,6 @@ async function getLiquidationSnapshotRows(periodId: string, technicianIds?: stri
 async function getLiquidationRows(periodId: string, technicianIds?: string[] | null) {
   const snapshotRows = await getLiquidationSnapshotRows(periodId, technicianIds);
   return snapshotRows !== null ? snapshotRows : getLiveLiquidationRows(periodId, technicianIds);
-}
-
-async function getApprovedLiquidationRows(periodId: string, technicianIds?: string[] | null) {
-  const rows = await getLiquidationRows(periodId, technicianIds);
-  return rows.filter((row) => ["aprobado", "pagado"].includes(String(row.estado_liquidacion || row.estado || "")));
 }
 
 async function freezeLiquidationPeriod(periodId: string) {
@@ -1439,6 +1453,8 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
       actividadesAprobadas: 0,
       totalBruto: 0,
       totalNoRecorridos: 0,
+      totalNoRecorridosAprobados: 0,
+      totalNoRecorridosPendientes: 0,
       totalRecorridos: 0,
       descuentoValor: 0,
       totalAprobado: 0,
@@ -1446,6 +1462,8 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
       totalRecorridosPendientes: 0,
       extraLider: 0,
       extraLiderPendiente: 0,
+      baseExtraLiderAprobado: 0,
+      baseExtraLiderPendiente: 0,
       porcentajeExtraLiderAplicado: snapshotRows !== null
         ? number(row.extra_lider_porcentaje)
         : number(settings.porcentajeExtraLider),
@@ -1466,7 +1484,12 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     else if (row.tipo === "recorrido") current.totalRecorridosPendientes += earned;
     else {
       current.totalNoRecorridos += gross;
-      if (isApproved) current.descuentoValor += number(row.descuento_tardanza);
+      if (isApproved) {
+        current.totalNoRecorridosAprobados += earned;
+        current.descuentoValor += number(row.descuento_tardanza);
+      } else {
+        current.totalNoRecorridosPendientes += earned;
+      }
     }
     if (row.grupo_lider_id && row.grupo_lider_id === row.tecnico_id) current.esLider = true;
     if (row.grupo_lider_id && row.grupo_lider_id !== row.tecnico_id && row.tipo !== "recorrido") {
@@ -1502,6 +1525,8 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
           actividadesAprobadas: 0,
           totalBruto: 0,
           totalNoRecorridos: 0,
+          totalNoRecorridosAprobados: 0,
+          totalNoRecorridosPendientes: 0,
           totalRecorridos: 0,
           descuentoValor: 0,
           totalAprobado: 0,
@@ -1509,6 +1534,8 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
           totalRecorridosPendientes: 0,
           extraLider: 0,
           extraLiderPendiente: 0,
+          baseExtraLiderAprobado: 0,
+          baseExtraLiderPendiente: 0,
           porcentajeExtraLiderAplicado: extraBaseByLeader.get(leader.id)?.percentage || 0,
           extraLiderActivo: extraBaseByLeader.get(leader.id)?.active || false,
           total: 0,
@@ -1527,6 +1554,8 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
       : 0;
     row.extraLider = extraLider;
     row.extraLiderPendiente = extraLiderPendiente;
+    row.baseExtraLiderAprobado = roundCurrency(extraConfig?.approved || 0);
+    row.baseExtraLiderPendiente = roundCurrency(extraConfig?.pending || 0);
     row.total = roundCurrency(row.totalAprobado + extraLider - row.descuentoValor);
     return {
       tecnicoId: row.tecnicoId,
@@ -1538,6 +1567,8 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
       actividadesAprobadas: number(row.actividadesAprobadas),
       totalBruto: number(row.totalBruto),
       totalNoRecorridos: number(row.totalNoRecorridos),
+      totalNoRecorridosAprobados: number(row.totalNoRecorridosAprobados),
+      totalNoRecorridosPendientes: number(row.totalNoRecorridosPendientes),
       totalRecorridos: number(row.totalRecorridos),
       descuentoValor: number(row.descuentoValor),
       totalAprobado: number(row.totalAprobado),
@@ -1545,6 +1576,8 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
       totalRecorridosPendientes: number(row.totalRecorridosPendientes),
       extraLider,
       extraLiderPendiente,
+      baseExtraLiderAprobado: number(row.baseExtraLiderAprobado),
+      baseExtraLiderPendiente: number(row.baseExtraLiderPendiente),
       porcentajeExtraLiderAplicado: number(row.porcentajeExtraLiderAplicado),
       extraLiderActivo: Boolean(row.extraLiderActivo),
       total: number(row.total),
@@ -1555,6 +1588,8 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     actividadesAprobadas: acc.actividadesAprobadas + row.actividadesAprobadas,
     totalBruto: acc.totalBruto + row.totalBruto,
     totalNoRecorridos: acc.totalNoRecorridos + row.totalNoRecorridos,
+    totalNoRecorridosAprobados: acc.totalNoRecorridosAprobados + row.totalNoRecorridosAprobados,
+    totalNoRecorridosPendientes: acc.totalNoRecorridosPendientes + row.totalNoRecorridosPendientes,
     totalRecorridos: acc.totalRecorridos + row.totalRecorridos,
     totalRecorridosPendientes: acc.totalRecorridosPendientes + row.totalRecorridosPendientes,
     descuentoValor: acc.descuentoValor + row.descuentoValor,
@@ -1562,11 +1597,15 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     totalPendiente: acc.totalPendiente + row.totalPendiente,
     extraLider: acc.extraLider + row.extraLider,
     extraLiderPendiente: acc.extraLiderPendiente + row.extraLiderPendiente,
+    baseExtraLiderAprobado: acc.baseExtraLiderAprobado + row.baseExtraLiderAprobado,
+    baseExtraLiderPendiente: acc.baseExtraLiderPendiente + row.baseExtraLiderPendiente,
     total: acc.total + row.total,
   }), {
     actividades: 0, actividadesAprobadas: 0, totalBruto: 0, totalNoRecorridos: 0,
+    totalNoRecorridosAprobados: 0, totalNoRecorridosPendientes: 0,
     totalRecorridos: 0, totalRecorridosPendientes: 0, descuentoValor: 0, totalAprobado: 0,
-    totalPendiente: 0, extraLider: 0, extraLiderPendiente: 0, total: 0,
+    totalPendiente: 0, extraLider: 0, extraLiderPendiente: 0,
+    baseExtraLiderAprobado: 0, baseExtraLiderPendiente: 0, total: 0,
   });
 
   return {
@@ -3449,6 +3488,8 @@ function mapLeaderLiquidationSummary(
     totalRecorridosPendientes: number(row.totalRecorridosPendientes),
     totalAcumulado: number(row.totalBruto) + number(row.extraLider) + number(row.extraLiderPendiente),
     totalAcumuladoBruto: number(row.totalBruto),
+    baseExtraLiderAprobado: number(row.baseExtraLiderAprobado),
+    baseExtraLiderPendiente: number(row.baseExtraLiderPendiente),
     totalDescuentosTardanza: number(row.descuentoValor),
     porcentajeExtraLiderAplicado: extraPercentage,
     extraLiderActivo: Boolean(row.extraLiderActivo),

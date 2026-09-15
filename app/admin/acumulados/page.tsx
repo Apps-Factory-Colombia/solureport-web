@@ -15,14 +15,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -53,11 +45,11 @@ import {
   ChevronDown,
   X,
 } from "lucide-react";
-import { LeaderAccumulation, LiquidationPeriod, LeaderApprovalBatch, ActivityReport, User, WorkGroup, CompanySettings } from "@/lib/types";
-import { getAcumulacionesLider, getLotesAprobacion, getReportesActividad, upsertConfiguracionExtraLider } from "@/lib/data/services/reportes-actividad";
+import { LiquidationPeriod, ActivityReport, User, WorkGroup, CompanySettings } from "@/lib/types";
+import { getReportesActividad, upsertConfiguracionExtraLider } from "@/lib/data/services/reportes-actividad";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getGrupos } from "@/lib/data/services/grupos";
-import { getPeriodos } from "@/lib/data/services/liquidacion";
+import { CanonicalLiquidationSummary, getCanonicalLiquidationSummary, getPeriodos } from "@/lib/data/services/liquidacion";
 import { getConfiguracion } from "@/lib/data/services/configuracion";
 import { cn } from "@/lib/utils";
 
@@ -71,14 +63,12 @@ function formatCurrency(value: number) {
 
 export default function AcumuladosPage() {
   const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
-  const [accumulations, setAccumulations] = useState<LeaderAccumulation[]>([]);
-  const [batches, setBatches] = useState<LeaderApprovalBatch[]>([]);
   const [actReports, setActReports] = useState<ActivityReport[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
   const [loading, setLoading] = useState(true);
-  const [reportsLoading, setReportsLoading] = useState(false);
+  const [canonicalSummary, setCanonicalSummary] = useState<CanonicalLiquidationSummary | null>(null);
   const [selectedPeriodId, setSelectedPeriodId] = useState("");
   const [leaderExtraDrafts, setLeaderExtraDrafts] = useState<Record<string, { porcentaje: string; activo: boolean; tecnicosExcluidosIds?: string[] }>>({});
   const [savingLeaderId, setSavingLeaderId] = useState<string | null>(null);
@@ -91,14 +81,12 @@ export default function AcumuladosPage() {
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
     Promise.all([
-      getPeriodos(), getAcumulacionesLider(), getLotesAprobacion(),
+      getPeriodos(),
       getUsuarios(), getGrupos(), getConfiguracion(),
-    ]).then(([p, a, b, u, g, s]) => {
+    ]).then(([p, u, g, s]) => {
       if (!active) return;
-      setPeriods(p); setAccumulations(a); setBatches(b);
-      setActReports([]); setUsers(u); setGroups(g); setCompanySettings(s);
+      setPeriods(p); setUsers(u); setGroups(g); setCompanySettings(s);
       if (p.length > 0) setSelectedPeriodId((current) => current || p[0].id);
     }).catch((err) => console.error("Error cargando acumulados:", err))
       .finally(() => setLoading(false));
@@ -107,13 +95,10 @@ export default function AcumuladosPage() {
 
   useEffect(() => {
     if (!selectedPeriodId) {
-      setActReports([]);
-      setReportsLoading(false);
       return;
     }
 
     let active = true;
-    setReportsLoading(true);
     getReportesActividad({ periodoId: selectedPeriodId })
       .then((reports) => {
         if (active) setActReports(reports);
@@ -121,19 +106,28 @@ export default function AcumuladosPage() {
       .catch((err) => {
         console.error("Error cargando el detalle del período:", err);
         if (active) setActReports([]);
-      })
-      .finally(() => {
-        if (active) setReportsLoading(false);
       });
 
     return () => { active = false; };
   }, [selectedPeriodId]);
 
-  const selectedPeriod = periods.find((p) => p.id === selectedPeriodId);
+  useEffect(() => {
+    if (!selectedPeriodId) {
+      return;
+    }
 
-  const periodBatches = batches.filter(
-    (b) => b.periodoId === selectedPeriodId
-  );
+    let active = true;
+    getCanonicalLiquidationSummary(selectedPeriodId)
+      .then((summary) => {
+        if (active) setCanonicalSummary(summary);
+      })
+      .catch((err) => {
+        console.error("Error cargando el resumen canónico del período:", err);
+        if (active) setCanonicalSummary(null);
+      });
+
+    return () => { active = false; };
+  }, [selectedPeriodId]);
 
   const periodReports = actReports.filter(
     (r) => r.periodoId === selectedPeriodId
@@ -141,46 +135,33 @@ export default function AcumuladosPage() {
 
   const leaders = users.filter((u) => u.esLider);
 
-  const periodAccumulationSettings = useMemo(() => {
-    return accumulations.reduce<Map<string, LeaderAccumulation>>((acc, item) => {
-      if (item.periodoId === selectedPeriodId) {
-        acc.set(item.liderId, item);
-      }
-      return acc;
-    }, new Map());
-  }, [accumulations, selectedPeriodId]);
-
-  // Los totales financieros vienen del resumen canónico del servidor. Los
-  // reportes del período se cargan aparte y solo alimentan el detalle de cada
-  // líder; así evitamos traer todo el histórico y sumar dos veces los mismos
-  // valores.
   const defaultExtraPct = companySettings?.porcentajeExtraLider || 0;
   const defaultExtraActivo = companySettings?.extraLiderActivo ?? false;
   const costoRevision = companySettings?.costoRevisionLider || 0;
 
   const periodAccumulations = useMemo(() => {
-    const leaderIds = new Set([
-      ...leaders.map((leader) => leader.id),
-      ...periodAccumulationSettings.keys(),
-    ]);
-    return Array.from(leaderIds).map((liderId) => {
-      const persisted = periodAccumulationSettings.get(liderId);
+    if (!selectedPeriodId || !canonicalSummary) return [];
+    const techniciansById = new Map((canonicalSummary?.technicians || []).map((technician) => [technician.tecnicoId, technician]));
+    return leaders.map((leader) => {
+      const canonical = techniciansById.get(leader.id);
       return {
-        liderId,
-        totalAprobadoPago: persisted?.totalAprobadoPago ?? 0,
-        totalPendientePago: persisted?.totalPendientePago ?? 0,
-        extraLider: persisted?.extraLider ?? 0,
-        totalRecorridos: persisted?.totalRecorridos ?? 0,
-        totalAcumulado: persisted?.totalAcumulado ?? 0,
-        porcentajeExtraLiderAplicado: persisted?.porcentajeExtraLiderAplicado ?? defaultExtraPct,
-        extraLiderActivo: persisted?.extraLiderActivo ?? defaultExtraActivo,
-        tecnicosExcluidosExtraIds: persisted?.tecnicosExcluidosExtraIds,
+        liderId: leader.id,
+        totalAprobadoPago: canonical?.totalAprobado ?? 0,
+        totalPendientePago: canonical?.totalPendiente ?? 0,
+        extraLider: canonical?.extraLider ?? 0,
+        totalRecorridos: canonical?.totalRecorridos ?? 0,
+        totalAcumulado: (canonical?.totalBruto ?? 0) + (canonical?.extraLider ?? 0) + (canonical?.extraLiderPendiente ?? 0),
+        baseExtraLiderAprobado: canonical?.baseExtraLiderAprobado ?? 0,
+        baseExtraLiderPendiente: canonical?.baseExtraLiderPendiente ?? 0,
+        porcentajeExtraLiderAplicado: canonical?.porcentajeExtraLiderAplicado ?? defaultExtraPct,
+        extraLiderActivo: canonical?.extraLiderActivo ?? defaultExtraActivo,
+        tecnicosExcluidosExtraIds: [],
         reportesAprobados: periodReports.filter(
-          (report) => report.liderGrupoId === liderId && report.estadoAprobacionLider === "aprobado",
+          (report) => report.liderGrupoId === leader.id && report.estadoAprobacionLider === "aprobado",
         ).length,
       };
     });
-  }, [periodAccumulationSettings, periodReports, defaultExtraPct, defaultExtraActivo, leaders]);
+  }, [canonicalSummary, periodReports, defaultExtraPct, defaultExtraActivo, leaders, selectedPeriodId]);
 
   const handleLeaderExtraDraftChange = (
     liderId: string,
@@ -224,7 +205,7 @@ export default function AcumuladosPage() {
     setSaveError(null);
     setSavingLeaderId(liderId);
     try {
-      const updated = await upsertConfiguracionExtraLider(liderId, selectedPeriodId, {
+      await upsertConfiguracionExtraLider(liderId, selectedPeriodId, {
         porcentajeExtraLiderAplicado: porcentaje,
         extraLiderActivo: draft.activo,
         tecnicosExcluidosExtraIds: existingDraft && Object.prototype.hasOwnProperty.call(existingDraft, "tecnicosExcluidosIds")
@@ -232,13 +213,7 @@ export default function AcumuladosPage() {
           : current.tecnicosExcluidosExtraIds,
       });
 
-      setAccumulations((prev) => {
-        const exists = prev.some((item) => item.liderId === updated.liderId && item.periodoId === updated.periodoId);
-        if (exists) {
-          return prev.map((item) => item.liderId === updated.liderId && item.periodoId === updated.periodoId ? { ...item, ...updated } : item);
-        }
-        return [...prev, updated];
-      });
+      setCanonicalSummary(await getCanonicalLiquidationSummary(selectedPeriodId));
 
       setLeaderExtraDrafts((prev) => {
         const next = { ...prev };
@@ -274,12 +249,9 @@ export default function AcumuladosPage() {
     });
   }, [periodAccumulations, searchQuery, users]);
 
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchQuery, selectedPeriodId]);
-
   const totalPages = Math.ceil(filteredAccumulations.length / itemsPerPage);
-  const startIndex = (currentPage - 1) * itemsPerPage;
+  const visiblePage = totalPages > 0 ? Math.min(currentPage, totalPages) : 1;
+  const startIndex = (visiblePage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
   const currentAccumulations = filteredAccumulations.slice(startIndex, endIndex);
 
@@ -391,10 +363,6 @@ export default function AcumuladosPage() {
           </Card>
         </div>
 
-        {reportsLoading && (
-          <p className="text-xs text-muted-foreground">Cargando el detalle del período seleccionado…</p>
-        )}
-
         {saveError && (
           <Alert variant="destructive" className="border-destructive/40 bg-destructive/5">
             <AlertTriangle className="h-4 w-4" />
@@ -414,7 +382,7 @@ export default function AcumuladosPage() {
         {filteredAccumulations.length === 0 && periodAccumulations.length > 0 && (
           <Card className="border-border/50 bg-card/80">
             <CardContent className="p-8 text-center">
-              <p className="text-muted-foreground text-sm">No se encontraron líderes que coincidan con "{searchQuery}".</p>
+              <p className="text-muted-foreground text-sm">No se encontraron líderes que coincidan con “{searchQuery}”.</p>
             </CardContent>
           </Card>
         )}
@@ -422,30 +390,14 @@ export default function AcumuladosPage() {
         {currentAccumulations.map((acc) => {
           const leader = users.find((u) => u.id === acc.liderId);
           const group = groups.find((g) => g.liderId === acc.liderId);
-          const batch = periodBatches.find((b) => b.liderId === acc.liderId);
-          const leaderReports = periodReports.filter((r) => r.liderGrupoId === acc.liderId);
-          const approvedReports = leaderReports.filter((r) => r.estadoAprobacionLider === "aprobado");
-          const pendingReports = leaderReports.filter((r) => r.estadoAprobacionLider === "pendiente");
-          const recorridoReports = leaderReports.filter((r) => r.tipo === "recorrido");
-          const nonRecorridoReports = approvedReports.filter((r) => r.tipo !== "recorrido");
 
           const groupMembers = group ? users.filter((u) => group.miembros.includes(u.id) && u.id !== acc.liderId) : [];
+          const canonicalTechniciansById = new Map((canonicalSummary?.technicians || []).map((technician) => [technician.tecnicoId, technician]));
           const draft = leaderExtraDrafts[acc.liderId];
           const draftPercentage = draft?.porcentaje ?? String(acc.porcentajeExtraLiderAplicado);
           const draftActive = draft?.activo ?? acc.extraLiderActivo;
           const resolvedExcludedIds = draft?.tecnicosExcluidosIds ?? acc.tecnicosExcluidosExtraIds ?? [];
-          const memberTotals = new Map(
-            groupMembers.map((member) => [
-              member.id,
-              nonRecorridoReports
-                .filter((report) => report.tecnicoId === member.id)
-                .reduce((sum, report) => sum + report.costoActividad, 0),
-            ])
-          );
-          const extraLeaderBase = groupMembers.reduce((sum, member) => {
-            if (resolvedExcludedIds.includes(member.id)) return sum;
-            return sum + (memberTotals.get(member.id) || 0);
-          }, 0);
+          const extraLeaderBase = acc.baseExtraLiderAprobado || 0;
           const excludedSearch = excludedSearchByLeader[acc.liderId] || "";
           const filteredGroupMembers = groupMembers.filter((member) =>
             `${member.nombre} ${member.apellido}`.toLowerCase().includes(excludedSearch.toLowerCase())
@@ -662,7 +614,7 @@ export default function AcumuladosPage() {
                         ) : (
                           <div className="grid grid-cols-1 gap-1 mt-2">
                             {groupMembers.map((member, idx) => {
-                              const memberTotal = memberTotals.get(member.id) || 0;
+                              const memberTotal = canonicalTechniciansById.get(member.id)?.totalNoRecorridosAprobados || 0;
                               const isExcluded = resolvedExcludedIds.includes(member.id);
                               const extraApplied = isExcluded ? 0 : Math.round(memberTotal * acc.porcentajeExtraLiderAplicado / 100);
 
@@ -761,14 +713,14 @@ export default function AcumuladosPage() {
                 <PaginationItem>
                   <PaginationPrevious
                     onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                    className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                    className={visiblePage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
                   />
                 </PaginationItem>
                 {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
                   <PaginationItem key={page}>
                     <PaginationLink
                       onClick={() => setCurrentPage(page)}
-                      isActive={currentPage === page}
+                      isActive={visiblePage === page}
                       className="cursor-pointer"
                     >
                       {page}
@@ -778,7 +730,7 @@ export default function AcumuladosPage() {
                 <PaginationItem>
                   <PaginationNext
                     onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
-                    className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                    className={visiblePage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
                   />
                 </PaginationItem>
               </PaginationContent>

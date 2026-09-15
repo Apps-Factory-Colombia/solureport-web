@@ -11,6 +11,8 @@ export type CanonicalLiquidationTechnician = {
   actividadesAprobadas: number;
   totalBruto: number;
   totalNoRecorridos: number;
+  totalNoRecorridosAprobados: number;
+  totalNoRecorridosPendientes: number;
   totalRecorridos: number;
   totalRecorridosPendientes: number;
   descuentoValor: number;
@@ -18,6 +20,8 @@ export type CanonicalLiquidationTechnician = {
   totalPendiente: number;
   extraLider: number;
   extraLiderPendiente: number;
+  baseExtraLiderAprobado: number;
+  baseExtraLiderPendiente: number;
   porcentajeExtraLiderAplicado: number;
   extraLiderActivo: boolean;
   total: number;
