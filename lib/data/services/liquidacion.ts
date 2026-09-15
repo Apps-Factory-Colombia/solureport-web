@@ -24,6 +24,7 @@ export type CanonicalLiquidationTechnician = {
   baseExtraLiderPendiente: number;
   porcentajeExtraLiderAplicado: number;
   extraLiderActivo: boolean;
+  tecnicosExcluidosExtraIds: string[];
   total: number;
 };
 
@@ -35,7 +36,7 @@ export type CanonicalLiquidationSummary = {
   congelado: boolean;
   congeladoEn?: string | null;
   generatedAt: string;
-  totals: Omit<CanonicalLiquidationTechnician, "tecnicoId" | "nombre" | "email" | "rol" | "esLider">;
+  totals: Omit<CanonicalLiquidationTechnician, "tecnicoId" | "nombre" | "email" | "rol" | "esLider" | "tecnicosExcluidosExtraIds">;
   technicians: CanonicalLiquidationTechnician[];
 };
 

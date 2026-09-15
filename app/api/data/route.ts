@@ -1228,6 +1228,114 @@ function isMissingLiquidationSnapshot(error: unknown) {
   return candidate?.code === "42P01" || message.includes("liquidacion_periodo_items") || message.includes("es_arrastre");
 }
 
+type LeaderExtraConfiguration = {
+  percentage: number;
+  active: boolean;
+  excludedIds: string[];
+};
+
+function isMissingLeaderExtraConfiguration(error: unknown) {
+  const candidate = error as { code?: string; message?: string } | null;
+  const message = String(candidate?.message || error || "").toLowerCase();
+  return candidate?.code === "42P01" || message.includes("acumulacion_lideres");
+}
+
+async function getLeaderExtraConfigurations(periodId: string): Promise<Map<string, LeaderExtraConfiguration>> {
+  try {
+    const { rows } = await dbQuery(
+      `SELECT lider_id, porcentaje_extra_lider_aplicado, extra_lider_activo,
+              COALESCE(tecnicos_excluidos_extra_ids, '{}'::uuid[]) AS tecnicos_excluidos_extra_ids
+         FROM public.acumulacion_lideres
+        WHERE periodo_id = $1`,
+      [periodId],
+    );
+    return new Map(rows.map((row) => [String(row.lider_id), {
+      percentage: number(row.porcentaje_extra_lider_aplicado),
+      active: Boolean(row.extra_lider_activo),
+      excludedIds: uniqueIds(jsonArray(row.tecnicos_excluidos_extra_ids).map((id) => String(id))),
+    }]));
+  } catch (error) {
+    // Keep older deployments functional until the additive migration is
+    // applied. Saving the configuration still fails with a clear message.
+    if (isMissingLeaderExtraConfiguration(error)) return new Map();
+    throw error;
+  }
+}
+
+async function upsertLeaderExtraConfiguration(payload: Payload) {
+  const liderId = String(payload.liderId || "").trim();
+  const periodoId = String(payload.periodoId || "").trim();
+  const percentage = number(payload.porcentaje, Number.NaN);
+  if (!liderId || !periodoId) throw new Error("Debes indicar el líder y el período.");
+  if (!Number.isFinite(percentage) || percentage < 0 || percentage > 100) {
+    throw new Error("El porcentaje del extra líder debe estar entre 0 y 100.");
+  }
+
+  const excludedIds = uniqueIds(idList(payload.tecnicosExcluidosExtraIds));
+  const { rows: leaderRows } = await dbQuery(
+    `SELECT u.id
+       FROM public.usuarios u
+      WHERE u.id = $1
+        AND (u.rol = 'lider' OR EXISTS (
+          SELECT 1 FROM public.grupos_trabajo g
+           WHERE g.lider_id = u.id AND g.estado = 'activo'
+        ))`,
+    [liderId],
+  );
+  if (!leaderRows[0]) throw new Error("No se encontró el líder seleccionado.");
+
+  const { rows: periodRows } = await dbQuery(
+    "SELECT id FROM public.periodos_liquidacion WHERE id = $1",
+    [periodoId],
+  );
+  if (!periodRows[0]) throw new Error("No se encontró el período seleccionado.");
+
+  if (excludedIds.length > 0) {
+    const { rows: eligibleRows } = await dbQuery(
+      `SELECT DISTINCT gm.usuario_id
+         FROM public.grupo_miembros gm
+         JOIN public.grupos_trabajo g ON g.id = gm.grupo_id
+        WHERE g.lider_id = $1 AND g.estado = 'activo'
+          AND gm.fecha_inicio <= ${BOGOTA_DATE_SQL}
+          AND (gm.fecha_fin IS NULL OR gm.fecha_fin >= ${BOGOTA_DATE_SQL})`,
+      [liderId],
+    );
+    const eligibleIds = new Set(eligibleRows.map((row) => String(row.usuario_id)));
+    const invalidIds = excludedIds.filter((id) => !eligibleIds.has(id));
+    if (invalidIds.length > 0) throw new Error("Solo puedes excluir técnicos que pertenezcan al grupo activo de este líder.");
+  }
+
+  try {
+    const { rows } = await dbQuery(
+      `INSERT INTO public.acumulacion_lideres (
+          lider_id, periodo_id, porcentaje_extra_lider_aplicado,
+          extra_lider_activo, tecnicos_excluidos_extra_ids, fecha_actualizacion
+       ) VALUES ($1, $2, $3, $4, $5::uuid[], clock_timestamp())
+       ON CONFLICT (lider_id, periodo_id) DO UPDATE SET
+          porcentaje_extra_lider_aplicado = EXCLUDED.porcentaje_extra_lider_aplicado,
+          extra_lider_activo = EXCLUDED.extra_lider_activo,
+          tecnicos_excluidos_extra_ids = EXCLUDED.tecnicos_excluidos_extra_ids,
+          fecha_actualizacion = clock_timestamp()
+       RETURNING lider_id, periodo_id, porcentaje_extra_lider_aplicado,
+                 extra_lider_activo, tecnicos_excluidos_extra_ids`,
+      [liderId, periodoId, percentage, payload.activo === true, excludedIds],
+    );
+    const row = rows[0];
+    return {
+      liderId: String(row.lider_id),
+      periodoId: String(row.periodo_id),
+      porcentajeExtraLiderAplicado: number(row.porcentaje_extra_lider_aplicado),
+      extraLiderActivo: Boolean(row.extra_lider_activo),
+      tecnicosExcluidosExtraIds: uniqueIds(jsonArray(row.tecnicos_excluidos_extra_ids).map((id) => String(id))),
+    };
+  } catch (error) {
+    if (isMissingLeaderExtraConfiguration(error)) {
+      throw new Error("Falta aplicar la migración de configuración del extra líder por período.");
+    }
+    throw error;
+  }
+}
+
 async function getLiquidationSnapshotRows(periodId: string, technicianIds?: string[] | null): Promise<any[] | null> {
   const values: unknown[] = [periodId];
   const scope = technicianIds && technicianIds.length > 0
@@ -1437,6 +1545,7 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     ? snapshotRows
     : await getLiveLiquidationRows(periodId, userScope);
   const settings = await getConfig();
+  const leaderExtraConfigs = await getLeaderExtraConfigurations(periodId);
   const grouped = new Map<string, any>();
   const extraBaseByLeader = new Map<string, { approved: number; pending: number; percentage: number; active: boolean }>();
 
@@ -1466,10 +1575,11 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
       baseExtraLiderPendiente: 0,
       porcentajeExtraLiderAplicado: snapshotRows !== null
         ? number(row.extra_lider_porcentaje)
-        : number(settings.porcentajeExtraLider),
+        : leaderExtraConfigs.get(String(row.tecnico_id))?.percentage ?? number(settings.porcentajeExtraLider),
       extraLiderActivo: snapshotRows !== null
         ? Boolean(row.extra_lider_activo)
-        : Boolean(settings.extraLiderActivo),
+        : leaderExtraConfigs.get(String(row.tecnico_id))?.active ?? Boolean(settings.extraLiderActivo),
+      tecnicosExcluidosExtraIds: leaderExtraConfigs.get(String(row.tecnico_id))?.excludedIds || [],
       total: 0,
     };
     const gross = number(row.valor_ganado_original);
@@ -1493,20 +1603,30 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     }
     if (row.grupo_lider_id && row.grupo_lider_id === row.tecnico_id) current.esLider = true;
     if (row.grupo_lider_id && row.grupo_lider_id !== row.tecnico_id && row.tipo !== "recorrido") {
-      const existingExtra = extraBaseByLeader.get(row.grupo_lider_id) || {
-        approved: 0,
-        pending: 0,
-        percentage: snapshotRows !== null ? number(row.extra_lider_porcentaje) : number(settings.porcentajeExtraLider),
-        active: snapshotRows !== null ? Boolean(row.extra_lider_activo) : Boolean(settings.extraLiderActivo),
-      };
-      if (isApproved) existingExtra.approved += earned;
-      else existingExtra.pending += earned;
-      extraBaseByLeader.set(row.grupo_lider_id, existingExtra);
+      const savedConfig = leaderExtraConfigs.get(String(row.grupo_lider_id));
+      if (!savedConfig?.excludedIds.includes(String(row.tecnico_id))) {
+        const existingExtra = extraBaseByLeader.get(row.grupo_lider_id) || {
+          approved: 0,
+          pending: 0,
+          percentage: snapshotRows !== null
+            ? number(row.extra_lider_porcentaje)
+            : savedConfig?.percentage ?? number(settings.porcentajeExtraLider),
+          active: snapshotRows !== null
+            ? Boolean(row.extra_lider_activo)
+            : savedConfig?.active ?? Boolean(settings.extraLiderActivo),
+        };
+        if (isApproved) existingExtra.approved += earned;
+        else existingExtra.pending += earned;
+        extraBaseByLeader.set(row.grupo_lider_id, existingExtra);
+      }
     }
     grouped.set(row.tecnico_id, current);
   }
 
-  const extraLeaderIds = [...extraBaseByLeader.keys()].filter((leaderId) => userScope === null || userScope.includes(leaderId));
+  const extraLeaderIds = uniqueIds([
+    ...extraBaseByLeader.keys(),
+    ...leaderExtraConfigs.keys(),
+  ]).filter((leaderId) => userScope === null || userScope.includes(leaderId));
   if (extraLeaderIds.length > 0) {
     const missingLeaderIds = extraLeaderIds.filter((leaderId) => !grouped.has(leaderId));
     if (missingLeaderIds.length > 0) {
@@ -1536,8 +1656,13 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
           extraLiderPendiente: 0,
           baseExtraLiderAprobado: 0,
           baseExtraLiderPendiente: 0,
-          porcentajeExtraLiderAplicado: extraBaseByLeader.get(leader.id)?.percentage || 0,
-          extraLiderActivo: extraBaseByLeader.get(leader.id)?.active || false,
+          porcentajeExtraLiderAplicado: extraBaseByLeader.get(leader.id)?.percentage
+            ?? leaderExtraConfigs.get(String(leader.id))?.percentage
+            ?? number(settings.porcentajeExtraLider),
+          extraLiderActivo: extraBaseByLeader.get(leader.id)?.active
+            ?? leaderExtraConfigs.get(String(leader.id))?.active
+            ?? Boolean(settings.extraLiderActivo),
+          tecnicosExcluidosExtraIds: leaderExtraConfigs.get(String(leader.id))?.excludedIds || [],
           total: 0,
         });
       }
@@ -1580,6 +1705,7 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
       baseExtraLiderPendiente: number(row.baseExtraLiderPendiente),
       porcentajeExtraLiderAplicado: number(row.porcentajeExtraLiderAplicado),
       extraLiderActivo: Boolean(row.extraLiderActivo),
+      tecnicosExcluidosExtraIds: leaderExtraConfigs.get(String(row.tecnicoId))?.excludedIds || [],
       total: number(row.total),
     };
   }).sort((a, b) => `${a.nombre} ${a.tecnicoId}`.localeCompare(`${b.nombre} ${b.tecnicoId}`));
@@ -3252,7 +3378,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
         resolvedSummaries.get(row.periodo_id)!,
       ));
     }
-    case "reports.leaderConfig": { await requireAdmin(user); const current = await getConfig(); await updateConfig({ ...current, porcentajeExtraLider: payload.porcentaje, extraLiderActivo: payload.activo }); return true; }
+    case "reports.leaderConfig": { await requireAdmin(user); return upsertLeaderExtraConfiguration(payload); }
     case "reports.saveEvidence": { await saveEvidence(payload, user); return true; }
 
     case "arrivals.list": {
@@ -3493,7 +3619,7 @@ function mapLeaderLiquidationSummary(
     totalDescuentosTardanza: number(row.descuentoValor),
     porcentajeExtraLiderAplicado: extraPercentage,
     extraLiderActivo: Boolean(row.extraLiderActivo),
-    tecnicosExcluidosExtraIds: [],
+    tecnicosExcluidosExtraIds: uniqueIds(jsonArray(row.tecnicosExcluidosExtraIds).map((id) => String(id))),
     congelado: Boolean(summary.congelado),
     congeladoEn: summary.congeladoEn || null,
   };

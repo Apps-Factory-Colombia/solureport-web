@@ -155,7 +155,7 @@ export default function AcumuladosPage() {
         baseExtraLiderPendiente: canonical?.baseExtraLiderPendiente ?? 0,
         porcentajeExtraLiderAplicado: canonical?.porcentajeExtraLiderAplicado ?? defaultExtraPct,
         extraLiderActivo: canonical?.extraLiderActivo ?? defaultExtraActivo,
-        tecnicosExcluidosExtraIds: [],
+        tecnicosExcluidosExtraIds: canonical?.tecnicosExcluidosExtraIds ?? [],
         reportesAprobados: periodReports.filter(
           (report) => report.liderGrupoId === leader.id && report.estadoAprobacionLider === "aprobado",
         ).length,
