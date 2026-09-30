@@ -28,7 +28,7 @@ import {
   Percent,
   Route,
 } from "lucide-react";
-import { CompanySettings, LiquidationPeriod } from "@/lib/types";
+import { LiquidationPeriod } from "@/lib/types";
 import { getConfiguracion, updateConfiguracion } from "@/lib/data/services/configuracion";
 import { createPeriodo, deletePeriodo, getPeriodos, updatePeriodo } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
@@ -43,6 +43,9 @@ export default function ConfiguracionPage() {
   const [costoRecorridoNormal, setCostoRecorridoNormal] = useState("");
   const [costoRecorridoHerramienta, setCostoRecorridoHerramienta] = useState("");
   const [porcentajeDescuentoTardanza, setPorcentajeDescuentoTardanza] = useState("");
+  const [horaInicioDescuentoTardanza, setHoraInicioDescuentoTardanza] = useState("08:05");
+  const [horaDescuentoAutomatico, setHoraDescuentoAutomatico] = useState("08:30");
+  const [porcentajeDescuentoNoReportado, setPorcentajeDescuentoNoReportado] = useState("30");
   const [periodoInicio, setPeriodoInicio] = useState("");
   const [periodoFin, setPeriodoFin] = useState("");
   const [periodoEstado, setPeriodoEstado] = useState<LiquidationPeriod["estado"]>("abierto");
@@ -65,6 +68,9 @@ export default function ConfiguracionPage() {
         setCostoRecorridoNormal(String(s.costoRecorridoNormal));
         setCostoRecorridoHerramienta(String(s.costoRecorridoHerramienta));
         setPorcentajeDescuentoTardanza(String(s.porcentajeDescuentoTardanza));
+        setHoraInicioDescuentoTardanza(s.horaInicioDescuentoTardanza || "08:05");
+        setHoraDescuentoAutomatico(s.horaDescuentoAutomatico || "08:30");
+        setPorcentajeDescuentoNoReportado(String(s.porcentajeDescuentoNoReportado ?? 30));
       })
       .catch((err) => console.error("Error cargando configuración:", err))
       .finally(() => setLoading(false));
@@ -148,6 +154,9 @@ export default function ConfiguracionPage() {
         costoRecorridoNormal: Number(costoRecorridoNormal),
         costoRecorridoHerramienta: Number(costoRecorridoHerramienta),
         porcentajeDescuentoTardanza: Number(porcentajeDescuentoTardanza),
+        horaInicioDescuentoTardanza,
+        horaDescuentoAutomatico,
+        porcentajeDescuentoNoReportado: Number(porcentajeDescuentoNoReportado),
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -425,20 +434,51 @@ export default function ConfiguracionPage() {
                     <Percent className="h-4 w-4 text-red-400" />
                     Descuento por Tardanza
                   </h3>
-                  <div className="space-y-2">
-                    <Label className="text-foreground/80">Porcentaje de descuento sobre actividades (%)</Label>
-                    <Input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={porcentajeDescuentoTardanza}
-                      onChange={(e) => setPorcentajeDescuentoTardanza(e.target.value)}
-                      className="bg-secondary/50 border-border/50 max-w-xs"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Este porcentaje se descuenta de las actividades del técnico cuando se registra una tardanza.
-                    </p>
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Tardanza reportada (%)</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={porcentajeDescuentoTardanza}
+                        onChange={(e) => setPorcentajeDescuentoTardanza(e.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Desde las</Label>
+                      <Input
+                        type="time"
+                        value={horaInicioDescuentoTardanza}
+                        onChange={(e) => setHoraInicioDescuentoTardanza(e.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">No reportado (%)</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={porcentajeDescuentoNoReportado}
+                        onChange={(e) => setPorcentajeDescuentoNoReportado(e.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-foreground/80">Corte de no reporte</Label>
+                      <Input
+                        type="time"
+                        value={horaDescuentoAutomatico}
+                        onChange={(e) => setHoraDescuentoAutomatico(e.target.value)}
+                        className="bg-secondary/50 border-border/50"
+                      />
+                    </div>
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    Desde la primera hora hasta el corte aplica la tardanza reportada. Al llegar el corte sin registro aplica el porcentaje de no reportado.
+                  </p>
                 </div>
 
                 <div className="flex justify-end">

@@ -118,7 +118,9 @@ export default function LlegadasPage() {
   const [discountOpen, setDiscountOpen] = useState(false);
   const [discountPercent, setDiscountPercent] = useState("5");
   const [configuredDiscountPercent, setConfiguredDiscountPercent] = useState("5");
+  const [configuredLateStartTime, setConfiguredLateStartTime] = useState("08:05");
   const [configuredDiscountTime, setConfiguredDiscountTime] = useState("");
+  const [configuredNoReportDiscountPercent, setConfiguredNoReportDiscountPercent] = useState("30");
   const [automaticDiscountDays, setAutomaticDiscountDays] = useState<ScheduleDay[]>([
     "lunes", "martes", "miercoles", "jueves", "viernes",
   ]);
@@ -145,6 +147,7 @@ export default function LlegadasPage() {
         s.porcentajeDescuentoTardanza,
         s.diasDescuentoAutomatico,
         s.horaDescuentoAutomatico,
+        s.porcentajeDescuentoNoReportado,
       );
       const r = changed > 0 ? await getLlegadas() : initialRecords;
       setRecords(r);
@@ -152,7 +155,9 @@ export default function LlegadasPage() {
       setCompanySettings(s);
       setDiscountPercent(String(s.porcentajeDescuentoTardanza));
       setConfiguredDiscountPercent(String(s.porcentajeDescuentoTardanza));
+      setConfiguredLateStartTime(s.horaInicioDescuentoTardanza || "08:05");
       setConfiguredDiscountTime(s.horaDescuentoAutomatico || "");
+      setConfiguredNoReportDiscountPercent(String(s.porcentajeDescuentoNoReportado ?? 30));
       setAutomaticDiscountDays(s.diasDescuentoAutomatico || []);
     } catch (err) {
       console.error("Error cargando llegadas:", err);
@@ -173,6 +178,7 @@ export default function LlegadasPage() {
           companySettings.porcentajeDescuentoTardanza,
           companySettings.diasDescuentoAutomatico,
           companySettings.horaDescuentoAutomatico,
+          companySettings.porcentajeDescuentoNoReportado,
         );
         if (changed > 0) setRecords(await getLlegadas());
       } catch (err) {
@@ -239,14 +245,18 @@ export default function LlegadasPage() {
     try {
       const updated = await updateConfiguracion({
         porcentajeDescuentoTardanza: value,
+        horaInicioDescuentoTardanza: configuredLateStartTime,
         diasDescuentoAutomatico: automaticDiscountDays,
         horaDescuentoAutomatico: configuredDiscountTime,
+        porcentajeDescuentoNoReportado: Math.max(0, Math.min(100, Number(configuredNoReportDiscountPercent) || 0)),
       });
       setCompanySettings(updated);
       setConfiguredDiscountPercent(String(updated.porcentajeDescuentoTardanza));
       setDiscountPercent(String(updated.porcentajeDescuentoTardanza));
+      setConfiguredLateStartTime(updated.horaInicioDescuentoTardanza || "08:05");
       setAutomaticDiscountDays(updated.diasDescuentoAutomatico || []);
       setConfiguredDiscountTime(updated.horaDescuentoAutomatico || "");
+      setConfiguredNoReportDiscountPercent(String(updated.porcentajeDescuentoNoReportado ?? 30));
     } catch (err) {
       console.error("Error actualizando descuento configurado:", err);
     } finally {
@@ -262,6 +272,7 @@ export default function LlegadasPage() {
         companySettings?.porcentajeDescuentoTardanza || 0,
         companySettings?.diasDescuentoAutomatico,
         companySettings?.horaDescuentoAutomatico,
+        companySettings?.porcentajeDescuentoNoReportado,
       );
       await loadData();
     } catch (err) {
@@ -473,11 +484,11 @@ export default function LlegadasPage() {
 
           <div className="rounded-2xl border border-gold/20 bg-gradient-to-br from-gold/10 via-card/80 to-card/60 p-4 shadow-sm">
             <div className="min-w-0 flex-1 space-y-3">
-              <div className="grid gap-4 sm:grid-cols-[minmax(0,140px)_minmax(0,140px)_minmax(0,1fr)] sm:items-end">
+              <div className="grid gap-4 sm:grid-cols-[minmax(0,120px)_minmax(0,120px)_minmax(0,120px)_minmax(0,120px)_minmax(0,1fr)] sm:items-end">
                 <div className="space-y-1.5">
                   <Label className="flex items-center gap-2 text-xs text-foreground/80">
                     <Settings2 className="h-3.5 w-3.5 text-gold" />
-                    Descuento (%)
+                    Tardanza (%)
                   </Label>
                   <Input
                     type="number"
@@ -489,7 +500,27 @@ export default function LlegadasPage() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs text-foreground/80">Hora de corte</Label>
+                  <Label className="text-xs text-foreground/80">Desde las</Label>
+                  <Input
+                    type="time"
+                    value={configuredLateStartTime}
+                    onChange={(event) => setConfiguredLateStartTime(event.target.value)}
+                    className="bg-secondary/50 border-border/50"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-foreground/80">No reportado (%)</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={configuredNoReportDiscountPercent}
+                    onChange={(event) => setConfiguredNoReportDiscountPercent(event.target.value)}
+                    className="bg-secondary/50 border-border/50"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-foreground/80">Corte no reporte</Label>
                   <Input
                     type="time"
                     value={configuredDiscountTime}
@@ -527,7 +558,7 @@ export default function LlegadasPage() {
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-[11px] leading-4 text-muted-foreground">
-                  El descuento se aplica solo en los días seleccionados y cuando llega la hora configurada.
+                  Reportes desde la primera hora aplican la tardanza normal; si no hay reporte al corte, aplica el porcentaje de no reportado.
                 </p>
                 <Button
                   type="button"

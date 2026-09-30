@@ -1,7 +1,21 @@
 import { ArrivalRecord, ScheduleDay } from "@/lib/types";
 import { dataRequest } from "../client";
 
-export async function ensureNoRegistradosForToday(users: unknown[], discountPercentage: number, automaticDays?: ScheduleDay[], automaticTime?: string): Promise<number> { return dataRequest<number>("arrivals.ensure", { users, porcentajeDescuento: discountPercentage, automaticDays, horaCorte: automaticTime || undefined }); }
+export async function ensureNoRegistradosForToday(
+  users: unknown[],
+  discountPercentage: number,
+  automaticDays?: ScheduleDay[],
+  automaticTime?: string,
+  noReportDiscountPercentage?: number,
+): Promise<number> {
+  return dataRequest<number>("arrivals.ensure", {
+    users,
+    porcentajeDescuento: discountPercentage,
+    porcentajeNoReportado: noReportDiscountPercentage,
+    automaticDays,
+    horaCorte: automaticTime || undefined,
+  });
+}
 export async function getLlegadas(): Promise<ArrivalRecord[]> { return dataRequest<ArrivalRecord[]>("arrivals.list"); }
 export async function updateLlegada(id: string, updates: Partial<{
   mensajeEnviado: string;

@@ -132,6 +132,33 @@ function timeMinutes(value: unknown): number | null {
   return hours * 60 + minutes;
 }
 
+function percentage(value: unknown, fallback = 0) {
+  return Math.max(0, Math.min(100, number(value, fallback)));
+}
+
+function attendanceDiscountForTime(settings: any, actualMinutes: number | null) {
+  const lateStartMinutes = timeMinutes(settings.horaInicioDescuentoTardanza);
+  const noReportCutoffMinutes = timeMinutes(settings.horaDescuentoAutomatico);
+  const latePercentage = percentage(settings.porcentajeDescuentoTardanza);
+  const noReportPercentage = percentage(settings.porcentajeDescuentoNoReportado, 30);
+
+  if (actualMinutes == null) {
+    return { estado: "no_reportado", minutosRetraso: 0, porcentaje: noReportPercentage };
+  }
+
+  if (lateStartMinutes == null || actualMinutes < lateStartMinutes) {
+    return { estado: "a_tiempo", minutosRetraso: 0, porcentaje: 0 };
+  }
+
+  const severeLate = noReportCutoffMinutes != null && actualMinutes >= noReportCutoffMinutes;
+  const threshold = severeLate ? noReportCutoffMinutes : lateStartMinutes;
+  return {
+    estado: "tarde",
+    minutosRetraso: threshold == null ? 0 : Math.max(0, actualMinutes - threshold),
+    porcentaje: severeLate ? noReportPercentage : latePercentage,
+  };
+}
+
 function bogotaClock() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Bogota",
@@ -1180,10 +1207,27 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
         u.rol,
         COALESCE(li.porcentaje, p.porcentaje) AS porcentaje,
         COALESCE(li.valor_base, p.valor_base) AS valor_base,
-        COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100) AS valor_ganado,
+        CASE
+          WHEN a.tipo <> 'recorrido' AND GREATEST(
+            COALESCE(li.porcentaje_descuento_tardanza, 0),
+            COALESCE(attendance_discount.porcentaje, 0)
+          ) > 0 THEN ROUND(
+            COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100)
+            * (1 - GREATEST(
+              COALESCE(li.porcentaje_descuento_tardanza, 0),
+              COALESCE(attendance_discount.porcentaje, 0)
+            ) / 100), 2)
+          ELSE COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100)
+        END AS valor_ganado,
         COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100) AS valor_ganado_original,
-        COALESCE(li.descuento_tardanza, 0) AS descuento_tardanza,
-        COALESCE(li.porcentaje_descuento_tardanza, 0) AS porcentaje_descuento_tardanza,
+        CASE WHEN a.tipo <> 'recorrido' THEN ROUND(
+          COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100)
+          * GREATEST(COALESCE(li.porcentaje_descuento_tardanza, 0), COALESCE(attendance_discount.porcentaje, 0)) / 100, 2)
+          ELSE 0 END AS descuento_tardanza,
+        CASE WHEN a.tipo <> 'recorrido' THEN GREATEST(
+          COALESCE(li.porcentaje_descuento_tardanza, 0),
+          COALESCE(attendance_discount.porcentaje, 0)
+        ) ELSE 0 END AS porcentaje_descuento_tardanza,
         CASE
           WHEN li.estado IN ('anulado', 'rechazado') THEN 'anulado'
           WHEN li.estado IN ('aprobado', 'pagado')
@@ -1212,6 +1256,14 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
      LEFT JOIN public.grupos_trabajo g ON g.id = a.grupo_id
      LEFT JOIN public.clientes c ON c.id = a.cliente_id
      LEFT JOIN public.cliente_sedes s ON s.id = a.sede_id
+     LEFT JOIN LATERAL (
+       SELECT COALESCE(MAX(r.porcentaje_descuento), 0) AS porcentaje
+         FROM public.registros_asistencia r
+        WHERE pl.estado = 'abierto'
+          AND r.usuario_id = p.tecnico_id
+          AND r.fecha BETWEEN pl.fecha_inicio AND pl.fecha_fin
+          AND r.descuento_aplicado = true
+     ) attendance_discount ON true
     WHERE a.estado NOT IN ('cancelada', 'rechazada')
       AND (a.fecha_operacion BETWEEN pl.fecha_inicio AND pl.fecha_fin OR ${periodMembershipExpression} OR ${carryExpression})
       ${scope}
@@ -3417,20 +3469,20 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       let normalizedRow = rows[0];
       if (normalizedRow) {
         // Incluso si un administrador edita la fila, el servidor vuelve a
-        // calcular la tardanza contra el corte y no contra un valor manual.
+        // calcular la tardanza contra las reglas configuradas y no contra un
+        // porcentaje manual que pueda dejar la liquidación desincronizada.
         const settings = await getConfig();
         const actualMinutes = timeMinutes(String(normalizedRow.hora_entrada_real || ""));
-        const cutoffMinutes = timeMinutes(settings.horaDescuentoAutomatico);
-        if (actualMinutes != null && cutoffMinutes != null) {
-          const isLate = actualMinutes >= cutoffMinutes;
-          const percentage = isLate ? Math.max(0, Math.min(100, number(settings.porcentajeDescuentoTardanza))) : 0;
-          const refreshed = await dbQuery(
-            "UPDATE public.registros_asistencia SET estado_entrada = $2, minutos_retraso = $3, razon_tardanza = CASE WHEN $4 = true THEN razon_tardanza ELSE NULL END, descuento_aplicado = $4, porcentaje_descuento = $5, updated_at = clock_timestamp() WHERE id = $1 RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text",
-            [id, isLate ? "tarde" : "a_tiempo", isLate ? Math.max(0, actualMinutes - cutoffMinutes) : 0, isLate && percentage > 0, isLate ? percentage : 0],
-          );
-          normalizedRow = refreshed.rows[0] || normalizedRow;
-        }
-        await syncAttendanceDiscount(normalizedRow.id, normalizedRow.usuario_id, dateOnly(normalizedRow.fecha) || "", Boolean(normalizedRow.descuento_aplicado), number(normalizedRow.porcentaje_descuento));
+        const rule = normalizedRow.estado_entrada === "no_reportado" && actualMinutes == null
+          ? attendanceDiscountForTime(settings, null)
+          : attendanceDiscountForTime(settings, actualMinutes);
+        const appliesDiscount = rule.porcentaje > 0 && (rule.estado === "tarde" || rule.estado === "no_reportado");
+        const refreshed = await dbQuery(
+          "UPDATE public.registros_asistencia SET estado_entrada = $2, minutos_retraso = $3, razon_tardanza = CASE WHEN $4 = true THEN razon_tardanza ELSE NULL END, descuento_aplicado = $4, porcentaje_descuento = $5, updated_at = clock_timestamp() WHERE id = $1 RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text",
+          [id, rule.estado, rule.minutosRetraso, appliesDiscount, appliesDiscount ? rule.porcentaje : 0],
+        );
+        normalizedRow = refreshed.rows[0] || normalizedRow;
+        await syncAttendanceDiscount(normalizedRow.id, normalizedRow.usuario_id, dateOnly(normalizedRow.fecha) || "");
       }
       return mapArrival(normalizedRow);
     }
@@ -3441,19 +3493,11 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       const actualMinutes = timeMinutes(actual);
       const fecha = payload.fecha || new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
       const settings = await getConfig();
-      const cutoffMinutes = timeMinutes(settings.horaDescuentoAutomatico);
-      const configuredPercentage = Math.max(0, Math.min(100, number(settings.porcentajeDescuentoTardanza)));
-      // La tardanza se determina únicamente contra la hora de corte configurada.
-      // La hora programada sirve para mostrar el turno, pero no convierte una
-      // llegada a las 07:30 en tardanza si el corte está configurado a las 08:30.
-      const isLate = actualMinutes != null && cutoffMinutes != null && actualMinutes >= cutoffMinutes;
-      const delay = isLate && actualMinutes != null && cutoffMinutes != null
-        ? Math.max(0, actualMinutes - cutoffMinutes)
-        : 0;
-      const appliesDiscount = isLate && configuredPercentage > 0;
-      const discountPercentage = appliesDiscount ? configuredPercentage : 0;
-      const { rows } = await dbQuery(`INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,hora_entrada_real,estado_entrada,minutos_retraso,razon_tardanza,foto_llegada_url,ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp,ubicacion_llegada_direccion,descuento_aplicado,porcentaje_descuento) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (usuario_id,fecha) DO UPDATE SET hora_entrada_programada=EXCLUDED.hora_entrada_programada,hora_salida_programada=EXCLUDED.hora_salida_programada,hora_entrada_real=EXCLUDED.hora_entrada_real,estado_entrada=EXCLUDED.estado_entrada,minutos_retraso=EXCLUDED.minutos_retraso,razon_tardanza=EXCLUDED.razon_tardanza,foto_llegada_url=EXCLUDED.foto_llegada_url,ubicacion_llegada_precision_metros=EXCLUDED.ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp=EXCLUDED.ubicacion_llegada_timestamp,ubicacion_llegada_direccion=EXCLUDED.ubicacion_llegada_direccion,descuento_aplicado=EXCLUDED.descuento_aplicado,porcentaje_descuento=EXCLUDED.porcentaje_descuento,updated_at=clock_timestamp() RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text`, [user.id, fecha, scheduled, payload.horaSalidaProgramada || "", actual, isLate ? "tarde" : "a_tiempo", delay, isLate ? (payload.razonTardanza || null) : null, payload.fotoLlegadaUrl || null, payload.ubicacionLlegada?.accuracy || null, payload.ubicacionLlegada?.capturedAt || null, payload.ubicacionLlegada?.address || null, appliesDiscount, discountPercentage]);
-      await syncAttendanceDiscount(rows[0].id, user.id, fecha, appliesDiscount, discountPercentage);
+      const rule = attendanceDiscountForTime(settings, actualMinutes);
+      const appliesDiscount = rule.porcentaje > 0 && rule.estado === "tarde";
+      const discountPercentage = appliesDiscount ? rule.porcentaje : 0;
+      const { rows } = await dbQuery(`INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,hora_entrada_real,estado_entrada,minutos_retraso,razon_tardanza,foto_llegada_url,ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp,ubicacion_llegada_direccion,descuento_aplicado,porcentaje_descuento) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (usuario_id,fecha) DO UPDATE SET hora_entrada_programada=EXCLUDED.hora_entrada_programada,hora_salida_programada=EXCLUDED.hora_salida_programada,hora_entrada_real=EXCLUDED.hora_entrada_real,estado_entrada=EXCLUDED.estado_entrada,minutos_retraso=EXCLUDED.minutos_retraso,razon_tardanza=EXCLUDED.razon_tardanza,foto_llegada_url=EXCLUDED.foto_llegada_url,ubicacion_llegada_precision_metros=EXCLUDED.ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp=EXCLUDED.ubicacion_llegada_timestamp,ubicacion_llegada_direccion=EXCLUDED.ubicacion_llegada_direccion,descuento_aplicado=EXCLUDED.descuento_aplicado,porcentaje_descuento=EXCLUDED.porcentaje_descuento,updated_at=clock_timestamp() RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text`, [user.id, fecha, scheduled, payload.horaSalidaProgramada || "", actual, rule.estado, rule.minutosRetraso, rule.estado === "tarde" ? (payload.razonTardanza || null) : null, payload.fotoLlegadaUrl || null, payload.ubicacionLlegada?.accuracy || null, payload.ubicacionLlegada?.capturedAt || null, payload.ubicacionLlegada?.address || null, appliesDiscount, discountPercentage]);
+      await syncAttendanceDiscount(rows[0].id, user.id, fecha);
       return mapArrival(rows[0]);
     }
     case "arrivals.checkout": {
@@ -3575,13 +3619,13 @@ async function replaceGroupMembers(client: any, groupId: string, memberIds: stri
 }
 
 function configDefaults(): any {
-  return { nombre: "SOLUCIONES & AUTOMATIZACIONES S.A.S.", logo: "/logo.png", correoRemitente: "notificaciones@solucionesyautomatizaciones.com", correoEmpresa: "solucionesyautomatizaciones@hotmail.com", plantillaReportePDF: "default", porcentajeDescuentoTardanza: 0, diasDescuentoAutomatico: ["lunes", "martes", "miercoles", "jueves", "viernes"], horaDescuentoAutomatico: "", porcentajeExtraLider: 10, extraLiderActivo: true, costoRevisionLider: 0, costoVisitaTecnicaDefault: 0, costoRecorridoNormal: 0, costoRecorridoHerramienta: 0 };
+  return { nombre: "SOLUCIONES & AUTOMATIZACIONES S.A.S.", logo: "/logo.png", correoRemitente: "notificaciones@solucionesyautomatizaciones.com", correoEmpresa: "solucionesyautomatizaciones@hotmail.com", plantillaReportePDF: "default", porcentajeDescuentoTardanza: 5, horaInicioDescuentoTardanza: "08:05", diasDescuentoAutomatico: ["lunes", "martes", "miercoles", "jueves", "viernes"], horaDescuentoAutomatico: "08:30", porcentajeDescuentoNoReportado: 30, porcentajeExtraLider: 10, extraLiderActivo: true, costoRevisionLider: 0, costoVisitaTecnicaDefault: 0, costoRecorridoNormal: 0, costoRecorridoHerramienta: 0 };
 }
 
 function mapConfig(row: any): any {
   const defaults = configDefaults();
   const days = jsonArray(row.dias_descuento_automatico).map((day) => numberToDay[number(day)]).filter(Boolean);
-  return { ...defaults, nombre: row.nombre || defaults.nombre, logo: row.logo_url || defaults.logo, correoRemitente: row.correo_remitente || defaults.correoRemitente, correoEmpresa: row.correo_empresa || defaults.correoEmpresa, plantillaReportePDF: row.plantilla_reporte || defaults.plantillaReportePDF, porcentajeDescuentoTardanza: number(row.porcentaje_descuento_tardanza, defaults.porcentajeDescuentoTardanza), diasDescuentoAutomatico: days.length ? days : defaults.diasDescuentoAutomatico, horaDescuentoAutomatico: row.hora_descuento_automatico ? String(row.hora_descuento_automatico).slice(0, 5) : defaults.horaDescuentoAutomatico, porcentajeExtraLider: number(row.porcentaje_extra_lider, defaults.porcentajeExtraLider), extraLiderActivo: row.extra_lider_activo ?? defaults.extraLiderActivo, costoRevisionLider: number(row.costo_revision_lider), costoVisitaTecnicaDefault: number(row.costo_visita_tecnica_default), costoRecorridoNormal: number(row.costo_recorrido_normal), costoRecorridoHerramienta: number(row.costo_recorrido_herramienta) };
+  return { ...defaults, nombre: row.nombre || defaults.nombre, logo: row.logo_url || defaults.logo, correoRemitente: row.correo_remitente || defaults.correoRemitente, correoEmpresa: row.correo_empresa || defaults.correoEmpresa, plantillaReportePDF: row.plantilla_reporte || defaults.plantillaReportePDF, porcentajeDescuentoTardanza: percentage(row.porcentaje_descuento_tardanza, defaults.porcentajeDescuentoTardanza), horaInicioDescuentoTardanza: row.hora_inicio_descuento_tardanza ? String(row.hora_inicio_descuento_tardanza).slice(0, 5) : defaults.horaInicioDescuentoTardanza, diasDescuentoAutomatico: days.length ? days : defaults.diasDescuentoAutomatico, horaDescuentoAutomatico: row.hora_descuento_automatico ? String(row.hora_descuento_automatico).slice(0, 5) : defaults.horaDescuentoAutomatico, porcentajeDescuentoNoReportado: percentage(row.porcentaje_descuento_no_reportado, defaults.porcentajeDescuentoNoReportado), porcentajeExtraLider: number(row.porcentaje_extra_lider, defaults.porcentajeExtraLider), extraLiderActivo: row.extra_lider_activo ?? defaults.extraLiderActivo, costoRevisionLider: number(row.costo_revision_lider), costoVisitaTecnicaDefault: number(row.costo_visita_tecnica_default), costoRecorridoNormal: number(row.costo_recorrido_normal), costoRecorridoHerramienta: number(row.costo_recorrido_herramienta) };
 }
 
 async function getConfig() { const { rows } = await dbQuery("SELECT * FROM public.configuracion_empresa WHERE id = 1"); return rows[0] ? mapConfig(rows[0]) : configDefaults(); }
@@ -3629,10 +3673,15 @@ async function updateConfig(payload: Payload) {
   const current = await getConfig();
   const settings = { ...current, ...payload };
   const days = jsonArray(settings.diasDescuentoAutomatico).map((day) => dayToNumber[String(day)]).filter(Boolean);
+  const lateStart = String(settings.horaInicioDescuentoTardanza || "").slice(0, 5);
   const cutoff = String(settings.horaDescuentoAutomatico || "").slice(0, 5);
+  const lateStartMinutes = timeMinutes(lateStart);
+  const cutoffMinutes = timeMinutes(cutoff);
+  if (lateStartMinutes == null) throw new Error("Debes configurar una hora válida para iniciar la tardanza reportada.");
   if (timeMinutes(cutoff) == null) throw new Error("Debes configurar una hora de corte válida para los descuentos automáticos.");
-  const values = [settings.nombre, settings.logo || null, settings.correoRemitente, settings.correoEmpresa || null, settings.plantillaReportePDF || "default", settings.porcentajeDescuentoTardanza, days.length ? days : [1, 2, 3, 4, 5], cutoff, settings.porcentajeExtraLider, settings.extraLiderActivo, settings.costoRevisionLider, settings.costoVisitaTecnicaDefault, settings.costoRecorridoNormal, settings.costoRecorridoHerramienta];
-  const { rows } = await dbQuery(`INSERT INTO public.configuracion_empresa (id,nombre,logo_url,correo_remitente,correo_empresa,plantilla_reporte,dias_descuento_automatico, hora_descuento_automatico, porcentaje_descuento_tardanza, porcentaje_extra_lider, extra_lider_activo, costo_revision_lider, costo_visita_tecnica_default, costo_recorrido_normal, costo_recorrido_herramienta) VALUES (1,$1,$2,$3,$4,$5,$7,$8,$6,$9,$10,$11,$12,$13,$14) ON CONFLICT (id) DO UPDATE SET nombre=EXCLUDED.nombre, logo_url=EXCLUDED.logo_url, correo_remitente=EXCLUDED.correo_remitente, correo_empresa=EXCLUDED.correo_empresa, plantilla_reporte=EXCLUDED.plantilla_reporte, dias_descuento_automatico=EXCLUDED.dias_descuento_automatico, hora_descuento_automatico=EXCLUDED.hora_descuento_automatico, porcentaje_descuento_tardanza=EXCLUDED.porcentaje_descuento_tardanza, porcentaje_extra_lider=EXCLUDED.porcentaje_extra_lider, extra_lider_activo=EXCLUDED.extra_lider_activo, costo_revision_lider=EXCLUDED.costo_revision_lider, costo_visita_tecnica_default=EXCLUDED.costo_visita_tecnica_default, costo_recorrido_normal=EXCLUDED.costo_recorrido_normal, costo_recorrido_herramienta=EXCLUDED.costo_recorrido_herramienta, updated_at=clock_timestamp() RETURNING *`, values);
+  if (lateStartMinutes >= (cutoffMinutes as number)) throw new Error("La hora de inicio de tardanza debe ser anterior a la hora de no reporte.");
+  const values = [settings.nombre, settings.logo || null, settings.correoRemitente, settings.correoEmpresa || null, settings.plantillaReportePDF || "default", percentage(settings.porcentajeDescuentoTardanza), lateStart, days.length ? days : [1, 2, 3, 4, 5], cutoff, percentage(settings.porcentajeDescuentoNoReportado, 30), settings.porcentajeExtraLider, settings.extraLiderActivo, settings.costoRevisionLider, settings.costoVisitaTecnicaDefault, settings.costoRecorridoNormal, settings.costoRecorridoHerramienta];
+  const { rows } = await dbQuery(`INSERT INTO public.configuracion_empresa (id,nombre,logo_url,correo_remitente,correo_empresa,plantilla_reporte,hora_inicio_descuento_tardanza,porcentaje_descuento_tardanza,dias_descuento_automatico,hora_descuento_automatico,porcentaje_descuento_no_reportado,porcentaje_extra_lider,extra_lider_activo,costo_revision_lider,costo_visita_tecnica_default,costo_recorrido_normal,costo_recorrido_herramienta) VALUES (1,$1,$2,$3,$4,$5,$7,$6,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT (id) DO UPDATE SET nombre=EXCLUDED.nombre, logo_url=EXCLUDED.logo_url, correo_remitente=EXCLUDED.correo_remitente, correo_empresa=EXCLUDED.correo_empresa, plantilla_reporte=EXCLUDED.plantilla_reporte, hora_inicio_descuento_tardanza=EXCLUDED.hora_inicio_descuento_tardanza, porcentaje_descuento_tardanza=EXCLUDED.porcentaje_descuento_tardanza, dias_descuento_automatico=EXCLUDED.dias_descuento_automatico, hora_descuento_automatico=EXCLUDED.hora_descuento_automatico, porcentaje_descuento_no_reportado=EXCLUDED.porcentaje_descuento_no_reportado, porcentaje_extra_lider=EXCLUDED.porcentaje_extra_lider, extra_lider_activo=EXCLUDED.extra_lider_activo, costo_revision_lider=EXCLUDED.costo_revision_lider, costo_visita_tecnica_default=EXCLUDED.costo_visita_tecnica_default, costo_recorrido_normal=EXCLUDED.costo_recorrido_normal, costo_recorrido_herramienta=EXCLUDED.costo_recorrido_herramienta, updated_at=clock_timestamp() RETURNING *`, values);
   return mapConfig(rows[0]);
 }
 
@@ -5100,7 +5149,7 @@ function mapArrival(row: any): any {
   };
 }
 
-async function syncAttendanceDiscount(attendanceId: string, technicianId: string, fecha: string, applies: boolean, percentage: number) {
+async function syncAttendanceDiscount(attendanceId: string, technicianId: string, fecha: string) {
   const { rows: periodRows } = await dbQuery(
     "SELECT id, estado FROM public.periodos_liquidacion WHERE fecha_inicio <= $1::date AND fecha_fin >= $1::date ORDER BY fecha_inicio DESC LIMIT 1",
     [fecha],
@@ -5108,9 +5157,28 @@ async function syncAttendanceDiscount(attendanceId: string, technicianId: string
   const periodId = periodRows[0]?.id;
   if (!periodId || periodRows[0]?.estado === "cerrado") return;
 
-  const normalizedPercentage = Math.max(0, Math.min(100, number(percentage)));
-  if (!applies || normalizedPercentage <= 0) {
-    await dbQuery("DELETE FROM public.asistencia_descuentos WHERE asistencia_id = $1 AND periodo_id = $2", [attendanceId, periodId]);
+  // El descuento es una regla del período: una llegada puntual no puede
+  // borrar una tardanza previa y un 5% no puede reemplazar un 30% ya ganado.
+  // Recalcular desde todas las asistencias también cubre cambios hechos por
+  // el administrador y evita aplicar descuentos acumulativos.
+  const { rows: attendanceRows } = await dbQuery(
+    `SELECT id, descuento_aplicado, porcentaje_descuento
+       FROM public.registros_asistencia
+      WHERE usuario_id = $1 AND fecha BETWEEN (
+        SELECT fecha_inicio FROM public.periodos_liquidacion WHERE id = $2
+      ) AND (
+        SELECT fecha_fin FROM public.periodos_liquidacion WHERE id = $2
+      )`,
+    [technicianId, periodId],
+  );
+  const normalizedPercentage = Math.max(
+    0,
+    ...attendanceRows
+      .filter((row) => Boolean(row.descuento_aplicado))
+      .map((row) => percentage(row.porcentaje_descuento)),
+  );
+  if (normalizedPercentage <= 0) {
+    await dbQuery("DELETE FROM public.asistencia_descuentos WHERE periodo_id = $1 AND tecnico_id = $2", [periodId, technicianId]);
     await dbQuery(
       "UPDATE public.liquidacion_items SET valor_ganado = valor_ganado_original, descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp() WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND porcentaje_descuento_tardanza > 0 AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')",
       [technicianId, periodId],
@@ -5143,6 +5211,10 @@ async function syncAttendanceDiscount(attendanceId: string, technicianId: string
     [technicianId, periodId],
   );
   await dbQuery(
+    "DELETE FROM public.asistencia_descuentos WHERE periodo_id = $1 AND tecnico_id = $2 AND asistencia_id <> $3",
+    [periodId, technicianId, attendanceId],
+  );
+  await dbQuery(
     `INSERT INTO public.asistencia_descuentos (asistencia_id, periodo_id, tecnico_id, porcentaje, valor)
      VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (asistencia_id, periodo_id) DO UPDATE SET porcentaje = EXCLUDED.porcentaje, valor = EXCLUDED.valor, aplicado_en = clock_timestamp()`,
@@ -5167,8 +5239,6 @@ async function syncActivityAttendanceDiscounts(activityId: string) {
       row.asistencia_id,
       row.tecnico_id,
       dateOnly(row.fecha_operacion) || "",
-      Boolean(row.descuento_aplicado),
-      number(row.porcentaje_descuento),
     );
   }
 }
@@ -5183,7 +5253,10 @@ async function ensureArrivals(payload: Payload) {
   if (cutoffMinutes == null) return 0;
   const clock = bogotaClock();
   if (fecha === clock.date && clock.minutes < cutoffMinutes) return 0;
-  const discountPercentage = number(payload.porcentajeDescuento, number(settings.porcentajeDescuentoTardanza));
+  const discountPercentage = percentage(
+    payload.porcentajeNoReportado,
+    percentage(settings.porcentajeDescuentoNoReportado, 30),
+  );
   const automaticDays = jsonArray(payload.automaticDays)
     .map((item) => typeof item === "number" ? item : dayToNumber[String(item || "").toLowerCase()])
     .filter((item) => item >= 1 && item <= 7);
@@ -5197,9 +5270,9 @@ async function ensureArrivals(payload: Payload) {
       return entry.activo && scheduleDay === currentDay && entry.horaEntrada && entry.horaSalida;
     });
     if (!schedule) continue;
-    const result = await dbQuery("INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,estado_entrada,estado_salida,razon_tardanza,descuento_aplicado,porcentaje_descuento) VALUES ($1,$2,$3,$4,'no_reportado','no_reportado',$5,$6,$7) ON CONFLICT (usuario_id,fecha) DO NOTHING RETURNING id", [item.id, fecha, schedule.horaEntrada, schedule.horaSalida, `[AUTO ${cutoff}] No registró la entrada antes del corte configurado.`, discountPercentage > 0, discountPercentage]);
+    const result = await dbQuery("INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,estado_entrada,estado_salida,razon_tardanza,descuento_aplicado,porcentaje_descuento) VALUES ($1,$2,$3,$4,'no_reportado','no_reportado',$5,$6,$7) ON CONFLICT (usuario_id,fecha) DO UPDATE SET razon_tardanza = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.razon_tardanza ELSE registros_asistencia.razon_tardanza END, descuento_aplicado = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.descuento_aplicado ELSE registros_asistencia.descuento_aplicado END, porcentaje_descuento = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.porcentaje_descuento ELSE registros_asistencia.porcentaje_descuento END, updated_at = clock_timestamp() WHERE registros_asistencia.estado_entrada = 'no_reportado' RETURNING id", [item.id, fecha, schedule.horaEntrada, schedule.horaSalida, `[AUTO ${cutoff}] No registró la entrada antes del corte configurado.`, discountPercentage > 0, discountPercentage]);
     if (result.rows[0]) {
-      await syncAttendanceDiscount(result.rows[0].id, item.id, fecha, discountPercentage > 0, discountPercentage);
+      await syncAttendanceDiscount(result.rows[0].id, item.id, fecha);
       changed += 1;
     }
   }

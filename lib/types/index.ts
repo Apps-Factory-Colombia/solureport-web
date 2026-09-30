@@ -169,8 +169,10 @@ export interface CompanySettings {
   correoEmpresa: string;
   plantillaReportePDF: string;
   porcentajeDescuentoTardanza: number;
+  horaInicioDescuentoTardanza?: string;
   diasDescuentoAutomatico?: ScheduleDay[];
   horaDescuentoAutomatico?: string;
+  porcentajeDescuentoNoReportado?: number;
   porcentajeExtraLider: number;
   extraLiderActivo: boolean;
   costoRevisionLider: number;
