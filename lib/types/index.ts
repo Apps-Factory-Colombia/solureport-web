@@ -300,6 +300,7 @@ export interface AttendanceMemoEvent {
 export interface AttendanceMemo {
   id: string;
   usuarioId?: string;
+  usuarioNombre?: string;
   periodoId?: string;
   numero: string;
   tipo: string;

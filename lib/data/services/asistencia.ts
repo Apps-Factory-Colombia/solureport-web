@@ -27,8 +27,16 @@ export interface AttendanceHistoryResponse {
   fechaInicio: string;
   fechaFin: string;
   total: number;
+  page: number;
+  pageSize: number;
   records: AttendanceDayResponse["records"];
-  summary: AttendanceDaySummary;
+}
+
+export interface AttendanceMemosResponse {
+  items: AttendanceMemo[];
+  total: number;
+  page: number;
+  pageSize: number;
 }
 
 export async function getAttendanceDay(fecha: string, filters: Record<string, unknown> = {}) {
@@ -43,12 +51,12 @@ export async function getAttendanceHistory(
   return dataRequest<AttendanceHistoryResponse>("attendance.history", { fechaInicio, fechaFin, ...filters });
 }
 
-export async function getAttendanceFortnightly(mes: string, quincena: "primera" | "segunda") {
-  return dataRequest<AttendanceFortnightlyReport>("attendance.fortnightly", { mes, quincena });
+export async function getAttendanceFortnightly(mes: string, quincena: "primera" | "segunda", filters: Record<string, unknown> = {}) {
+  return dataRequest<AttendanceFortnightlyReport>("attendance.fortnightly", { mes, quincena, ...filters });
 }
 
 export async function getAttendanceMemos(filters: Record<string, unknown> = {}) {
-  return dataRequest<AttendanceMemo[]>("attendance.memos", filters);
+  return dataRequest<AttendanceMemosResponse>("attendance.memos", filters);
 }
 
 export async function createAttendanceMemo(payload: {

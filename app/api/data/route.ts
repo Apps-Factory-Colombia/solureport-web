@@ -136,18 +136,14 @@ function percentage(value: unknown, fallback = 0) {
   return Math.max(0, Math.min(100, number(value, fallback)));
 }
 
-function attendanceThresholds(settings: any, scheduledMinutes: number | null) {
-  const graceMinutes = Math.max(0, Math.floor(number(settings.minutosGraciaTardanza, 5)));
-  const noReportMinutes = Math.max(graceMinutes + 1, Math.floor(number(settings.minutosCorteNoReportado, 30)));
+function attendanceThresholds(settings: any) {
   const configuredLateStart = timeMinutes(settings.horaInicioDescuentoTardanza);
   const configuredCutoff = timeMinutes(settings.horaDescuentoAutomatico);
-  const lateStartMinutes = scheduledMinutes == null ? configuredLateStart : scheduledMinutes + graceMinutes;
-  const noReportCutoffMinutes = scheduledMinutes == null ? configuredCutoff : scheduledMinutes + noReportMinutes;
-  return { lateStartMinutes, noReportCutoffMinutes };
+  return { lateStartMinutes: configuredLateStart, noReportCutoffMinutes: configuredCutoff };
 }
 
 function attendanceDiscountForTime(settings: any, actualMinutes: number | null, scheduledMinutes: number | null) {
-  const { lateStartMinutes, noReportCutoffMinutes } = attendanceThresholds(settings, scheduledMinutes);
+  const { lateStartMinutes, noReportCutoffMinutes } = attendanceThresholds(settings);
   const latePercentage = percentage(settings.porcentajeDescuentoTardanza);
   const noReportPercentage = percentage(settings.porcentajeDescuentoNoReportado, 30);
   const reposicionPercentage = percentage(settings.porcentajeDescuentoReposicion, 0);
@@ -2852,13 +2848,24 @@ async function attendanceRows(start: string, end: string, payload: Payload = {})
   }
   if (payload.search) {
     values.push(`%${String(payload.search).trim()}%`);
-    conditions.push(`(u.nombre || ' ' || u.apellido) ILIKE $${values.length}`);
+    conditions.push(`((u.nombre || ' ' || u.apellido) ILIKE $${values.length}
+      OR COALESCE(r.razon_tardanza, '') ILIKE $${values.length}
+      OR COALESCE(r.categoria_llegada, '') ILIKE $${values.length}
+      OR COALESCE(to_char(r.hora_entrada_real, 'HH24:MI'), '') ILIKE $${values.length})`);
   }
   const limit = Math.min(2000, Math.max(1, Number(payload.limit) || 500));
   const offset = Math.max(0, Number(payload.offset) || 0);
   values.push(limit, offset);
+  const compactColumns = payload.compact === true
+    ? `r.id, r.usuario_id, r.fecha, r.hora_entrada_programada, r.hora_entrada_real,
+       r.hora_salida_programada, r.hora_salida_real, r.estado_entrada, r.estado_salida,
+       r.minutos_retraso, r.minutos_adeudados, r.categoria_llegada, r.regla_id,
+       r.regla_version, r.porcentaje_regla_aplicada, r.tipo_descuento, r.calculado_en,
+       r.motivo_ajuste, r.ajustado_por_id, r.ajustado_en, r.razon_tardanza,
+       r.descuento_aplicado, r.porcentaje_descuento, r.created_at`
+    : "r.*";
   const { rows } = await dbQuery(
-    `SELECT r.*,
+    `SELECT ${compactColumns},
             left(r.hora_entrada_programada::text, 5) AS hora_esperada,
             left(r.hora_entrada_real::text, 5) AS hora_llegada,
             left(r.hora_salida_programada::text, 5) AS hora_salida_programada_text,
@@ -2979,9 +2986,12 @@ async function attendanceDay(payload: Payload, user: UserContext) {
   await requireAdmin(user);
   const fecha = attendanceDate(payload.fecha);
   if (fecha === bogotaClock().date) {
-    const users = (await userRows()).map(mapUser);
     const settings = await getConfig();
-    await ensureArrivals({ users, fecha, porcentajeNoReportado: settings.porcentajeDescuentoNoReportado, automaticDays: settings.diasDescuentoAutomatico });
+    const { noReportCutoffMinutes } = attendanceThresholds(settings);
+    if (noReportCutoffMinutes != null && bogotaClock().minutes >= noReportCutoffMinutes) {
+      const users = (await userRows()).map(mapUser);
+      await ensureArrivals({ users, fecha, porcentajeNoReportado: settings.porcentajeDescuentoNoReportado, automaticDays: settings.diasDescuentoAutomatico }, settings);
+    }
   }
   const rows = await attendanceRows(fecha, fecha, payload);
   const periodRow = rows.find((row) => row.periodo_id);
@@ -2995,14 +3005,33 @@ async function attendanceHistory(payload: Payload, user: UserContext) {
   await requireAdmin(user);
   const start = attendanceDate(payload.fechaInicio, bogotaClock().date);
   const end = attendanceDate(payload.fechaFin, start);
-  const rows = await attendanceRows(start, end, payload);
-  return { fechaInicio: start, fechaFin: end, total: rows.length, records: rows.map(mapAttendanceRow), summary: attendanceSummary(rows) };
+  if (start > end) throw new Error("El rango de asistencia es inválido.");
+  const values: unknown[] = [start, end];
+  const conditions = ["r.fecha BETWEEN $1 AND $2"];
+  if (payload.usuarioId) { values.push(payload.usuarioId); conditions.push(`r.usuario_id = $${values.length}`); }
+  if (payload.estado && payload.estado !== "todos") { values.push(payload.estado); conditions.push(`r.estado_entrada = $${values.length}`); }
+  if (payload.search && String(payload.search).trim()) {
+    values.push(`%${String(payload.search).trim()}%`);
+    conditions.push(`((u.nombre || ' ' || u.apellido) ILIKE $${values.length}
+      OR COALESCE(r.razon_tardanza, '') ILIKE $${values.length}
+      OR COALESCE(r.categoria_llegada, '') ILIKE $${values.length}
+      OR COALESCE(to_char(r.hora_entrada_real, 'HH24:MI'), '') ILIKE $${values.length})`);
+  }
+  const { rows: countRows } = await dbQuery(
+    `SELECT COUNT(*)::int AS total FROM public.registros_asistencia r
+       JOIN public.usuarios u ON u.id = r.usuario_id WHERE ${conditions.join(" AND ")}`,
+    values,
+  );
+  const page = Math.max(1, Math.floor(number(payload.page, 1)));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(number(payload.pageSize, 20))));
+  const rows = await attendanceRows(start, end, { ...payload, limit: pageSize, offset: (page - 1) * pageSize });
+  return { fechaInicio: start, fechaFin: end, total: number(countRows[0]?.total), page, pageSize, records: rows.map(mapAttendanceRow) };
 }
 
 async function attendanceFortnightly(payload: Payload, user: UserContext) {
   await requireAdmin(user);
   const range = attendanceRange(payload);
-  const rows = await attendanceRows(range.start, range.end, { ...payload, limit: 2000, offset: 0 });
+  const rows = await attendanceRows(range.start, range.end, { ...payload, compact: true, limit: 2000, offset: 0 });
   const groups = new Map<string, any>();
   for (const row of rows) {
     const current = groups.get(row.usuario_id) || { usuarioId: row.usuario_id, nombre: [row.usuario_nombre, row.usuario_apellido].filter(Boolean).join(" "), registros: [] };
@@ -3016,7 +3045,7 @@ async function attendanceFortnightly(payload: Payload, user: UserContext) {
     tardanzasLeves: group.registros.filter((row: any) => row.categoriaLlegada === "tardanza_leve").length,
     tardanzasMayores: group.registros.filter((row: any) => row.categoriaLlegada === "tardanza_mayor").length,
     noReportados: group.registros.filter((row: any) => row.categoriaLlegada === "no_reportado").length,
-    porcentajeDescuento: group.registros.reduce((sum: number, row: any) => sum + number(row.porcentajeDescuento), 0),
+    porcentajeDescuento: Math.min(100, group.registros.reduce((sum: number, row: any) => sum + number(row.porcentajeDescuento), 0)),
   })).sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
   const summary = {
     eventos: rows.length,
@@ -3025,7 +3054,7 @@ async function attendanceFortnightly(payload: Payload, user: UserContext) {
     tardanzasLeves: rows.filter((row) => row.categoria_llegada === "tardanza_leve").length,
     tardanzasMayores: rows.filter((row) => row.categoria_llegada === "tardanza_mayor").length,
     noReportados: rows.filter((row) => row.categoria_llegada === "no_reportado").length,
-    descuentoTotal: rows.reduce((sum, row) => sum + number(row.porcentaje_descuento), 0),
+    descuentoTotal: trabajadores.reduce((sum, worker) => sum + worker.porcentajeDescuento, 0),
   };
   const period = rows.find((row) => row.periodo_id);
   return { fechaInicio: range.start, fechaFin: range.end, periodoId: period?.periodo_id || undefined, generatedAt: new Date().toISOString(), summary, trabajadores };
@@ -3038,13 +3067,33 @@ async function attendanceMemos(payload: Payload, user: UserContext) {
   if (payload.usuarioId) { values.push(payload.usuarioId); conditions.push(`m.usuario_id = $${values.length}`); }
   if (payload.periodoId) { values.push(payload.periodoId); conditions.push(`m.periodo_id = $${values.length}`); }
   if (payload.estado && payload.estado !== "todos") { values.push(payload.estado); conditions.push(`m.estado = $${values.length}`); }
-  const { rows } = await dbQuery(`SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido FROM public.asistencia_memorandos m LEFT JOIN public.usuarios u ON u.id = m.usuario_id ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY m.generado_en DESC`, values);
-  const result = [];
-  for (const row of rows) {
-    const eventResult = await dbQuery("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = $1 ORDER BY orden, fecha_snapshot", [row.id]);
-    result.push(mapMemo(row, eventResult.rows));
+  if (payload.search && String(payload.search).trim()) {
+    values.push(`%${String(payload.search).trim()}%`);
+    conditions.push(`(m.numero ILIKE $${values.length} OR m.titulo ILIKE $${values.length} OR (u.nombre || ' ' || u.apellido) ILIKE $${values.length})`);
   }
-  return result;
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const { rows: countRows } = await dbQuery(
+    `SELECT COUNT(*)::int AS total FROM public.asistencia_memorandos m
+       LEFT JOIN public.usuarios u ON u.id = m.usuario_id ${where}`,
+    values,
+  );
+  const page = Math.max(1, Math.floor(number(payload.page, 1)));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(number(payload.pageSize, 20))));
+  const pageValues = [...values, pageSize, (page - 1) * pageSize];
+  const { rows } = await dbQuery(
+    `SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido
+       FROM public.asistencia_memorandos m
+       LEFT JOIN public.usuarios u ON u.id = m.usuario_id ${where}
+      ORDER BY m.generado_en DESC LIMIT $${pageValues.length - 1} OFFSET $${pageValues.length}`,
+    pageValues,
+  );
+  const ids = rows.map((row) => row.id);
+  const { rows: eventRows } = ids.length
+    ? await dbQuery("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = ANY($1::uuid[]) ORDER BY memorando_id, orden, fecha_snapshot", [ids])
+    : { rows: [] };
+  const eventsByMemo = new Map<string, any[]>();
+  for (const event of eventRows) eventsByMemo.set(event.memorando_id, [...(eventsByMemo.get(event.memorando_id) || []), event]);
+  return { items: rows.map((row) => mapMemo(row, eventsByMemo.get(row.id) || [])), total: number(countRows[0]?.total), page, pageSize };
 }
 
 async function createAttendanceMemo(payload: Payload, user: UserContext) {
@@ -3069,11 +3118,10 @@ async function createAttendanceMemo(payload: Payload, user: UserContext) {
     const { rows: sequenceRows } = await client.query("SELECT COUNT(*)::int AS total FROM public.asistencia_memorandos");
     const year = new Date().getFullYear();
     const numero = `MEMO-${year}-${String(number(sequenceRows[0]?.total) + 1).padStart(3, "0")}`;
-    const settings = await getConfig();
     const displayName = [events[0].usuario_nombre, events[0].usuario_apellido].filter(Boolean).join(" ");
     const title = String(payload.titulo || `Llamado de atención por ${tipo.replaceAll("_", " ")}`);
     const narrative = String(payload.narrativa || `Se deja constancia de las incidencias de asistencia registradas para ${displayName} durante el período seleccionado.`);
-    const memoResult = await client.query(`INSERT INTO public.asistencia_memorandos (usuario_id,periodo_id,numero,tipo,estado,titulo,narrativa,fundamento,regimen_sancionatorio,plantilla_version,generado_por_id) VALUES ($1,$2,$3,$4,'generado',$5,$6,$7,$8,'asistencia-v1',$9) RETURNING *`, [usuarioId, periodId, numero, tipo, title, narrative, settings.fundamentoAsistencia, settings.regimenSancionatorioAsistencia, user.id]);
+    const memoResult = await client.query(`INSERT INTO public.asistencia_memorandos (usuario_id,periodo_id,numero,tipo,estado,titulo,narrativa,fundamento,regimen_sancionatorio,plantilla_version,generado_por_id) VALUES ($1,$2,$3,$4,'generado',$5,$6,NULL,NULL,'asistencia-v2',$7) RETURNING *`, [usuarioId, periodId, numero, tipo, title, narrative, user.id]);
     for (const [index, event] of events.entries()) {
       await client.query(`INSERT INTO public.asistencia_memorando_eventos (memorando_id,asistencia_id,orden,fecha_snapshot,hora_programada_snapshot,hora_llegada_snapshot,minutos_snapshot,minutos_adeudados_snapshot,estado_snapshot,categoria_snapshot,porcentaje_snapshot,foto_url_snapshot,ubicacion_snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (memorando_id,asistencia_id) DO NOTHING`, [memoResult.rows[0].id, event.id, index, event.fecha, event.hora_entrada_programada, event.hora_entrada_real, number(event.minutos_retraso), number(event.minutos_adeudados ?? event.minutos_retraso), event.estado_entrada, event.categoria_llegada, number(event.porcentaje_descuento), event.foto_llegada_url, event.ubicacion_llegada_direccion]);
     }
@@ -3918,7 +3966,7 @@ async function replaceGroupMembers(client: any, groupId: string, memberIds: stri
 }
 
 function configDefaults(): any {
-  return { nombre: "SOLUCIONES & AUTOMATIZACIONES S.A.S.", logo: "/logo.png", correoRemitente: "notificaciones@solucionesyautomatizaciones.com", correoEmpresa: "solucionesyautomatizaciones@hotmail.com", plantillaReportePDF: "default", porcentajeDescuentoTardanza: 5, horaInicioDescuentoTardanza: "08:05", diasDescuentoAutomatico: ["lunes", "martes", "miercoles", "jueves", "viernes"], horaDescuentoAutomatico: "08:30", porcentajeDescuentoNoReportado: 30, minutosGraciaTardanza: 5, minutosCorteNoReportado: 30, minutosNoReportado: 30, porcentajeDescuentoReposicion: 0, memorandoAsistenciaAutomatico: true, fundamentoAsistencia: "El trabajador debe iniciar sus labores en el horario acordado y registrar oportunamente su ingreso.", regimenSancionatorioAsistencia: "Texto sujeto a aprobación de la empresa.", porcentajeExtraLider: 10, extraLiderActivo: true, costoRevisionLider: 0, costoVisitaTecnicaDefault: 0, costoRecorridoNormal: 0, costoRecorridoHerramienta: 0 };
+  return { nombre: "SOLUCIONES & AUTOMATIZACIONES S.A.S.", logo: "/logo.png", correoRemitente: "notificaciones@solucionesyautomatizaciones.com", correoEmpresa: "solucionesyautomatizaciones@hotmail.com", plantillaReportePDF: "default", porcentajeDescuentoTardanza: 5, horaInicioDescuentoTardanza: "08:05", diasDescuentoAutomatico: ["lunes", "martes", "miercoles", "jueves", "viernes"], horaDescuentoAutomatico: "08:30", porcentajeDescuentoNoReportado: 30, minutosGraciaTardanza: 5, minutosCorteNoReportado: 30, minutosNoReportado: 30, porcentajeDescuentoReposicion: 0, memorandoAsistenciaAutomatico: true, fundamentoAsistencia: "", regimenSancionatorioAsistencia: "", porcentajeExtraLider: 10, extraLiderActivo: true, costoRevisionLider: 0, costoVisitaTecnicaDefault: 0, costoRecorridoNormal: 0, costoRecorridoHerramienta: 0 };
 }
 
 function mapConfig(row: any): any {
@@ -5557,11 +5605,11 @@ async function syncActivityAttendanceDiscounts(activityId: string) {
   }
 }
 
-async function ensureArrivals(payload: Payload) {
+async function ensureArrivals(payload: Payload, configuredSettings?: any) {
   const users = jsonArray(payload.users).filter((item) => item.estado === "activo" && item.rol !== "admin");
   const fecha = payload.fecha || new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
   const currentDay = new Date(`${fecha}T12:00:00-05:00`).getUTCDay() || 7;
-  const settings = await getConfig();
+  const settings = configuredSettings || await getConfig();
   const clock = bogotaClock();
   const discountPercentage = percentage(
     payload.porcentajeNoReportado,
@@ -5571,27 +5619,57 @@ async function ensureArrivals(payload: Payload) {
     .map((item) => typeof item === "number" ? item : dayToNumber[String(item || "").toLowerCase()])
     .filter((item) => item >= 1 && item <= 7);
   if (automaticDays.length > 0 && !automaticDays.includes(currentDay)) return 0;
-  let changed = 0;
-  for (const item of users) {
+  const { noReportCutoffMinutes } = attendanceThresholds(settings);
+  if (noReportCutoffMinutes == null || (fecha === clock.date && clock.minutes < noReportCutoffMinutes)) return 0;
+  const cutoffLabel = `${String(Math.floor(noReportCutoffMinutes / 60)).padStart(2, "0")}:${String(noReportCutoffMinutes % 60).padStart(2, "0")}`;
+  const targets = users.flatMap((item) => {
     const schedule = item.horarios?.find((entry: any) => {
       const scheduleDay = typeof entry.diaSemana === "number"
         ? entry.diaSemana
         : dayToNumber[String(entry.diaSemana || "").toLowerCase()];
       return entry.activo && scheduleDay === currentDay && entry.horaEntrada && entry.horaSalida;
     });
-    if (!schedule) continue;
-    const scheduledMinutes = timeMinutes(String(schedule.horaEntrada || ""));
-    const { noReportCutoffMinutes } = attendanceThresholds(settings, scheduledMinutes);
-    if (noReportCutoffMinutes == null) continue;
-    if (fecha === clock.date && clock.minutes < noReportCutoffMinutes) continue;
-    const cutoffLabel = `${String(Math.floor(noReportCutoffMinutes / 60)).padStart(2, "0")}:${String(noReportCutoffMinutes % 60).padStart(2, "0")}`;
-    const result = await dbQuery("INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,estado_entrada,estado_salida,minutos_retraso,minutos_adeudados,categoria_llegada,razon_tardanza,descuento_aplicado,porcentaje_descuento,porcentaje_regla_aplicada,tipo_descuento,regla_version,calculado_en) VALUES ($1,$2,$3,$4,'no_reportado','no_reportado',0,$5,'no_reportado',$6,$7,$8,$8,'no_reportado','attendance-v3',clock_timestamp()) ON CONFLICT (usuario_id,fecha) DO UPDATE SET razon_tardanza = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.razon_tardanza ELSE registros_asistencia.razon_tardanza END, minutos_adeudados = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.minutos_adeudados ELSE registros_asistencia.minutos_adeudados END, categoria_llegada = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.categoria_llegada ELSE registros_asistencia.categoria_llegada END, descuento_aplicado = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.descuento_aplicado ELSE registros_asistencia.descuento_aplicado END, porcentaje_descuento = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.porcentaje_descuento ELSE registros_asistencia.porcentaje_descuento END, porcentaje_regla_aplicada = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.porcentaje_regla_aplicada ELSE registros_asistencia.porcentaje_regla_aplicada END, updated_at = clock_timestamp() WHERE registros_asistencia.estado_entrada = 'no_reportado' RETURNING id", [item.id, fecha, schedule.horaEntrada, schedule.horaSalida, Math.max(0, Math.floor(number(settings.minutosNoReportado, 30))), `[AUTO ${cutoffLabel}] No registró la entrada antes del corte configurado.`, discountPercentage > 0, discountPercentage]);
-    if (result.rows[0]) {
-      await syncAttendanceDiscount(result.rows[0].id, item.id, fecha);
-      changed += 1;
-    }
-  }
-  return changed;
+    return schedule ? [{ usuario_id: item.id, hora_entrada_programada: schedule.horaEntrada, hora_salida_programada: schedule.horaSalida }] : [];
+  });
+  if (!targets.length) return 0;
+
+  const { rows: changedRows } = await dbQuery(
+    `INSERT INTO public.registros_asistencia
+       (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,estado_entrada,estado_salida,
+        minutos_retraso,minutos_adeudados,categoria_llegada,razon_tardanza,descuento_aplicado,
+        porcentaje_descuento,porcentaje_regla_aplicada,tipo_descuento,regla_version,calculado_en)
+     SELECT t.usuario_id,$2,t.hora_entrada_programada,t.hora_salida_programada,
+            'no_reportado','no_reportado',0,$3,'no_reportado',$4,$5,$6,$6,
+            'no_reportado','attendance-v4-clock',clock_timestamp()
+       FROM jsonb_to_recordset($1::jsonb) AS t(usuario_id uuid,hora_entrada_programada time,hora_salida_programada time)
+     ON CONFLICT (usuario_id,fecha) DO UPDATE SET
+       hora_entrada_programada = EXCLUDED.hora_entrada_programada,
+       hora_salida_programada = EXCLUDED.hora_salida_programada,
+       razon_tardanza = EXCLUDED.razon_tardanza,
+       minutos_adeudados = EXCLUDED.minutos_adeudados,
+       categoria_llegada = EXCLUDED.categoria_llegada,
+       descuento_aplicado = EXCLUDED.descuento_aplicado,
+       porcentaje_descuento = EXCLUDED.porcentaje_descuento,
+       porcentaje_regla_aplicada = EXCLUDED.porcentaje_regla_aplicada,
+       tipo_descuento = EXCLUDED.tipo_descuento,
+       regla_version = EXCLUDED.regla_version,
+       calculado_en = clock_timestamp(),
+       updated_at = clock_timestamp()
+     WHERE registros_asistencia.estado_entrada = 'no_reportado'
+       AND (registros_asistencia.hora_entrada_programada IS DISTINCT FROM EXCLUDED.hora_entrada_programada
+         OR registros_asistencia.hora_salida_programada IS DISTINCT FROM EXCLUDED.hora_salida_programada
+         OR registros_asistencia.razon_tardanza IS DISTINCT FROM EXCLUDED.razon_tardanza
+         OR registros_asistencia.minutos_adeudados IS DISTINCT FROM EXCLUDED.minutos_adeudados
+         OR registros_asistencia.categoria_llegada IS DISTINCT FROM EXCLUDED.categoria_llegada
+         OR registros_asistencia.descuento_aplicado IS DISTINCT FROM EXCLUDED.descuento_aplicado
+         OR registros_asistencia.porcentaje_descuento IS DISTINCT FROM EXCLUDED.porcentaje_descuento
+         OR registros_asistencia.porcentaje_regla_aplicada IS DISTINCT FROM EXCLUDED.porcentaje_regla_aplicada
+         OR registros_asistencia.regla_version IS DISTINCT FROM EXCLUDED.regla_version)
+     RETURNING id,usuario_id,fecha`,
+    [JSON.stringify(targets), fecha, Math.max(0, Math.floor(number(settings.minutosNoReportado, 30))), `[AUTO ${cutoffLabel}] No registró la entrada antes del corte configurado.`, discountPercentage > 0, discountPercentage],
+  );
+  for (const row of changedRows) await syncAttendanceDiscount(row.id, row.usuario_id, dateOnly(row.fecha) || fecha);
+  return changedRows.length;
 }
 
 function mapNotification(row: any): any { return { id: row.id, usuarioId: row.usuario_id, titulo: row.titulo, mensaje: row.mensaje, tipo: row.tipo, leida: Boolean(row.leida_en), datos: row.metadata || undefined, fechaCreacion: dateOnly(row.created_at) || "" }; }

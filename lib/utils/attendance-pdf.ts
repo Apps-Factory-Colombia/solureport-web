@@ -110,11 +110,7 @@ export async function generateAttendanceMemoPDF({
 
   const finalY = (doc as jsPDF & { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY || tableY + 20;
   doc.setFont("helvetica", "bold");
-  doc.text("Fundamento", 14, finalY + 12);
-  doc.setFont("helvetica", "normal");
-  const legal = doc.splitTextToSize(`${safe(memo.fundamento)}\n\n${safe(memo.regimenSancionatorio)}`, 180);
-  doc.text(legal, 14, finalY + 19);
-  const signY = Math.min(265, finalY + 19 + legal.length * 4.5 + 16);
+  const signY = Math.min(265, finalY + 28);
   doc.line(18, signY, 88, signY);
   doc.line(122, signY, 192, signY);
   doc.setFontSize(8);
