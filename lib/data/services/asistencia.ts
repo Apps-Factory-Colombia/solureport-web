@@ -2,6 +2,7 @@ import {
   ArrivalRecord,
   AttendanceDaySummary,
   AttendanceFortnightlyReport,
+  AttendanceHistorySummary,
   AttendanceMemo,
 } from "@/lib/types";
 import { dataRequest } from "../client";
@@ -29,6 +30,7 @@ export interface AttendanceHistoryResponse {
   total: number;
   page: number;
   pageSize: number;
+  summary: AttendanceHistorySummary;
   records: AttendanceDayResponse["records"];
 }
 
@@ -70,12 +72,37 @@ export async function createAttendanceMemo(payload: {
   return dataRequest<AttendanceMemo>("attendance.memo.create", payload);
 }
 
+export interface AttendanceFortnightMemosResult {
+  creados: number;
+  actualizados: number;
+  existentes: number;
+  total: number;
+  fechaInicio: string;
+  fechaFin: string;
+  memorandos: AttendanceMemo[];
+}
+
+export async function createAttendanceFortnightMemos(payload: {
+  mes: string;
+  quincena: "primera" | "segunda";
+  titulo: string;
+  narrativa: string;
+  fundamento?: string;
+  regimenSancionatorio?: string;
+}) {
+  return dataRequest<AttendanceFortnightMemosResult>("attendance.memo.create_fortnight", payload);
+}
+
 export async function updateAttendanceMemo(payload: {
   id: string;
-  action: "firmar" | "anular";
+  action: "firmar" | "anular" | "desanular" | "eliminar" | "restaurar" | "editar";
   nombre?: string;
   documento?: string;
   motivo?: string;
+  titulo?: string;
+  narrativa?: string;
+  fundamento?: string;
+  regimenSancionatorio?: string;
 }) {
   return dataRequest<AttendanceMemo>("attendance.memo.update", payload);
 }

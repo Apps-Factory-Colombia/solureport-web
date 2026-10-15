@@ -2846,6 +2846,9 @@ async function attendanceRows(start: string, end: string, payload: Payload = {})
     values.push(payload.estado);
     conditions.push(`r.estado_entrada = $${values.length}`);
   }
+  if (payload.incidenciasOnly === true) {
+    conditions.push(`(r.estado_entrada IN ('tarde', 'no_reportado') OR r.categoria_llegada IN ('tardanza_leve', 'tardanza_mayor', 'reposicion', 'no_reportado'))`);
+  }
   if (payload.search) {
     values.push(`%${String(payload.search).trim()}%`);
     conditions.push(`((u.nombre || ' ' || u.apellido) ILIKE $${values.length}
@@ -2951,6 +2954,8 @@ function mapMemo(row: any, events: any[] = []): any {
     id: row.id,
     usuarioId: row.usuario_id || undefined,
     periodoId: row.periodo_id || undefined,
+    periodoFechaInicio: dateOnly(row.periodo_fecha_inicio) || undefined,
+    periodoFechaFin: dateOnly(row.periodo_fecha_fin) || undefined,
     numero: row.numero,
     tipo: row.tipo,
     estado: row.estado,
@@ -2961,6 +2966,9 @@ function mapMemo(row: any, events: any[] = []): any {
     plantillaVersion: row.plantilla_version || undefined,
     pdfUrl: row.pdf_url || undefined,
     firmadoEn: row.firmado_en || undefined,
+    anuladoEn: row.anulado_en || undefined,
+    motivoAnulacion: row.motivo_anulacion || undefined,
+    eliminadoEn: row.eliminado_en || undefined,
     firmaTrabajadorNombre: row.firma_trabajador_nombre || undefined,
     firmaTrabajadorDocumento: row.firma_trabajador_documento || undefined,
     generadoEn: row.generado_en || row.created_at,
@@ -3018,20 +3026,36 @@ async function attendanceHistory(payload: Payload, user: UserContext) {
       OR COALESCE(to_char(r.hora_entrada_real, 'HH24:MI'), '') ILIKE $${values.length})`);
   }
   const { rows: countRows } = await dbQuery(
-    `SELECT COUNT(*)::int AS total FROM public.registros_asistencia r
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE r.estado_entrada <> 'no_reportado')::int AS reportados,
+            COUNT(*) FILTER (WHERE COALESCE(r.categoria_llegada, r.estado_entrada) = 'a_tiempo')::int AS a_tiempo,
+            COUNT(*) FILTER (WHERE COALESCE(r.categoria_llegada, r.estado_entrada) IN ('tardanza_leve', 'tardanza_mayor'))::int AS tardanzas,
+            COUNT(*) FILTER (WHERE r.categoria_llegada = 'reposicion')::int AS reposiciones,
+            COUNT(*) FILTER (WHERE r.estado_entrada = 'no_reportado')::int AS no_reportados,
+            COALESCE(SUM(COALESCE(r.minutos_adeudados, r.minutos_retraso, 0)), 0)::int AS minutos_adeudados
+       FROM public.registros_asistencia r
        JOIN public.usuarios u ON u.id = r.usuario_id WHERE ${conditions.join(" AND ")}`,
     values,
   );
   const page = Math.max(1, Math.floor(number(payload.page, 1)));
   const pageSize = Math.min(100, Math.max(1, Math.floor(number(payload.pageSize, 20))));
   const rows = await attendanceRows(start, end, { ...payload, limit: pageSize, offset: (page - 1) * pageSize });
-  return { fechaInicio: start, fechaFin: end, total: number(countRows[0]?.total), page, pageSize, records: rows.map(mapAttendanceRow) };
+  const summary = {
+    total: number(countRows[0]?.total),
+    reportados: number(countRows[0]?.reportados),
+    aTiempo: number(countRows[0]?.a_tiempo),
+    tardanzas: number(countRows[0]?.tardanzas),
+    reposiciones: number(countRows[0]?.reposiciones),
+    noReportados: number(countRows[0]?.no_reportados),
+    minutosAdeudados: number(countRows[0]?.minutos_adeudados),
+  };
+  return { fechaInicio: start, fechaFin: end, total: summary.total, page, pageSize, summary, records: rows.map(mapAttendanceRow) };
 }
 
 async function attendanceFortnightly(payload: Payload, user: UserContext) {
   await requireAdmin(user);
   const range = attendanceRange(payload);
-  const rows = await attendanceRows(range.start, range.end, { ...payload, compact: true, limit: 2000, offset: 0 });
+  const rows = await attendanceRows(range.start, range.end, { ...payload, incidenciasOnly: true, compact: true, limit: 2000, offset: 0 });
   const groups = new Map<string, any>();
   for (const row of rows) {
     const current = groups.get(row.usuario_id) || { usuarioId: row.usuario_id, nombre: [row.usuario_nombre, row.usuario_apellido].filter(Boolean).join(" "), registros: [] };
@@ -3043,7 +3067,7 @@ async function attendanceFortnightly(payload: Payload, user: UserContext) {
     eventos: group.registros.length,
     minutosAdeudados: group.registros.reduce((sum: number, row: any) => sum + number(row.minutosAdeudados), 0),
     tardanzasLeves: group.registros.filter((row: any) => row.categoriaLlegada === "tardanza_leve").length,
-    tardanzasMayores: group.registros.filter((row: any) => row.categoriaLlegada === "tardanza_mayor").length,
+    tardanzasMayores: group.registros.filter((row: any) => ["tardanza_mayor", "reposicion"].includes(row.categoriaLlegada)).length,
     noReportados: group.registros.filter((row: any) => row.categoriaLlegada === "no_reportado").length,
     porcentajeDescuento: Math.min(100, group.registros.reduce((sum: number, row: any) => sum + number(row.porcentajeDescuento), 0)),
   })).sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
@@ -3052,7 +3076,7 @@ async function attendanceFortnightly(payload: Payload, user: UserContext) {
     trabajadores: trabajadores.length,
     minutosAdeudados: rows.reduce((sum, row) => sum + number(row.minutos_adeudados), 0),
     tardanzasLeves: rows.filter((row) => row.categoria_llegada === "tardanza_leve").length,
-    tardanzasMayores: rows.filter((row) => row.categoria_llegada === "tardanza_mayor").length,
+    tardanzasMayores: rows.filter((row) => ["tardanza_mayor", "reposicion"].includes(row.categoria_llegada)).length,
     noReportados: rows.filter((row) => row.categoria_llegada === "no_reportado").length,
     descuentoTotal: trabajadores.reduce((sum, worker) => sum + worker.porcentajeDescuento, 0),
   };
@@ -3066,10 +3090,16 @@ async function attendanceMemos(payload: Payload, user: UserContext) {
   const conditions: string[] = [];
   if (payload.usuarioId) { values.push(payload.usuarioId); conditions.push(`m.usuario_id = $${values.length}`); }
   if (payload.periodoId) { values.push(payload.periodoId); conditions.push(`m.periodo_id = $${values.length}`); }
-  if (payload.estado && payload.estado !== "todos") { values.push(payload.estado); conditions.push(`m.estado = $${values.length}`); }
+  if (payload.estado === "eliminados") conditions.push("m.eliminado_en IS NOT NULL");
+  else {
+    conditions.push("m.eliminado_en IS NULL");
+    if (payload.estado && payload.estado !== "todos") { values.push(payload.estado); conditions.push(`m.estado = $${values.length}`); }
+  }
   if (payload.search && String(payload.search).trim()) {
     values.push(`%${String(payload.search).trim()}%`);
-    conditions.push(`(m.numero ILIKE $${values.length} OR m.titulo ILIKE $${values.length} OR (u.nombre || ' ' || u.apellido) ILIKE $${values.length})`);
+    conditions.push(`(m.numero ILIKE $${values.length} OR m.titulo ILIKE $${values.length}
+      OR COALESCE(m.narrativa, '') ILIKE $${values.length}
+      OR (u.nombre || ' ' || u.apellido) ILIKE $${values.length})`);
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const { rows: countRows } = await dbQuery(
@@ -3081,9 +3111,12 @@ async function attendanceMemos(payload: Payload, user: UserContext) {
   const pageSize = Math.min(100, Math.max(1, Math.floor(number(payload.pageSize, 20))));
   const pageValues = [...values, pageSize, (page - 1) * pageSize];
   const { rows } = await dbQuery(
-    `SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido
+    `SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido,
+            p.fecha_inicio AS periodo_fecha_inicio, p.fecha_fin AS periodo_fecha_fin
        FROM public.asistencia_memorandos m
-       LEFT JOIN public.usuarios u ON u.id = m.usuario_id ${where}
+       LEFT JOIN public.usuarios u ON u.id = m.usuario_id
+       LEFT JOIN public.periodos_liquidacion p ON p.id = m.periodo_id
+       ${where}
       ORDER BY m.generado_en DESC LIMIT $${pageValues.length - 1} OFFSET $${pageValues.length}`,
     pageValues,
   );
@@ -3108,13 +3141,14 @@ async function createAttendanceMemo(payload: Payload, user: UserContext) {
     const tipo = String(payload.tipo || inferMemoType(events));
     const periodId = payload.periodoId || null;
     if (periodId) {
-      const existing = await client.query("SELECT id FROM public.asistencia_memorandos WHERE usuario_id = $1 AND periodo_id = $2 AND tipo = $3 AND estado <> 'anulado' LIMIT 1", [usuarioId, periodId, tipo]);
+      const existing = await client.query("SELECT id FROM public.asistencia_memorandos WHERE usuario_id = $1 AND periodo_id = $2 AND tipo = $3 AND estado <> 'anulado' AND eliminado_en IS NULL LIMIT 1", [usuarioId, periodId, tipo]);
       if (existing.rows[0]) {
         const existingMemo = await client.query("SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido FROM public.asistencia_memorandos m LEFT JOIN public.usuarios u ON u.id = m.usuario_id WHERE m.id = $1", [existing.rows[0].id]);
         const existingEvents = await client.query("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = $1 ORDER BY orden, fecha_snapshot", [existing.rows[0].id]);
         return mapMemo(existingMemo.rows[0], existingEvents.rows);
       }
     }
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('asistencia_memo_numbering'))");
     const { rows: sequenceRows } = await client.query("SELECT COUNT(*)::int AS total FROM public.asistencia_memorandos");
     const year = new Date().getFullYear();
     const numero = `MEMO-${year}-${String(number(sequenceRows[0]?.total) + 1).padStart(3, "0")}`;
@@ -3131,16 +3165,224 @@ async function createAttendanceMemo(payload: Payload, user: UserContext) {
   });
 }
 
+async function createAttendanceFortnightMemos(payload: Payload, user: UserContext) {
+  await requireAdmin(user);
+  const range = attendanceRange(payload);
+  const titleTemplate = String(payload.titulo || "Llamado de atención formal por incidencias de asistencia").trim();
+  const narrativeTemplate = String(payload.narrativa || "Se deja constancia de las incidencias de asistencia registradas para {trabajador} durante la quincena del {desde} al {hasta}. El detalle cronológico y la evidencia disponible se adjuntan en este documento.").trim();
+  if (!titleTemplate || !narrativeTemplate) throw new Error("Completa el título y la descripción del memorando.");
+
+  return withTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('asistencia_memo_numbering'))");
+    const { rows } = await client.query(
+      `SELECT r.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido,
+              p.id AS periodo_id
+         FROM public.registros_asistencia r
+         JOIN public.usuarios u ON u.id = r.usuario_id
+         LEFT JOIN LATERAL (
+           SELECT id FROM public.periodos_liquidacion
+            WHERE r.fecha BETWEEN fecha_inicio AND fecha_fin
+            ORDER BY fecha_inicio DESC LIMIT 1
+         ) p ON TRUE
+        WHERE r.fecha BETWEEN $1::date AND $2::date
+          AND (r.estado_entrada IN ('tarde', 'no_reportado')
+            OR r.categoria_llegada IN ('tardanza_leve', 'tardanza_mayor', 'reposicion', 'no_reportado'))
+        ORDER BY r.usuario_id, p.id NULLS LAST, r.fecha, r.hora_entrada_programada`,
+      [range.start, range.end],
+    );
+    if (!rows.length) return {
+      creados: 0,
+      actualizados: 0,
+      existentes: 0,
+      total: 0,
+      fechaInicio: dateOnly(range.start) || range.start,
+      fechaFin: dateOnly(range.end) || range.end,
+      memorandos: [],
+    };
+
+    const groups = new Map<string, any[]>();
+    for (const row of rows) {
+      const key = `${row.usuario_id}:${row.periodo_id || "sin-periodo"}`;
+      groups.set(key, [...(groups.get(key) || []), row]);
+    }
+    const { rows: sequenceRows } = await client.query("SELECT COUNT(*)::int AS total FROM public.asistencia_memorandos");
+    let sequence = number(sequenceRows[0]?.total);
+    let creados = 0;
+    let actualizados = 0;
+    let existentes = 0;
+    const documentIds: string[] = [];
+    const periodLabelStart = dateOnly(range.start) || range.start;
+    const periodLabelEnd = dateOnly(range.end) || range.end;
+
+    const insertEvents = async (memoId: string, events: any[]) => {
+      const payloadRows = events.map((event, index) => ({
+        asistencia_id: event.id,
+        orden: index,
+        fecha_snapshot: dateOnly(event.fecha),
+        hora_programada_snapshot: event.hora_entrada_programada,
+        hora_llegada_snapshot: event.hora_entrada_real,
+        minutos_snapshot: number(event.minutos_retraso),
+        minutos_adeudados_snapshot: number(event.minutos_adeudados ?? event.minutos_retraso),
+        estado_snapshot: event.estado_entrada,
+        categoria_snapshot: event.categoria_llegada,
+        porcentaje_snapshot: number(event.porcentaje_descuento),
+        foto_url_snapshot: event.foto_llegada_url,
+        ubicacion_snapshot: event.ubicacion_llegada_direccion,
+      }));
+      const result = await client.query(
+        `INSERT INTO public.asistencia_memorando_eventos
+           (memorando_id, asistencia_id, orden, fecha_snapshot, hora_programada_snapshot,
+            hora_llegada_snapshot, minutos_snapshot, minutos_adeudados_snapshot,
+            estado_snapshot, categoria_snapshot, porcentaje_snapshot, foto_url_snapshot, ubicacion_snapshot)
+         SELECT $1, x.asistencia_id, x.orden, x.fecha_snapshot, x.hora_programada_snapshot,
+                x.hora_llegada_snapshot, x.minutos_snapshot, x.minutos_adeudados_snapshot,
+                x.estado_snapshot, x.categoria_snapshot, x.porcentaje_snapshot,
+                x.foto_url_snapshot, x.ubicacion_snapshot
+           FROM jsonb_to_recordset($2::jsonb) AS x(
+             asistencia_id uuid, orden integer, fecha_snapshot date,
+             hora_programada_snapshot time, hora_llegada_snapshot time,
+             minutos_snapshot integer, minutos_adeudados_snapshot integer,
+             estado_snapshot text, categoria_snapshot text, porcentaje_snapshot numeric,
+             foto_url_snapshot text, ubicacion_snapshot text)
+         ON CONFLICT (memorando_id, asistencia_id) DO NOTHING`,
+        [memoId, JSON.stringify(payloadRows)],
+      );
+      return result.rowCount || 0;
+    };
+
+    const renderTemplate = (template: string, events: any[]) => template
+      .replaceAll("{trabajador}", [events[0].usuario_nombre, events[0].usuario_apellido].filter(Boolean).join(" "))
+      .replaceAll("{desde}", formatAttendanceDate(range.start))
+      .replaceAll("{hasta}", formatAttendanceDate(range.end))
+      .replaceAll("{eventos}", String(events.length))
+      .replaceAll("{minutos}", String(events.reduce((sum, event) => sum + number(event.minutos_adeudados ?? event.minutos_retraso), 0)));
+
+    for (const events of groups.values()) {
+      const usuarioId = events[0].usuario_id;
+      const periodId = events[0].periodo_id || null;
+      const existing = await client.query(
+        `SELECT * FROM public.asistencia_memorandos
+          WHERE usuario_id = $1 AND periodo_id IS NOT DISTINCT FROM $2::uuid
+          ORDER BY generado_en DESC LIMIT 1 FOR UPDATE`,
+        [usuarioId, periodId],
+      );
+      if (existing.rows[0]) {
+        const memo = existing.rows[0];
+        if (memo.eliminado_en || memo.estado === "anulado") {
+          existentes += 1;
+          continue;
+        }
+        documentIds.push(memo.id);
+        if (memo.estado === "firmado") {
+          existentes += 1;
+          continue;
+        }
+        const added = await insertEvents(memo.id, events);
+        if (added) {
+          await client.query("UPDATE public.asistencia_memorandos SET updated_at = clock_timestamp() WHERE id = $1", [memo.id]);
+          actualizados += 1;
+        } else {
+          existentes += 1;
+        }
+        continue;
+      }
+
+      sequence += 1;
+      const year = range.start.slice(0, 4);
+      const numero = `MEMO-${year}-${String(sequence).padStart(3, "0")}`;
+      const tipo = inferMemoType(events);
+      const result = await client.query(
+        `INSERT INTO public.asistencia_memorandos
+           (usuario_id, periodo_id, numero, tipo, estado, titulo, narrativa,
+            fundamento, regimen_sancionatorio, plantilla_version, generado_por_id)
+         VALUES ($1, $2, $3, $4, 'generado', $5, $6, $7, $8, 'asistencia-v3-quincenal', $9)
+         RETURNING id`,
+        [
+          usuarioId,
+          periodId,
+          numero,
+          tipo,
+          renderTemplate(titleTemplate, events),
+          renderTemplate(narrativeTemplate, events),
+          String(payload.fundamento || "").trim() || null,
+          String(payload.regimenSancionatorio || "").trim() || null,
+          user.id,
+        ],
+      );
+      await insertEvents(result.rows[0].id, events);
+      documentIds.push(result.rows[0].id);
+      creados += 1;
+    }
+
+    const { rows: memoRows } = documentIds.length
+      ? await client.query(
+        `SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido,
+                p.fecha_inicio AS periodo_fecha_inicio, p.fecha_fin AS periodo_fecha_fin
+           FROM public.asistencia_memorandos m
+           LEFT JOIN public.usuarios u ON u.id = m.usuario_id
+           LEFT JOIN public.periodos_liquidacion p ON p.id = m.periodo_id
+          WHERE m.id = ANY($1::uuid[])
+          ORDER BY u.apellido, u.nombre, m.generado_en`,
+        [documentIds],
+      )
+      : { rows: [] };
+    const memoIds = memoRows.map((memo) => memo.id);
+    const { rows: memoEvents } = memoIds.length
+      ? await client.query("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = ANY($1::uuid[]) ORDER BY memorando_id, orden, fecha_snapshot", [memoIds])
+      : { rows: [] };
+    const eventsByMemo = new Map<string, any[]>();
+    for (const event of memoEvents) eventsByMemo.set(event.memorando_id, [...(eventsByMemo.get(event.memorando_id) || []), event]);
+    const memorandos = memoRows.map((memo) => mapMemo(memo, eventsByMemo.get(memo.id) || []));
+    return { creados, actualizados, existentes, total: groups.size, fechaInicio: periodLabelStart, fechaFin: periodLabelEnd, memorandos };
+  });
+}
+
+function formatAttendanceDate(value: string) {
+  const [year, month, day] = value.slice(0, 10).split("-");
+  return year && month && day ? `${day}/${month}/${year}` : value;
+}
+
 async function updateAttendanceMemo(payload: Payload, user: UserContext) {
   await requireAdmin(user);
   const id = String(payload.id || "");
   if (!id) throw new Error("Falta el memorando.");
+  if (payload.action === "editar") {
+    const title = String(payload.titulo || "").trim();
+    if (!title) throw new Error("El título del memorando es obligatorio.");
+    const { rows } = await dbQuery(
+      `UPDATE public.asistencia_memorandos
+          SET titulo = $2, narrativa = $3, fundamento = $4, regimen_sancionatorio = $5,
+              updated_at = clock_timestamp()
+        WHERE id = $1 AND eliminado_en IS NULL AND estado <> 'firmado'
+        RETURNING *`,
+      [id, title, String(payload.narrativa || "").trim() || null, String(payload.fundamento || "").trim() || null, String(payload.regimenSancionatorio || "").trim() || null],
+    );
+    if (!rows[0]) throw new Error("El memorando no existe, está eliminado o ya fue firmado.");
+    return mapMemo(rows[0]);
+  }
   if (payload.action === "firmar") {
-    const { rows } = await dbQuery("UPDATE public.asistencia_memorandos SET estado = 'firmado', firmado_en = clock_timestamp(), firma_trabajador_nombre = $2, firma_trabajador_documento = $3, updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [id, payload.nombre || null, payload.documento || null]);
+    const { rows } = await dbQuery("UPDATE public.asistencia_memorandos SET estado = 'firmado', firmado_en = clock_timestamp(), firma_trabajador_nombre = $2, firma_trabajador_documento = $3, updated_at = clock_timestamp() WHERE id = $1 AND eliminado_en IS NULL RETURNING *", [id, payload.nombre || null, payload.documento || null]);
+    if (!rows[0]) throw new Error("El memorando no existe o está eliminado.");
     return mapMemo(rows[0]);
   }
   if (payload.action === "anular") {
-    const { rows } = await dbQuery("UPDATE public.asistencia_memorandos SET estado = 'anulado', anulado_en = clock_timestamp(), motivo_anulacion = $2, updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [id, payload.motivo || "Anulado por administración"]);
+    const { rows } = await dbQuery("UPDATE public.asistencia_memorandos SET estado_previo_anulacion = CASE WHEN estado = 'anulado' THEN estado_previo_anulacion ELSE estado END, estado = 'anulado', anulado_en = clock_timestamp(), motivo_anulacion = $2, updated_at = clock_timestamp() WHERE id = $1 AND eliminado_en IS NULL RETURNING *", [id, payload.motivo || "Anulado por administración"]);
+    if (!rows[0]) throw new Error("El memorando no existe o está eliminado.");
+    return mapMemo(rows[0]);
+  }
+  if (payload.action === "desanular") {
+    const { rows } = await dbQuery("UPDATE public.asistencia_memorandos SET estado = COALESCE(estado_previo_anulacion, 'generado'), estado_previo_anulacion = NULL, anulado_en = NULL, motivo_anulacion = NULL, updated_at = clock_timestamp() WHERE id = $1 AND estado = 'anulado' AND eliminado_en IS NULL RETURNING *", [id]);
+    if (!rows[0]) throw new Error("El memorando no está anulado o no se puede restaurar.");
+    return mapMemo(rows[0]);
+  }
+  if (payload.action === "eliminar") {
+    const { rows } = await dbQuery("UPDATE public.asistencia_memorandos SET eliminado_en = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND eliminado_en IS NULL RETURNING *", [id]);
+    if (!rows[0]) throw new Error("El memorando ya está eliminado o no existe.");
+    return mapMemo(rows[0]);
+  }
+  if (payload.action === "restaurar") {
+    const { rows } = await dbQuery("UPDATE public.asistencia_memorandos SET eliminado_en = NULL, updated_at = clock_timestamp() WHERE id = $1 AND eliminado_en IS NOT NULL RETURNING *", [id]);
+    if (!rows[0]) throw new Error("El memorando no está eliminado o no existe.");
     return mapMemo(rows[0]);
   }
   throw new Error("Acción de memorando no soportada.");
@@ -3777,6 +4019,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "attendance.fortnightly": return attendanceFortnightly(payload, user);
     case "attendance.memos": return attendanceMemos(payload, user);
     case "attendance.memo.create": return createAttendanceMemo(payload, user);
+    case "attendance.memo.create_fortnight": return createAttendanceFortnightMemos(payload, user);
     case "attendance.memo.update": return updateAttendanceMemo(payload, user);
 
     case "arrivals.list": {
@@ -4016,6 +4259,112 @@ function mapLeaderLiquidationSummary(
   };
 }
 
+async function recalculateOpenAttendanceRules(client: any) {
+  await client.query(`
+    CREATE TEMP TABLE attendance_rules_recalc ON COMMIT DROP AS
+    WITH rules AS (
+      SELECT hora_inicio_descuento_tardanza, hora_descuento_automatico,
+             porcentaje_descuento_tardanza, porcentaje_descuento_no_reportado,
+             porcentaje_descuento_reposicion, minutos_no_reportado
+        FROM public.configuracion_empresa WHERE id = 1
+    ), classified AS (
+      SELECT r.id AS asistencia_id, r.usuario_id AS tecnico_id, p.id AS periodo_id,
+             CASE
+               WHEN r.hora_entrada_real IS NULL THEN 'no_reportado'
+               WHEN r.hora_entrada_real < rules.hora_inicio_descuento_tardanza THEN 'a_tiempo'
+               WHEN r.hora_entrada_real >= rules.hora_descuento_automatico THEN 'reposicion'
+               ELSE 'tardanza_leve'
+             END AS categoria,
+             CASE
+               WHEN r.hora_entrada_real IS NULL THEN rules.porcentaje_descuento_no_reportado
+               WHEN r.hora_entrada_real < rules.hora_inicio_descuento_tardanza THEN 0
+               WHEN r.hora_entrada_real >= rules.hora_descuento_automatico THEN rules.porcentaje_descuento_reposicion
+               ELSE rules.porcentaje_descuento_tardanza
+             END AS porcentaje,
+             CASE WHEN r.hora_entrada_real IS NULL THEN 0
+                  ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (r.hora_entrada_real - r.hora_entrada_programada)) / 60)::integer)
+              END AS minutos_retraso,
+             CASE WHEN r.hora_entrada_real IS NULL THEN rules.minutos_no_reportado
+                  WHEN r.hora_entrada_real < rules.hora_inicio_descuento_tardanza THEN 0
+                  ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (r.hora_entrada_real - r.hora_entrada_programada)) / 60)::integer)
+              END AS minutos_adeudados
+        FROM public.registros_asistencia r
+        JOIN public.periodos_liquidacion p
+          ON r.fecha BETWEEN p.fecha_inicio AND p.fecha_fin AND p.estado = 'abierto'
+        CROSS JOIN rules
+    )
+    SELECT *, porcentaje > 0 AS descuento_aplicado, 'attendance-v4-clock'::text AS regla_version
+      FROM classified
+  `);
+  await client.query(`
+    UPDATE public.registros_asistencia r
+       SET estado_entrada = CASE WHEN x.categoria = 'no_reportado' THEN 'no_reportado'
+                                 WHEN x.categoria = 'a_tiempo' THEN 'a_tiempo' ELSE 'tarde' END,
+           minutos_retraso = x.minutos_retraso,
+           minutos_adeudados = x.minutos_adeudados,
+           categoria_llegada = x.categoria,
+           descuento_aplicado = x.descuento_aplicado,
+           porcentaje_descuento = x.porcentaje,
+           porcentaje_regla_aplicada = x.porcentaje,
+           tipo_descuento = x.categoria,
+           regla_version = x.regla_version,
+           calculado_en = clock_timestamp(), updated_at = clock_timestamp()
+      FROM attendance_rules_recalc x WHERE r.id = x.asistencia_id
+  `);
+  await client.query(`
+    CREATE TEMP TABLE attendance_rules_people ON COMMIT DROP AS
+    SELECT tecnico_id, periodo_id,
+           COALESCE(SUM(porcentaje) FILTER (WHERE descuento_aplicado), 0) AS porcentaje_bruto,
+           LEAST(100, COALESCE(SUM(porcentaje) FILTER (WHERE descuento_aplicado), 0)) AS porcentaje_aplicado
+      FROM attendance_rules_recalc GROUP BY tecnico_id, periodo_id
+  `);
+  await client.query(`
+    UPDATE public.liquidacion_items li
+       SET descuento_tardanza = ROUND(COALESCE(li.valor_ganado_original, li.valor_ganado) * p.porcentaje_aplicado / 100, 2),
+           valor_ganado = ROUND(COALESCE(li.valor_ganado_original, li.valor_ganado) * (1 - p.porcentaje_aplicado / 100), 2),
+           porcentaje_descuento_tardanza = p.porcentaje_aplicado, updated_at = clock_timestamp()
+      FROM attendance_rules_people p
+      JOIN public.periodos_liquidacion pl ON pl.id = p.periodo_id AND pl.estado = 'abierto'
+     WHERE li.tecnico_id = p.tecnico_id AND li.periodo_id = p.periodo_id
+       AND li.tipo <> 'recorrido' AND li.estado <> 'anulado'
+  `);
+  await client.query(`
+    UPDATE public.liquidacion_items li
+       SET valor_ganado = COALESCE(li.valor_ganado_original, li.valor_ganado),
+           descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp()
+      FROM attendance_rules_people p
+      JOIN public.periodos_liquidacion pl ON pl.id = p.periodo_id AND pl.estado = 'abierto'
+     WHERE li.tecnico_id = p.tecnico_id AND li.periodo_id = p.periodo_id
+       AND li.tipo = 'recorrido' AND li.estado <> 'anulado'
+  `);
+  await client.query(`
+    CREATE TEMP TABLE attendance_rules_liquidation ON COMMIT DROP AS
+    SELECT p.tecnico_id, p.periodo_id, p.porcentaje_bruto, p.porcentaje_aplicado,
+           COALESCE(SUM(li.descuento_tardanza) FILTER (WHERE li.tipo <> 'recorrido' AND li.estado <> 'anulado'), 0) AS valor_total
+      FROM attendance_rules_people p
+      LEFT JOIN public.liquidacion_items li
+        ON li.tecnico_id = p.tecnico_id AND li.periodo_id = p.periodo_id
+     GROUP BY p.tecnico_id, p.periodo_id, p.porcentaje_bruto, p.porcentaje_aplicado
+  `);
+  await client.query(`
+    DELETE FROM public.asistencia_descuentos ad
+     USING attendance_rules_people p
+     WHERE ad.tecnico_id = p.tecnico_id AND ad.periodo_id = p.periodo_id
+  `);
+  await client.query(`
+    INSERT INTO public.asistencia_descuentos
+      (asistencia_id, periodo_id, tecnico_id, porcentaje, porcentaje_acumulado,
+       minutos_adeudados, valor, regla_version)
+    SELECT x.asistencia_id, x.periodo_id, x.tecnico_id, x.porcentaje, t.porcentaje_aplicado,
+           x.minutos_adeudados,
+           CASE WHEN t.porcentaje_bruto > 0 THEN t.valor_total * x.porcentaje / t.porcentaje_bruto ELSE 0 END,
+           x.regla_version
+      FROM attendance_rules_recalc x
+      JOIN attendance_rules_liquidation t USING (tecnico_id, periodo_id)
+     WHERE x.descuento_aplicado
+  `);
+}
+
 async function updateConfig(payload: Payload) {
   const current = await getConfig();
   const settings = { ...current, ...payload };
@@ -4025,10 +4374,24 @@ async function updateConfig(payload: Payload) {
   const lateStartMinutes = timeMinutes(lateStart);
   const cutoffMinutes = timeMinutes(cutoff);
   if (lateStartMinutes == null) throw new Error("Debes configurar una hora válida para iniciar la tardanza reportada.");
-  if (timeMinutes(cutoff) == null) throw new Error("Debes configurar una hora de corte válida para los descuentos automáticos.");
-  if (lateStartMinutes >= (cutoffMinutes as number)) throw new Error("La hora de inicio de tardanza debe ser anterior a la hora de no reporte.");
-  const values = [settings.nombre, settings.logo || null, settings.correoRemitente, settings.correoEmpresa || null, settings.plantillaReportePDF || "default", percentage(settings.porcentajeDescuentoTardanza), lateStart, days.length ? days : [1, 2, 3, 4, 5], cutoff, percentage(settings.porcentajeDescuentoNoReportado, 30), settings.porcentajeExtraLider, settings.extraLiderActivo, settings.costoRevisionLider, settings.costoVisitaTecnicaDefault, settings.costoRecorridoNormal, settings.costoRecorridoHerramienta, Math.max(0, Math.floor(number(settings.minutosGraciaTardanza, 5))), Math.max(1, Math.floor(number(settings.minutosCorteNoReportado, 30))), Math.max(0, Math.floor(number(settings.minutosNoReportado, 30))), percentage(settings.porcentajeDescuentoReposicion, 0), settings.memorandoAsistenciaAutomatico !== false, settings.fundamentoAsistencia || null, settings.regimenSancionatorioAsistencia || null];
-  const { rows } = await dbQuery(`INSERT INTO public.configuracion_empresa (id,nombre,logo_url,correo_remitente,correo_empresa,plantilla_reporte,hora_inicio_descuento_tardanza,porcentaje_descuento_tardanza,dias_descuento_automatico,hora_descuento_automatico,porcentaje_descuento_no_reportado,porcentaje_extra_lider,extra_lider_activo,costo_revision_lider,costo_visita_tecnica_default,costo_recorrido_normal,costo_recorrido_herramienta,minutos_gracia_tardanza,minutos_corte_no_reportado,minutos_no_reportado,porcentaje_descuento_reposicion,memorando_asistencia_automatico,fundamento_asistencia,regimen_sancionatorio_asistencia) VALUES (1,$1,$2,$3,$4,$5,$7,$6,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) ON CONFLICT (id) DO UPDATE SET nombre=EXCLUDED.nombre, logo_url=EXCLUDED.logo_url, correo_remitente=EXCLUDED.correo_remitente, correo_empresa=EXCLUDED.correo_empresa, plantilla_reporte=EXCLUDED.plantilla_reporte, hora_inicio_descuento_tardanza=EXCLUDED.hora_inicio_descuento_tardanza, porcentaje_descuento_tardanza=EXCLUDED.porcentaje_descuento_tardanza, dias_descuento_automatico=EXCLUDED.dias_descuento_automatico, hora_descuento_automatico=EXCLUDED.hora_descuento_automatico, porcentaje_descuento_no_reportado=EXCLUDED.porcentaje_descuento_no_reportado, porcentaje_extra_lider=EXCLUDED.porcentaje_extra_lider, extra_lider_activo=EXCLUDED.extra_lider_activo, costo_revision_lider=EXCLUDED.costo_revision_lider, costo_visita_tecnica_default=EXCLUDED.costo_visita_tecnica_default, costo_recorrido_normal=EXCLUDED.costo_recorrido_normal, costo_recorrido_herramienta=EXCLUDED.costo_recorrido_herramienta, minutos_gracia_tardanza=EXCLUDED.minutos_gracia_tardanza, minutos_corte_no_reportado=EXCLUDED.minutos_corte_no_reportado, minutos_no_reportado=EXCLUDED.minutos_no_reportado, porcentaje_descuento_reposicion=EXCLUDED.porcentaje_descuento_reposicion, memorando_asistencia_automatico=EXCLUDED.memorando_asistencia_automatico, fundamento_asistencia=EXCLUDED.fundamento_asistencia, regimen_sancionatorio_asistencia=EXCLUDED.regimen_sancionatorio_asistencia, updated_at=clock_timestamp() RETURNING *`, values);
+  if (cutoffMinutes == null) throw new Error("Debes configurar una hora de corte válida para los descuentos automáticos.");
+  if (lateStartMinutes >= cutoffMinutes) throw new Error("La hora de inicio de tardanza debe ser anterior a la hora de no reporte.");
+  const latePercentage = percentage(settings.porcentajeDescuentoTardanza);
+  const noReportPercentage = percentage(settings.porcentajeDescuentoNoReportado, 30);
+  const reposicionPercentage = percentage(settings.porcentajeDescuentoReposicion, 0);
+  const noReportMinutes = Math.max(0, Math.floor(number(settings.minutosNoReportado, 30)));
+  const rulesChanged = current.horaInicioDescuentoTardanza !== lateStart
+    || current.horaDescuentoAutomatico !== cutoff
+    || number(current.porcentajeDescuentoTardanza) !== latePercentage
+    || number(current.porcentajeDescuentoNoReportado, 30) !== noReportPercentage
+    || number(current.porcentajeDescuentoReposicion) !== reposicionPercentage
+    || number(current.minutosNoReportado, 30) !== noReportMinutes;
+  const values = [settings.nombre, settings.logo || null, settings.correoRemitente, settings.correoEmpresa || null, settings.plantillaReportePDF || "default", latePercentage, lateStart, days.length ? days : [1, 2, 3, 4, 5], cutoff, noReportPercentage, settings.porcentajeExtraLider, settings.extraLiderActivo, settings.costoRevisionLider, settings.costoVisitaTecnicaDefault, settings.costoRecorridoNormal, settings.costoRecorridoHerramienta, Math.max(0, Math.floor(number(settings.minutosGraciaTardanza, 5))), Math.max(1, Math.floor(number(settings.minutosCorteNoReportado, 30))), noReportMinutes, reposicionPercentage, settings.memorandoAsistenciaAutomatico !== false, settings.fundamentoAsistencia || null, settings.regimenSancionatorioAsistencia || null];
+  const { rows } = await withTransaction(async (client) => {
+    const result = await client.query(`INSERT INTO public.configuracion_empresa (id,nombre,logo_url,correo_remitente,correo_empresa,plantilla_reporte,hora_inicio_descuento_tardanza,porcentaje_descuento_tardanza,dias_descuento_automatico,hora_descuento_automatico,porcentaje_descuento_no_reportado,porcentaje_extra_lider,extra_lider_activo,costo_revision_lider,costo_visita_tecnica_default,costo_recorrido_normal,costo_recorrido_herramienta,minutos_gracia_tardanza,minutos_corte_no_reportado,minutos_no_reportado,porcentaje_descuento_reposicion,memorando_asistencia_automatico,fundamento_asistencia,regimen_sancionatorio_asistencia) VALUES (1,$1,$2,$3,$4,$5,$7,$6,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) ON CONFLICT (id) DO UPDATE SET nombre=EXCLUDED.nombre, logo_url=EXCLUDED.logo_url, correo_remitente=EXCLUDED.correo_remitente, correo_empresa=EXCLUDED.correo_empresa, plantilla_reporte=EXCLUDED.plantilla_reporte, hora_inicio_descuento_tardanza=EXCLUDED.hora_inicio_descuento_tardanza, porcentaje_descuento_tardanza=EXCLUDED.porcentaje_descuento_tardanza, dias_descuento_automatico=EXCLUDED.dias_descuento_automatico, hora_descuento_automatico=EXCLUDED.hora_descuento_automatico, porcentaje_descuento_no_reportado=EXCLUDED.porcentaje_descuento_no_reportado, porcentaje_extra_lider=EXCLUDED.porcentaje_extra_lider, extra_lider_activo=EXCLUDED.extra_lider_activo, costo_revision_lider=EXCLUDED.costo_revision_lider, costo_visita_tecnica_default=EXCLUDED.costo_visita_tecnica_default, costo_recorrido_normal=EXCLUDED.costo_recorrido_normal, costo_recorrido_herramienta=EXCLUDED.costo_recorrido_herramienta, minutos_gracia_tardanza=EXCLUDED.minutos_gracia_tardanza, minutos_corte_no_reportado=EXCLUDED.minutos_corte_no_reportado, minutos_no_reportado=EXCLUDED.minutos_no_reportado, porcentaje_descuento_reposicion=EXCLUDED.porcentaje_descuento_reposicion, memorando_asistencia_automatico=EXCLUDED.memorando_asistencia_automatico, fundamento_asistencia=EXCLUDED.fundamento_asistencia, regimen_sancionatorio_asistencia=EXCLUDED.regimen_sancionatorio_asistencia, updated_at=clock_timestamp() RETURNING *`, values);
+    if (rulesChanged) await recalculateOpenAttendanceRules(client);
+    return result;
+  });
   return mapConfig(rows[0]);
 }
 

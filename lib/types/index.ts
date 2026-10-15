@@ -302,6 +302,8 @@ export interface AttendanceMemo {
   usuarioId?: string;
   usuarioNombre?: string;
   periodoId?: string;
+  periodoFechaInicio?: string;
+  periodoFechaFin?: string;
   numero: string;
   tipo: string;
   estado: AttendanceMemoStatus;
@@ -313,6 +315,9 @@ export interface AttendanceMemo {
   pdfUrl?: string;
   generadoEn: string;
   firmadoEn?: string;
+  anuladoEn?: string;
+  motivoAnulacion?: string;
+  eliminadoEn?: string;
   firmaTrabajadorNombre?: string;
   firmaTrabajadorDocumento?: string;
   eventos: AttendanceMemoEvent[];
@@ -355,6 +360,16 @@ export interface AttendanceFortnightlyReport {
     porcentajeDescuento: number;
     registros: ArrivalRecord[];
   }>;
+}
+
+export interface AttendanceHistorySummary {
+  total: number;
+  reportados: number;
+  aTiempo: number;
+  tardanzas: number;
+  reposiciones: number;
+  noReportados: number;
+  minutosAdeudados: number;
 }
 
 export type TipoInforme = "mantenimiento_preventivo" | "visita_tecnica" | "recorrido" | "actividad_grupal";
