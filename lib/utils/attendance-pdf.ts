@@ -38,7 +38,26 @@ function addFooter(doc: jsPDF) {
   }
 }
 
-export function generateAttendanceMemoPDF({
+async function imageDataFromUrl(url: string) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    return await new Promise<{ data: string; format: "PNG" | "JPEG" } | null>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const data = String(reader.result || "");
+        resolve(data ? { data, format: blob.type.includes("png") ? "PNG" : "JPEG" } : null);
+      };
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function generateAttendanceMemoPDF({
   memo,
   user,
   company,
@@ -101,6 +120,27 @@ export function generateAttendanceMemoPDF({
   doc.setFontSize(8);
   doc.text("Firma representante de la empresa", 18, signY + 5);
   doc.text("Firma del trabajador", 122, signY + 5);
+
+  const evidenceEvents = memo.eventos.filter((event) => event.fotoUrl);
+  for (const event of evidenceEvents) {
+    const image = await imageDataFromUrl(event.fotoUrl || "");
+    doc.addPage();
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "bold");
+    doc.text("Anexo de evidencia fotográfica", 14, 18);
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "normal");
+    doc.text(`${dateLabel(event.fecha)} · llegada ${safe(event.horaLlegada, "No reportó")}`, 14, 26);
+    if (image) {
+      doc.addImage(image.data, image.format, 14, 34, 182, 210, undefined, "MEDIUM");
+    } else {
+      doc.setDrawColor(190, 190, 190);
+      doc.rect(14, 34, 182, 80);
+      doc.setTextColor(115, 115, 115);
+      doc.text("La evidencia está registrada en el sistema, pero no pudo cargarse al generar este PDF.", 22, 75, { maxWidth: 165, align: "center" });
+      doc.setTextColor(35, 39, 47);
+    }
+  }
   addFooter(doc);
   doc.save(`memorando_${memo.numero}.pdf`);
 }
