@@ -18,12 +18,12 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { AlertTriangle, CalendarDays, Camera, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Download, Eye, FileDown, FileStack, FileText, MapPin, Pencil, RefreshCw, RotateCcw, Search, Settings2, ShieldAlert, Timer, Trash2, UserRound, XCircle } from "lucide-react";
+import { AlertTriangle, CalendarDays, Camera, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Download, Eye, FileDown, FileText, MapPin, Pencil, RefreshCw, RotateCcw, Search, Settings2, ShieldAlert, Timer, Trash2, UserRound, XCircle } from "lucide-react";
 import { AttendanceDaySummary, AttendanceFortnightlyReport, AttendanceMemo, CompanySettings, User } from "@/lib/types";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getConfiguracion, updateConfiguracion } from "@/lib/data/services/configuracion";
 import { updateLlegada } from "@/lib/data/services/llegadas";
-import { AttendanceDayResponse, AttendanceHistoryResponse, AttendanceMemosResponse, createAttendanceFortnightMemos, getAttendanceDay, getAttendanceFortnightly, getAttendanceHistory, getAttendanceMemos, updateAttendanceMemo } from "@/lib/data/services/asistencia";
+import { AttendanceDayResponse, AttendanceHistoryResponse, AttendanceMemosResponse, createAttendanceMemo, getAttendanceDay, getAttendanceFortnightly, getAttendanceHistory, getAttendanceMemos, updateAttendanceMemo } from "@/lib/data/services/asistencia";
 import { cn } from "@/lib/utils";
 
 type AttendanceRow = AttendanceDayResponse["records"][number];
@@ -44,6 +44,17 @@ const ALL_USERS = "todos";
 const NO_USER = "seleccione";
 const DEFAULT_MEMO_TITLE = "Llamado de atención formal por incidencias de asistencia";
 const DEFAULT_MEMO_NARRATIVE = "Se deja constancia de las incidencias de asistencia registradas para {trabajador} durante la quincena del {desde} al {hasta}. El detalle cronológico y la evidencia disponible se adjuntan en este documento.";
+type AttendanceMemoDraft = {
+  usuarioId: string;
+  nombre: string;
+  asistenciaIds: string[];
+  periodoId?: string;
+  fechaInicio: string;
+  fechaFin: string;
+  eventos: number;
+  minutos: number;
+  porcentaje: number;
+};
 const EMPTY_COMPANY_SETTINGS: CompanySettings = {
   nombre: "SoluReport", logo: "", correoRemitente: "", correoEmpresa: "", plantillaReportePDF: "",
   porcentajeDescuentoTardanza: 5, porcentajeExtraLider: 0, extraLiderActivo: false,
@@ -175,11 +186,11 @@ export default function LlegadasPage() {
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [memoSaving, setMemoSaving] = useState(false);
   const [notice, setNotice] = useState("");
-  const [bulkMemoOpen, setBulkMemoOpen] = useState(false);
-  const [bulkMemoTitle, setBulkMemoTitle] = useState(DEFAULT_MEMO_TITLE);
-  const [bulkMemoNarrative, setBulkMemoNarrative] = useState(DEFAULT_MEMO_NARRATIVE);
-  const [bulkMemoBasis, setBulkMemoBasis] = useState("");
-  const [bulkMemoRegime, setBulkMemoRegime] = useState("");
+  const [memoDraft, setMemoDraft] = useState<AttendanceMemoDraft | null>(null);
+  const [memoDraftTitle, setMemoDraftTitle] = useState(DEFAULT_MEMO_TITLE);
+  const [memoDraftNarrative, setMemoDraftNarrative] = useState("");
+  const [memoDraftBasis, setMemoDraftBasis] = useState("");
+  const [memoDraftRegime, setMemoDraftRegime] = useState("");
   const [editingMemo, setEditingMemo] = useState<AttendanceMemo | null>(null);
   const [editMemoTitle, setEditMemoTitle] = useState("");
   const [editMemoNarrative, setEditMemoNarrative] = useState("");
@@ -369,42 +380,81 @@ export default function LlegadasPage() {
     }
   };
 
-  const createFortnightMemos = async () => {
+  const openMemoDraft = (worker: AttendanceFortnightlyReport["trabajadores"][number]) => {
+    if (!fortnight) return;
+    const incidents = worker.registros.filter((row) => row.id && (
+      row.estadoEntrada === "tarde"
+      || row.estadoEntrada === "no_reportado"
+      || ["tardanza_leve", "tardanza_mayor", "reposicion", "no_reportado"].includes(row.categoriaLlegada || "")
+    ));
+    if (!incidents.length) {
+      setError("Este trabajador no tiene incidencias para generar un memorando en la quincena seleccionada.");
+      return;
+    }
+
+    const minutes = incidents.reduce((sum, row) => sum + Number(row.minutosAdeudados ?? row.minutosRetraso ?? 0), 0);
+    const percentage = Math.min(100, incidents.reduce((sum, row) => sum + Number(row.porcentajeDescuento || 0), 0));
+    const narrative = DEFAULT_MEMO_NARRATIVE
+      .replaceAll("{trabajador}", worker.nombre)
+      .replaceAll("{desde}", formatDate(fortnight.fechaInicio))
+      .replaceAll("{hasta}", formatDate(fortnight.fechaFin))
+      .replaceAll("{eventos}", String(incidents.length))
+      .replaceAll("{minutos}", String(minutes));
+
+    setMemoDraft({
+      usuarioId: worker.usuarioId,
+      nombre: worker.nombre,
+      asistenciaIds: incidents.map((row) => row.id),
+      periodoId: fortnight.periodoId,
+      fechaInicio: fortnight.fechaInicio,
+      fechaFin: fortnight.fechaFin,
+      eventos: incidents.length,
+      minutos: minutes,
+      porcentaje: percentage,
+    });
+    setMemoDraftTitle(DEFAULT_MEMO_TITLE);
+    setMemoDraftNarrative(narrative);
+    setMemoDraftBasis("");
+    setMemoDraftRegime("");
+  };
+
+  const generateIndividualMemo = async () => {
+    if (!memoDraft) return;
+    if (!memoDraftTitle.trim() || !memoDraftNarrative.trim()) {
+      setError("Completa el título y la descripción del memorando.");
+      return;
+    }
+
     setMemoSaving(true);
     try {
-      const result = await createAttendanceFortnightMemos({
-        mes: fortnightMonth,
-        quincena: fortnightHalf,
-        titulo: bulkMemoTitle,
-        narrativa: bulkMemoNarrative,
-        fundamento: bulkMemoBasis,
-        regimenSancionatorio: bulkMemoRegime,
+      const memo = await createAttendanceMemo({
+        asistenciaIds: memoDraft.asistenciaIds,
+        usuarioId: memoDraft.usuarioId,
+        periodoId: memoDraft.periodoId,
+        titulo: memoDraftTitle.trim(),
+        narrativa: memoDraftNarrative.trim(),
+        fundamento: memoDraftBasis.trim() || undefined,
+        regimenSancionatorio: memoDraftRegime.trim() || undefined,
       });
-      setBulkMemoOpen(false);
+      setMemoDraft(null);
       setMemoPage(1);
       setMemoStatus("todos");
-      setMemoUserId(ALL_USERS);
+      setMemoUserId(memo.usuarioId || memoDraft.usuarioId);
       setMemoSearch("");
       setMemoRefresh((value) => value + 1);
       setActiveTab("memorandos");
-      setNotice(`Quincena procesada: ${result.creados} memorandos nuevos, ${result.actualizados} completados con incidencias nuevas y ${result.existentes} ya existentes.`);
-      if (result.memorandos.length) {
-        try {
-          const { generateAttendanceMemosFortnightlyPDF } = await import("@/lib/utils/attendance-pdf");
-          await generateAttendanceMemosFortnightlyPDF({
-            memos: result.memorandos,
-            users: eligibleUsers,
-            company: defaultCompany,
-            fechaInicio: result.fechaInicio,
-            fechaFin: result.fechaFin,
-          });
-          setNotice((current) => `${current} Se descargó un PDF consolidado con ${result.memorandos.length} memorandos.`);
-        } catch (err) {
-          setError(err instanceof Error ? `Los memorandos quedaron guardados, pero no se pudo descargar el PDF consolidado: ${err.message}` : "Los memorandos quedaron guardados, pero falló la descarga del PDF consolidado.");
-        }
+      setNotice(`Memorando individual ${memo.numero} listo para ${memoDraft.nombre}.`);
+
+      try {
+        const { generateAttendanceMemoPDF } = await import("@/lib/utils/attendance-pdf");
+        await generateAttendanceMemoPDF({ memo, user: eligibleUsers.find((item) => item.id === memoDraft.usuarioId), company: defaultCompany });
+      } catch (err) {
+        setError(err instanceof Error
+          ? `El memorando ${memo.numero} se guardó, pero no se pudo descargar el PDF: ${err.message}`
+          : `El memorando ${memo.numero} se guardó, pero falló la descarga del PDF.`);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "No se pudieron generar los memorandos de la quincena.");
+      setError(err instanceof Error ? err.message : "No se pudo generar el memorando individual.");
     } finally {
       setMemoSaving(false);
     }
@@ -500,9 +550,6 @@ export default function LlegadasPage() {
               <RefreshCw className={cn("h-4 w-4", (dayLoading || historyLoading || fortnightLoading || memosLoading) && "animate-spin")} />Actualizar
             </Button>
             {activeTab === "quincena" && fortnight && <>
-              <Button variant="outline" size="sm" onClick={() => setBulkMemoOpen(true)} disabled={fortnightLoading || memoSaving}>
-                <FileStack className="h-4 w-4" />Generar memorandos de la quincena
-              </Button>
               <Button size="sm" onClick={async () => {
                 try {
                   const [allReport, { generateAttendanceFortnightlyPDF }] = await Promise.all([
@@ -575,7 +622,7 @@ export default function LlegadasPage() {
               <div><Label>Periodo</Label><Select value={fortnightHalf} onValueChange={(value) => { setFortnightHalf(value as "primera" | "segunda"); setFortnightPage(1); }}><SelectTrigger className="mt-1 w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="primera">1 al 15</SelectItem><SelectItem value="segunda">16 al cierre</SelectItem></SelectContent></Select></div>
               <SearchField label="Buscar trabajador en la quincena" value={fortnightSearch} onChange={(value) => { setFortnightSearch(value); setFortnightPage(1); }} placeholder="Escribe un nombre..." />
             </div>
-            <FortnightView report={fortnight} loading={fortnightLoading} page={fortnightPage} onPageChange={setFortnightPage} />
+            <FortnightView report={fortnight} loading={fortnightLoading} page={fortnightPage} onPageChange={setFortnightPage} onGenerateMemo={openMemoDraft} memoSaving={memoSaving} />
           </TabsContent>
 
           <TabsContent value="memorandos" className="space-y-4">
@@ -616,20 +663,20 @@ export default function LlegadasPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={bulkMemoOpen} onOpenChange={setBulkMemoOpen}>
+      <Dialog open={Boolean(memoDraft)} onOpenChange={(open) => !open && setMemoDraft(null)}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Generar memorandos de la quincena</DialogTitle>
-            <p className="text-sm text-muted-foreground">Se prepara un documento por trabajador con todas sus incidencias de {fortnight ? `${formatDate(fortnight.fechaInicio)} al ${formatDate(fortnight.fechaFin)}` : "la quincena seleccionada"}. Los documentos existentes no se duplican.</p>
+            <DialogTitle>Generar memorando individual</DialogTitle>
+            <p className="text-sm text-muted-foreground">{memoDraft?.nombre} · {formatDate(memoDraft?.fechaInicio || "")} al {formatDate(memoDraft?.fechaFin || "")}. Se incluirán únicamente sus incidencias de esta quincena.</p>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="rounded-lg border border-gold/20 bg-gold/5 p-3 text-xs text-muted-foreground">Variables disponibles: <code>{"{trabajador}"}</code>, <code>{"{desde}"}</code>, <code>{"{hasta}"}</code>, <code>{"{eventos}"}</code> y <code>{"{minutos}"}</code>. Los campos jurídicos son opcionales y se incluyen solo si los escribes.</div>
-            <div><Label>Título del documento</Label><Input className="mt-1" value={bulkMemoTitle} onChange={(event) => setBulkMemoTitle(event.target.value)} /></div>
-            <div><Label>Descripción / texto principal</Label><Textarea className="mt-1 min-h-28" value={bulkMemoNarrative} onChange={(event) => setBulkMemoNarrative(event.target.value)} /></div>
-            <div><Label>Fundamento jurídico (opcional)</Label><Textarea className="mt-1 min-h-20" value={bulkMemoBasis} onChange={(event) => setBulkMemoBasis(event.target.value)} placeholder="Déjalo vacío si no deseas incluir esta sección." /></div>
-            <div><Label>Régimen o medidas informadas (opcional)</Label><Textarea className="mt-1 min-h-20" value={bulkMemoRegime} onChange={(event) => setBulkMemoRegime(event.target.value)} placeholder="Texto revisado por la empresa, si aplica." /></div>
+            {memoDraft && <div className="grid grid-cols-3 gap-2 rounded-lg border border-border/60 bg-background/40 p-3 text-center text-xs"><div><span className="block text-lg font-semibold">{memoDraft.eventos}</span>incidencias</div><div><span className="block text-lg font-semibold">{memoDraft.minutos}</span>minutos adeudados</div><div><span className="block text-lg font-semibold">{memoDraft.porcentaje}%</span>descuento acumulado</div></div>}
+            <div><Label>Título</Label><Input className="mt-1" value={memoDraftTitle} onChange={(event) => setMemoDraftTitle(event.target.value)} /></div>
+            <div><Label>Descripción / texto principal</Label><Textarea className="mt-1 min-h-28" value={memoDraftNarrative} onChange={(event) => setMemoDraftNarrative(event.target.value)} /></div>
+            <div><Label>Fundamento (opcional)</Label><Textarea className="mt-1 min-h-20" value={memoDraftBasis} onChange={(event) => setMemoDraftBasis(event.target.value)} placeholder="Déjalo vacío si no deseas incluir esta sección." /></div>
+            <div><Label>Régimen o medidas informadas (opcional)</Label><Textarea className="mt-1 min-h-20" value={memoDraftRegime} onChange={(event) => setMemoDraftRegime(event.target.value)} placeholder="Texto revisado por la empresa, si aplica." /></div>
           </div>
-          <DialogFooter><Button variant="outline" onClick={() => setBulkMemoOpen(false)}>Cancelar</Button><Button onClick={createFortnightMemos} disabled={memoSaving || !bulkMemoTitle.trim() || !bulkMemoNarrative.trim()}><FileStack className="h-4 w-4" />{memoSaving ? "Generando lote..." : "Generar todos"}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => setMemoDraft(null)} disabled={memoSaving}>Cancelar</Button><Button onClick={generateIndividualMemo} disabled={memoSaving || !memoDraftTitle.trim() || !memoDraftNarrative.trim()}><FileText className="h-4 w-4" />{memoSaving ? "Generando..." : "Generar y descargar PDF"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -872,7 +919,7 @@ function Detail({ label, value }: { label: string; value: string }) {
   return <div className="rounded-lg bg-background/40 p-3"><p className="text-[11px] text-muted-foreground">{label}</p><p className="mt-1 break-words font-medium">{value}</p></div>;
 }
 
-function FortnightView({ report, loading, page, onPageChange }: { report: AttendanceFortnightlyReport | null; loading: boolean; page: number; onPageChange: (page: number) => void }) {
+function FortnightView({ report, loading, page, onPageChange, onGenerateMemo, memoSaving }: { report: AttendanceFortnightlyReport | null; loading: boolean; page: number; onPageChange: (page: number) => void; onGenerateMemo: (worker: AttendanceFortnightlyReport["trabajadores"][number]) => void; memoSaving: boolean }) {
   const workers = report?.trabajadores || [];
   const visibleWorkers = workers.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   useEffect(() => { if (!loading && workers.length > 0 && page > Math.ceil(workers.length / PAGE_SIZE)) onPageChange(Math.max(1, Math.ceil(workers.length / PAGE_SIZE))); }, [loading, onPageChange, page, workers.length]);
@@ -880,8 +927,8 @@ function FortnightView({ report, loading, page, onPageChange }: { report: Attend
   if (!report) return <EmptyPanel icon={FileDown} title="No se pudo cargar la quincena" description="Actualiza la consulta para intentarlo de nuevo." />;
   return <div className="space-y-3">
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4"><SummaryCard label="Incidencias" value={report.summary.eventos} tone="bg-slate-500/10 text-slate-300" icon={FileText} /><SummaryCard label="Trabajadores" value={report.summary.trabajadores} tone="bg-sky-500/10 text-sky-300" icon={UserRound} /><SummaryCard label="No reportados" value={report.summary.noReportados} tone="bg-red-500/10 text-red-300" icon={XCircle} /><SummaryCard label="Minutos adeudados" value={report.summary.minutosAdeudados} tone="bg-gold/10 text-gold" icon={Timer} /></div>
-    <Card className="overflow-hidden border-border/50 bg-card/70"><CardHeader className="flex flex-row items-center justify-between border-b border-border/40 px-4 py-3"><div><CardTitle className="text-base">Detalle por trabajador</CardTitle><p className="text-xs text-muted-foreground">Solo novedades de {formatDate(report.fechaInicio)} al {formatDate(report.fechaFin)}.</p></div><Badge variant="outline">{workers.length} trabajadores</Badge></CardHeader><CardContent className="p-0">
-      {!workers.length ? <div className="p-10 text-center text-sm text-muted-foreground">No hay incidencias en esta quincena para los filtros elegidos.</div> : <><div className={cn("overflow-x-auto transition-opacity", loading && "opacity-60")}><Table><TableHeader><TableRow><TableHead>Trabajador</TableHead><TableHead>Incidencias</TableHead><TableHead>Minutos adeudados</TableHead><TableHead>Tardanzas / fuera del corte</TableHead><TableHead>No reportados</TableHead><TableHead>Descuento quincenal</TableHead></TableRow></TableHeader><TableBody>{visibleWorkers.map((worker) => <TableRow key={worker.usuarioId}><TableCell className="font-medium">{worker.nombre}</TableCell><TableCell>{worker.eventos}</TableCell><TableCell>{worker.minutosAdeudados}</TableCell><TableCell>{worker.tardanzasLeves + worker.tardanzasMayores}</TableCell><TableCell>{worker.noReportados}</TableCell><TableCell className="text-amber-300">{worker.porcentajeDescuento}%</TableCell></TableRow>)}</TableBody></Table></div><Pagination page={page} pageSize={PAGE_SIZE} total={workers.length} onPageChange={onPageChange} /></>}
+    <Card className="overflow-hidden border-border/50 bg-card/70"><CardHeader className="flex flex-row items-center justify-between border-b border-border/40 px-4 py-3"><div><CardTitle className="text-base">Detalle por trabajador</CardTitle><p className="text-xs text-muted-foreground">Solo novedades de {formatDate(report.fechaInicio)} al {formatDate(report.fechaFin)}. Genera y revisa cada memorando por separado.</p></div><Badge variant="outline">{workers.length} trabajadores</Badge></CardHeader><CardContent className="p-0">
+      {!workers.length ? <div className="p-10 text-center text-sm text-muted-foreground">No hay incidencias en esta quincena para los filtros elegidos.</div> : <><div className={cn("overflow-x-auto transition-opacity", loading && "opacity-60")}><Table><TableHeader><TableRow><TableHead>Trabajador</TableHead><TableHead>Incidencias</TableHead><TableHead>Minutos adeudados</TableHead><TableHead>Tardanzas / fuera del corte</TableHead><TableHead>No reportados</TableHead><TableHead>Descuento quincenal</TableHead><TableHead className="text-right">Acción</TableHead></TableRow></TableHeader><TableBody>{visibleWorkers.map((worker) => <TableRow key={worker.usuarioId}><TableCell className="font-medium">{worker.nombre}</TableCell><TableCell>{worker.eventos}</TableCell><TableCell>{worker.minutosAdeudados}</TableCell><TableCell>{worker.tardanzasLeves + worker.tardanzasMayores}</TableCell><TableCell>{worker.noReportados}</TableCell><TableCell className="text-amber-300">{worker.porcentajeDescuento}%</TableCell><TableCell className="text-right"><Button variant="outline" size="sm" disabled={memoSaving} onClick={() => onGenerateMemo(worker)}><FileText className="h-4 w-4" />Generar memorando</Button></TableCell></TableRow>)}</TableBody></Table></div><Pagination page={page} pageSize={PAGE_SIZE} total={workers.length} onPageChange={onPageChange} /></>}
     </CardContent></Card>
   </div>;
 }

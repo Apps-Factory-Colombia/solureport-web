@@ -409,6 +409,7 @@ export interface ActivityReport {
   tipoRecorrido?: TipoRecorrido;
   fotoHerramienta?: string;
   estadoAprobacionLider: EstadoAprobacion;
+  estadoEntrega?: string;
   fechaAprobacionLider?: string;
   costoCliente?: number;
   costoActividadDefault?: number;

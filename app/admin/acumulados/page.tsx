@@ -604,7 +604,7 @@ export default function AcumuladosPage() {
                       </div>
                       <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2 text-sm">
                         <p className="text-xs text-muted-foreground">
-                          El extra líder corresponde a un <span className="text-purple-400 font-bold">{acc.porcentajeExtraLiderAplicado}%</span> de las actividades aprobadas no recorridos de los técnicos del grupo. No incluye actividades del líder y respeta los técnicos excluidos para este período.
+                          El extra líder corresponde a un <span className="text-purple-400 font-bold">{acc.porcentajeExtraLiderAplicado}%</span> de las actividades aprobadas no recorridos de los técnicos del grupo. Incluye visitas técnicas, pero estas no aumentan el indicador de recorridos. No incluye actividades del líder y respeta los técnicos excluidos para este período.
                         </p>
                         <p className="text-xs text-muted-foreground">
                           Base actual del extra líder: <span className="font-semibold text-foreground">{formatCurrency(extraLeaderBase)}</span>
@@ -649,7 +649,7 @@ export default function AcumuladosPage() {
                                   </div>
                                   <div className="flex items-center gap-3">
                                     <span className="text-xs text-muted-foreground">
-                                      Actividades: {formatCurrency(memberTotal)}
+                                      Base extra (incluye visitas): {formatCurrency(memberTotal)}
                                     </span>
                                     {!isExcluded && (
                                       <span className="text-xs font-medium text-purple-400">

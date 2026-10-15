@@ -68,29 +68,10 @@ export async function createAttendanceMemo(payload: {
   tipo?: string;
   titulo?: string;
   narrativa?: string;
-}) {
-  return dataRequest<AttendanceMemo>("attendance.memo.create", payload);
-}
-
-export interface AttendanceFortnightMemosResult {
-  creados: number;
-  actualizados: number;
-  existentes: number;
-  total: number;
-  fechaInicio: string;
-  fechaFin: string;
-  memorandos: AttendanceMemo[];
-}
-
-export async function createAttendanceFortnightMemos(payload: {
-  mes: string;
-  quincena: "primera" | "segunda";
-  titulo: string;
-  narrativa: string;
   fundamento?: string;
   regimenSancionatorio?: string;
 }) {
-  return dataRequest<AttendanceFortnightMemosResult>("attendance.memo.create_fortnight", payload);
+  return dataRequest<AttendanceMemo>("attendance.memo.create", payload);
 }
 
 export async function updateAttendanceMemo(payload: {

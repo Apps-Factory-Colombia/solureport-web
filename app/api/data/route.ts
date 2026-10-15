@@ -41,17 +41,16 @@ async function hasLiquidationFreezeSchema() {
 // fila histórica no tiene hora, se considera vigente hasta el final de ese
 // día, que conserva el comportamiento anterior basado únicamente en fecha.
 function maintenanceScheduledDateSql(scheduleAlias = "m", contractAlias = "cm") {
-  // Contract rows use the contract's start date, ordinal and frequency as
-  // the source of truth. Standalone maintenance rows keep their manually
-  // assigned date. Contract days are capped at 28 by the API, so adding the
-  // day offset after moving from the first day of the month is calendar-safe.
-  return `(CASE
+  // The saved schedule date is final: an administrator may adjust individual
+  // contract dates, so the contract-derived date is only a legacy fallback.
+  // Contract days are capped at 28 by the API, making this fallback safe.
+  return `(COALESCE(${scheduleAlias}.fecha_programada, CASE
     WHEN ${contractAlias}.id IS NOT NULL AND ${scheduleAlias}.numero IS NOT NULL
       THEN (make_date(${contractAlias}.anio, ${contractAlias}.mes_inicio, 1)
         + ((${scheduleAlias}.numero - 1) * ${contractAlias}.frecuencia_meses) * INTERVAL '1 month'
         + (${contractAlias}.dia_inicio - 1) * INTERVAL '1 day')::date
-    ELSE ${scheduleAlias}.fecha_programada
-  END)`;
+    ELSE NULL
+  END))`;
 }
 
 function maintenanceDueAtSql(scheduleAlias = "m", scheduledDateExpression?: string) {
@@ -76,6 +75,48 @@ function dateOnly(value: unknown): string | null {
 
 function jsonArray(value: unknown): any[] {
   return Array.isArray(value) ? value : [];
+}
+
+const PUBLIC_STORAGE_BUCKETS = new Set([
+  "fotos-mantenimientos",
+  "fotos-reportes",
+  "fotos-visitas",
+  "fotos-recorridos",
+  "bitacoras-fotos",
+]);
+
+function maintenanceEvidenceUrl(item: any, fallbackBucket = "fotos-mantenimientos"): string | undefined {
+  const storedUrl = String(item?.url || "").trim();
+  const storedKey = String(item?.key || item?.storage_key || "").trim();
+  if (/^(?:https?:|data:image\/)/i.test(storedUrl)) return storedUrl;
+  if (storedUrl.startsWith("//")) return `https:${storedUrl}`;
+
+  const storageBaseUrl = String(
+    process.env.SOLUREPORT_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+  ).trim().replace(/\/+$/, "");
+  const rawUrlPath = storedUrl || storedKey;
+  const looksLikeStoragePath = /^\/?storage\/v1\//i.test(rawUrlPath);
+  if (looksLikeStoragePath) {
+    if (!storageBaseUrl) return undefined;
+    return `${storageBaseUrl}/${rawUrlPath.replace(/^\/+/, "")}`;
+  }
+
+  const hostWithoutScheme = storedUrl.match(/^([\w.-]+\.supabase\.(?:co|in)\/.*)$/i);
+  if (hostWithoutScheme) return `https://${hostWithoutScheme[1]}`;
+
+  let bucket = String(item?.bucket || item?.storage_bucket || fallbackBucket).trim();
+  let key = storedKey || storedUrl;
+  const bucketPrefix = key.split("/", 1)[0];
+  if (!item?.bucket && !item?.storage_bucket && PUBLIC_STORAGE_BUCKETS.has(bucketPrefix)) {
+    bucket = bucketPrefix;
+    key = key.slice(bucketPrefix.length + 1);
+  }
+  if (!storageBaseUrl || !bucket || !key) return undefined;
+
+  const encodedKey = key.replace(/^\/+/, "").split("/").map((segment) =>
+    encodeURIComponent(segment).replace(/%25([0-9a-f]{2})/gi, "%$1"),
+  ).join("/");
+  return `${storageBaseUrl}/storage/v1/object/public/${encodeURIComponent(bucket)}/${encodedKey}`;
 }
 
 function semanticParticipantPayload(participants: any[]) {
@@ -350,7 +391,7 @@ function mapMaintenance(row: any): any {
   const contractualDate = row.contrato_id && row.contrato_anio
     ? contractMaintenanceScheduledDate(row, row.numero)
     : null;
-  const scheduledDate = contractualDate || dateOnly(row.fecha_programada_efectiva) || dateOnly(row.fecha_programada) || "";
+  const scheduledDate = dateOnly(row.fecha_programada_efectiva) || dateOnly(row.fecha_programada) || contractualDate || "";
   const participants = jsonArray(row.participantes).map((item) => ({
     id: item.id,
     usuarioId: item.usuarioId || item.usuario_id,
@@ -412,16 +453,21 @@ function mapContract(row: any, maintenanceRows: any[] = []): any {
     costoTotalAnual: number(row.costo_total_anual),
     cantidadMantenimientos: number(row.cantidad_mantenimientos),
     costoPorMantenimiento: number(row.costo_por_mantenimiento),
-    mantenimientosRealizados: maintenanceRows.map((item) => ({
-      id: item.id,
-      numero: number(item.numero),
-      mes: Number(String(contractSchedule.find((expected) => expected.numero === number(item.numero))?.fechaProgramada || item.fecha_programada || "").slice(5, 7)) || number(item.numero),
-      fechaProgramada: contractSchedule.find((expected) => expected.numero === number(item.numero))?.fechaProgramada || dateOnly(item.fecha_programada) || "",
-      fechaRealizado: dateOnly(item.fecha_realizado) || undefined,
-      tecnicoId: item.tecnico_principal_id || undefined,
-      estado: item.estado === "ejecutado" ? "realizado" : item.estado === "asignado" ? "programado" : item.estado,
-      valorRecaudado: number(item.valor_recaudado),
-    })),
+    mantenimientosRealizados: maintenanceRows.map((item) => {
+      const scheduledDate = dateOnly(item.fecha_programada)
+        || contractSchedule.find((expected) => expected.numero === number(item.numero))?.fechaProgramada
+        || "";
+      return {
+        id: item.id,
+        numero: number(item.numero),
+        mes: Number(scheduledDate.slice(5, 7)) || number(item.numero),
+        fechaProgramada: scheduledDate,
+        fechaRealizado: dateOnly(item.fecha_realizado) || undefined,
+        tecnicoId: item.tecnico_principal_id || undefined,
+        estado: item.estado === "ejecutado" ? "realizado" : item.estado === "asignado" ? "programado" : item.estado,
+        valorRecaudado: number(item.valor_recaudado),
+      };
+    }),
     estado: row.estado === "cancelado" ? "cerrado" : row.estado,
     fechaCreacion: dateOnly(row.created_at) || "",
   };
@@ -619,7 +665,6 @@ async function activityRows(payload: Payload = {}) {
                  li.porcentaje_descuento_tardanza, li.created_at
             FROM public.liquidacion_items li
            WHERE li.periodo_id = $${selectedPeriodParam} AND li.actividad_id = a.id
-             AND (SELECT pp.estado FROM public.periodos_liquidacion pp WHERE pp.id = $${selectedPeriodParam}) = 'abierto'
              AND NOT EXISTS (SELECT 1 FROM public.liquidacion_periodo_items s2 WHERE s2.periodo_id = $${selectedPeriodParam})
         ) effective_liquidation), '[]'::json)`
       : `COALESCE((SELECT json_agg(json_build_object(
@@ -706,7 +751,7 @@ async function activityRows(payload: Payload = {}) {
               ? `(SELECT $${selectedPeriodParam}::uuid)`
               : `(SELECT p.id FROM public.periodos_liquidacion p WHERE a.fecha_operacion BETWEEN p.fecha_inicio AND p.fecha_fin ORDER BY p.fecha_inicio DESC LIMIT 1)`} AS periodo_id,
             ${selectedPeriodParam !== null && freezeSchemaReady
-              ? `(SELECT (pp.estado = 'cerrado' OR EXISTS (SELECT 1 FROM public.liquidacion_periodo_items frozen_items WHERE frozen_items.periodo_id = pp.id)) FROM public.periodos_liquidacion pp WHERE pp.id = $${selectedPeriodParam})`
+              ? `(SELECT EXISTS (SELECT 1 FROM public.liquidacion_periodo_items frozen_items WHERE frozen_items.periodo_id = $${selectedPeriodParam}))`
               : "false"} AS liquidacion_congelada,
             COUNT(*) OVER() AS total_count
        FROM public.actividades_operativas a
@@ -753,7 +798,26 @@ function mapReport(row: any, participant: any, index: number): any {
       : allEvidence.filter((item) => item?.participanteId === participant.id
         || (!item?.participanteId && item?.subidoPorId && item.subidoPorId === participant.tecnicoId)))
     : allEvidence;
-  const ofType = (kind: string) => evidence.filter((item) => item.tipo === kind).sort((a, b) => number(a.orden) - number(b.orden)).map((item) => item.url || item.key).filter(Boolean);
+  const evidenceFallbackBucket = isMaintenance
+    ? "fotos-mantenimientos"
+    : row.tipo === "visita_tecnica"
+      ? "fotos-visitas"
+      : row.tipo === "recorrido"
+        ? "fotos-recorridos"
+        : "fotos-reportes";
+  const ofType = (kind: string) => evidence
+    .filter((item) => item.tipo === kind)
+    .sort((a, b) => number(a.orden) - number(b.orden))
+    .map((item) => maintenanceEvidenceUrl(item, evidenceFallbackBucket))
+    .filter((url): url is string => Boolean(url));
+  const deliveryBitacoraUrl = maintenanceEvidenceUrl(
+    { url: participantDelivery?.fotoBitacoraUrl },
+    isMaintenance ? "bitacoras-fotos" : evidenceFallbackBucket,
+  );
+  const deliverySignatureUrl = maintenanceEvidenceUrl(
+    { url: participantDelivery?.firmaReceptorUrl },
+    evidenceFallbackBucket,
+  );
   const liquidation = jsonArray(row.liquidaciones).find((item) => item.participanteId === participant?.id || item.tecnicoId === participant?.tecnicoId);
   const approvals = jsonArray(row.aprobaciones);
   const approval = approvals.find((item) => item.participanteId === participant?.id)
@@ -810,17 +874,18 @@ function mapReport(row: any, participant: any, index: number): any {
     fotosAntes: ofType("antes"),
     fotosDespues: ofType("despues"),
     firmaReceptor: isMaintenance
-      ? participantDelivery?.firmaReceptorUrl || ofType("firma")[0]
+      ? deliverySignatureUrl || ofType("firma")[0]
       : ofType("firma")[0],
     datosReceptor: isMaintenance
       ? (participantDelivery?.receptorNombre ? { nombre: participantDelivery.receptorNombre, cedula: "", cargo: "" } : (canUseLegacyMaintenanceFields ? metadata.datosReceptor : undefined))
       : metadata.datosReceptor || (row.visita_receptor ? { nombre: row.visita_receptor, cedula: row.receptor_cedula || "", cargo: row.receptor_cargo || "" } : undefined),
     bitacora: isMaintenance
-      ? Boolean(participantDelivery?.fotoBitacoraUrl || ofType("bitacora").length > 0)
+      ? Boolean(deliveryBitacoraUrl || ofType("bitacora").length > 0)
       : ofType("bitacora").length > 0,
     fotoBitacora: isMaintenance
-      ? participantDelivery?.fotoBitacoraUrl || ofType("bitacora")[0]
+      ? deliveryBitacoraUrl || ofType("bitacora")[0]
       : ofType("bitacora")[0],
+    estadoEntrega: participant?.estadoReporte || participantDelivery?.estado || "pendiente",
     puntoPartida: row.punto_partida,
     puntoLlegada: row.punto_llegada,
     tipoRecorrido: row.tipo_recorrido === "con_herramienta" ? "con_herramienta" : row.tipo_recorrido === "normal" ? "normal" : undefined,
@@ -973,7 +1038,7 @@ function globallyCompletedMaintenancePredicate(scheduleAlias = "m", scheduledDat
   // the future. Otherwise it disappears from Próximos and is shown as
   // Historial before its scheduled day.
   const scheduleHasStarted = `${scheduledDateExpression || `${scheduleAlias}.fecha_programada`} <= ${BOGOTA_DATE_SQL}`;
-  return `(${scheduleHasStarted} AND (((${scheduleAlias}.admin_completado_at IS NOT NULL) OR (${scheduleAlias}.estado IN ('ejecutado', 'completado') AND NOT (${partialDelivery})) OR (${allDeliveries}))))`;
+  return `(${scheduleHasStarted} AND (((${scheduleAlias}.admin_completado_at IS NOT NULL) OR (${scheduleAlias}.estado IN ('ejecutado', 'completado', 'realizado') AND NOT (${partialDelivery})) OR (${allDeliveries}))))`;
 }
 
 async function dashboardMetrics(payload: Payload = {}) {
@@ -1446,14 +1511,11 @@ async function getLiquidationSnapshotRows(periodId: string, technicianIds?: stri
       values,
     );
     if (rows.length > 0) return rows;
-    const { rows: periodRows } = await dbQuery(
-      "SELECT estado FROM public.periodos_liquidacion WHERE id = $1",
-      [periodId],
-    );
-    // Un periodo abierto sin fotografía todavía debe usar la fuente viva.
-    // Un periodo cerrado vacío sí tiene una fotografía válida: simplemente no
-    // contiene participaciones liquidables.
-    return periodRows[0]?.estado === "cerrado" ? rows : null;
+    // Some older closed periods have no frozen snapshot because they were
+    // closed before the snapshot migration. An empty table is not evidence
+    // that the period had no liquidation rows; let callers fall back to live
+    // liquidation items in that case, even when the period is closed.
+    return null;
   } catch (error) {
     if (isMissingLiquidationSnapshot(error)) return null;
     throw error;
@@ -1737,7 +1799,10 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     row.extraLiderPendiente = extraLiderPendiente;
     row.baseExtraLiderAprobado = roundCurrency(extraConfig?.approved || 0);
     row.baseExtraLiderPendiente = roundCurrency(extraConfig?.pending || 0);
-    row.total = roundCurrency(row.totalAprobado + extraLider - row.descuentoValor);
+    // `getLiveLiquidationRows` (and frozen snapshots) already expose
+    // `valor_ganado` net of attendance discounts. Keep the discount as a
+    // separate informational total, but do not subtract it a second time.
+    row.total = roundCurrency(row.totalAprobado + extraLider);
     return {
       tecnicoId: row.tecnicoId,
       nombre: row.nombre,
@@ -2345,11 +2410,11 @@ function applyOwnMaintenanceDelivery(maintenance: any, participants: any[], user
     id: item.id,
     mantenimiento_id: maintenance.id,
     tipo: item.tipo,
-    url: item.url || item.key,
+    url: maintenanceEvidenceUrl(item),
     orden: number(item.orden),
     participante_id: item.participanteId || ownParticipant.id,
     fecha_subida: item.fechaSubida || "",
-  }));
+  })).filter((item) => Boolean(item.url));
 
   maintenance.actividadesRealizadas = ownParticipant.entrega_actividades_realizadas || undefined;
   maintenance.observaciones = ownParticipant.entrega_observaciones || undefined;
@@ -2357,8 +2422,12 @@ function applyOwnMaintenanceDelivery(maintenance: any, participants: any[], user
   maintenance.descripcionPendiente = ownParticipant.entrega_descripcion_pendiente || undefined;
   maintenance.nombreReceptor = ownParticipant.entrega_receptor_nombre || undefined;
   maintenance.firmado = Boolean(ownParticipant.entrega_firmado);
-  maintenance.firmaReceptorUrl = ownParticipant.entrega_firma_receptor_url || undefined;
-  maintenance.fotoBitacoraUrl = ownParticipant.entrega_foto_bitacora_url
+  maintenance.firmaReceptorUrl = maintenanceEvidenceUrl(
+    { url: ownParticipant.entrega_firma_receptor_url },
+  );
+  maintenance.fotoBitacoraUrl = maintenanceEvidenceUrl(
+    { url: ownParticipant.entrega_foto_bitacora_url },
+  )
     || evidence.find((item) => item.tipo === "bitacora")?.url
     || undefined;
   maintenance.tieneBitacora = Boolean(maintenance.fotoBitacoraUrl);
@@ -3134,212 +3203,104 @@ async function createAttendanceMemo(payload: Payload, user: UserContext) {
   const eventIds = uniqueIds(jsonArray(payload.asistenciaIds).map((id) => String(id)));
   if (!eventIds.length) throw new Error("Selecciona al menos una incidencia para generar el memorando.");
   return withTransaction(async (client) => {
-    const { rows: events } = await client.query(`SELECT r.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido FROM public.registros_asistencia r JOIN public.usuarios u ON u.id = r.usuario_id WHERE r.id = ANY($1::uuid[]) ORDER BY r.fecha, r.hora_entrada_programada`, [eventIds]);
+    const { rows: events } = await client.query(
+      `SELECT r.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido
+         FROM public.registros_asistencia r
+         JOIN public.usuarios u ON u.id = r.usuario_id
+        WHERE r.id = ANY($1::uuid[])
+        ORDER BY r.fecha, r.hora_entrada_programada`,
+      [eventIds],
+    );
     if (!events.length) throw new Error("No se encontraron las asistencias seleccionadas.");
     const usuarioId = String(payload.usuarioId || events[0].usuario_id);
     if (events.some((row) => row.usuario_id !== usuarioId)) throw new Error("Un memorando solo puede contener eventos del mismo trabajador.");
     const tipo = String(payload.tipo || inferMemoType(events));
-    const periodId = payload.periodoId || null;
-    if (periodId) {
-      const existing = await client.query("SELECT id FROM public.asistencia_memorandos WHERE usuario_id = $1 AND periodo_id = $2 AND tipo = $3 AND estado <> 'anulado' AND eliminado_en IS NULL LIMIT 1", [usuarioId, periodId, tipo]);
-      if (existing.rows[0]) {
-        const existingMemo = await client.query("SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido FROM public.asistencia_memorandos m LEFT JOIN public.usuarios u ON u.id = m.usuario_id WHERE m.id = $1", [existing.rows[0].id]);
-        const existingEvents = await client.query("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = $1 ORDER BY orden, fecha_snapshot", [existing.rows[0].id]);
-        return mapMemo(existingMemo.rows[0], existingEvents.rows);
+    const periodId = payload.periodoId ? String(payload.periodoId) : null;
+
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`attendance-memo:${usuarioId}:${periodId || "sin-periodo"}`]);
+    const { rows: existingRows } = await client.query(
+      `SELECT m.*
+         FROM public.asistencia_memorandos m
+        WHERE m.usuario_id = $1
+          AND m.periodo_id IS NOT DISTINCT FROM $2::uuid
+          AND m.eliminado_en IS NULL
+          AND m.estado <> 'anulado'
+        ORDER BY m.generado_en DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [usuarioId, periodId],
+    );
+    if (existingRows[0]) {
+      const existingMemo = existingRows[0];
+      if (existingMemo.estado !== "firmado") {
+        for (const [index, event] of events.entries()) {
+          await client.query(
+            `INSERT INTO public.asistencia_memorando_eventos
+               (memorando_id, asistencia_id, orden, fecha_snapshot, hora_programada_snapshot,
+                hora_llegada_snapshot, minutos_snapshot, minutos_adeudados_snapshot,
+                estado_snapshot, categoria_snapshot, porcentaje_snapshot, foto_url_snapshot,
+                ubicacion_snapshot)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (memorando_id, asistencia_id) DO NOTHING`,
+            [existingMemo.id, event.id, index, event.fecha, event.hora_entrada_programada,
+              event.hora_entrada_real, number(event.minutos_retraso),
+              number(event.minutos_adeudados ?? event.minutos_retraso), event.estado_entrada,
+              event.categoria_llegada, number(event.porcentaje_descuento), event.foto_llegada_url,
+              event.ubicacion_llegada_direccion],
+          );
+        }
+        await client.query("UPDATE public.asistencia_memorandos SET updated_at = clock_timestamp() WHERE id = $1", [existingMemo.id]);
       }
+      const memoResult = await client.query(
+        `SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido
+           FROM public.asistencia_memorandos m
+           LEFT JOIN public.usuarios u ON u.id = m.usuario_id
+          WHERE m.id = $1`,
+        [existingMemo.id],
+      );
+      const eventResult = await client.query(
+        "SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = $1 ORDER BY orden, fecha_snapshot",
+        [existingMemo.id],
+      );
+      return mapMemo(memoResult.rows[0], eventResult.rows);
     }
+
     await client.query("SELECT pg_advisory_xact_lock(hashtext('asistencia_memo_numbering'))");
     const { rows: sequenceRows } = await client.query("SELECT COUNT(*)::int AS total FROM public.asistencia_memorandos");
-    const year = new Date().getFullYear();
+    const year = dateOnly(events[0].fecha)?.slice(0, 4) || String(new Date().getFullYear());
     const numero = `MEMO-${year}-${String(number(sequenceRows[0]?.total) + 1).padStart(3, "0")}`;
     const displayName = [events[0].usuario_nombre, events[0].usuario_apellido].filter(Boolean).join(" ");
     const title = String(payload.titulo || `Llamado de atención por ${tipo.replaceAll("_", " ")}`);
     const narrative = String(payload.narrativa || `Se deja constancia de las incidencias de asistencia registradas para ${displayName} durante el período seleccionado.`);
-    const memoResult = await client.query(`INSERT INTO public.asistencia_memorandos (usuario_id,periodo_id,numero,tipo,estado,titulo,narrativa,fundamento,regimen_sancionatorio,plantilla_version,generado_por_id) VALUES ($1,$2,$3,$4,'generado',$5,$6,NULL,NULL,'asistencia-v2',$7) RETURNING *`, [usuarioId, periodId, numero, tipo, title, narrative, user.id]);
+    const memoResult = await client.query(
+      `INSERT INTO public.asistencia_memorandos
+         (usuario_id,periodo_id,numero,tipo,estado,titulo,narrativa,fundamento,
+          regimen_sancionatorio,plantilla_version,generado_por_id)
+       VALUES ($1,$2,$3,$4,'generado',$5,$6,$7,$8,'asistencia-v4-individual',$9)
+       RETURNING *`,
+      [usuarioId, periodId, numero, tipo, title, narrative,
+        String(payload.fundamento || "").trim() || null,
+        String(payload.regimenSancionatorio || "").trim() || null, user.id],
+    );
     for (const [index, event] of events.entries()) {
-      await client.query(`INSERT INTO public.asistencia_memorando_eventos (memorando_id,asistencia_id,orden,fecha_snapshot,hora_programada_snapshot,hora_llegada_snapshot,minutos_snapshot,minutos_adeudados_snapshot,estado_snapshot,categoria_snapshot,porcentaje_snapshot,foto_url_snapshot,ubicacion_snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (memorando_id,asistencia_id) DO NOTHING`, [memoResult.rows[0].id, event.id, index, event.fecha, event.hora_entrada_programada, event.hora_entrada_real, number(event.minutos_retraso), number(event.minutos_adeudados ?? event.minutos_retraso), event.estado_entrada, event.categoria_llegada, number(event.porcentaje_descuento), event.foto_llegada_url, event.ubicacion_llegada_direccion]);
+      await client.query(
+        `INSERT INTO public.asistencia_memorando_eventos
+           (memorando_id,asistencia_id,orden,fecha_snapshot,hora_programada_snapshot,
+            hora_llegada_snapshot,minutos_snapshot,minutos_adeudados_snapshot,
+            estado_snapshot,categoria_snapshot,porcentaje_snapshot,foto_url_snapshot,ubicacion_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         ON CONFLICT (memorando_id,asistencia_id) DO NOTHING`,
+        [memoResult.rows[0].id, event.id, index, event.fecha, event.hora_entrada_programada,
+          event.hora_entrada_real, number(event.minutos_retraso),
+          number(event.minutos_adeudados ?? event.minutos_retraso), event.estado_entrada,
+          event.categoria_llegada, number(event.porcentaje_descuento), event.foto_llegada_url,
+          event.ubicacion_llegada_direccion],
+      );
     }
     await client.query("UPDATE public.asistencia_memorandos SET updated_at = clock_timestamp() WHERE id = $1", [memoResult.rows[0].id]);
     const eventResult = await client.query("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = $1 ORDER BY orden", [memoResult.rows[0].id]);
     return mapMemo({ ...memoResult.rows[0], usuario_nombre: events[0].usuario_nombre, usuario_apellido: events[0].usuario_apellido }, eventResult.rows);
   });
-}
-
-async function createAttendanceFortnightMemos(payload: Payload, user: UserContext) {
-  await requireAdmin(user);
-  const range = attendanceRange(payload);
-  const titleTemplate = String(payload.titulo || "Llamado de atención formal por incidencias de asistencia").trim();
-  const narrativeTemplate = String(payload.narrativa || "Se deja constancia de las incidencias de asistencia registradas para {trabajador} durante la quincena del {desde} al {hasta}. El detalle cronológico y la evidencia disponible se adjuntan en este documento.").trim();
-  if (!titleTemplate || !narrativeTemplate) throw new Error("Completa el título y la descripción del memorando.");
-
-  return withTransaction(async (client) => {
-    await client.query("SELECT pg_advisory_xact_lock(hashtext('asistencia_memo_numbering'))");
-    const { rows } = await client.query(
-      `SELECT r.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido,
-              p.id AS periodo_id
-         FROM public.registros_asistencia r
-         JOIN public.usuarios u ON u.id = r.usuario_id
-         LEFT JOIN LATERAL (
-           SELECT id FROM public.periodos_liquidacion
-            WHERE r.fecha BETWEEN fecha_inicio AND fecha_fin
-            ORDER BY fecha_inicio DESC LIMIT 1
-         ) p ON TRUE
-        WHERE r.fecha BETWEEN $1::date AND $2::date
-          AND (r.estado_entrada IN ('tarde', 'no_reportado')
-            OR r.categoria_llegada IN ('tardanza_leve', 'tardanza_mayor', 'reposicion', 'no_reportado'))
-        ORDER BY r.usuario_id, p.id NULLS LAST, r.fecha, r.hora_entrada_programada`,
-      [range.start, range.end],
-    );
-    if (!rows.length) return {
-      creados: 0,
-      actualizados: 0,
-      existentes: 0,
-      total: 0,
-      fechaInicio: dateOnly(range.start) || range.start,
-      fechaFin: dateOnly(range.end) || range.end,
-      memorandos: [],
-    };
-
-    const groups = new Map<string, any[]>();
-    for (const row of rows) {
-      const key = `${row.usuario_id}:${row.periodo_id || "sin-periodo"}`;
-      groups.set(key, [...(groups.get(key) || []), row]);
-    }
-    const { rows: sequenceRows } = await client.query("SELECT COUNT(*)::int AS total FROM public.asistencia_memorandos");
-    let sequence = number(sequenceRows[0]?.total);
-    let creados = 0;
-    let actualizados = 0;
-    let existentes = 0;
-    const documentIds: string[] = [];
-    const periodLabelStart = dateOnly(range.start) || range.start;
-    const periodLabelEnd = dateOnly(range.end) || range.end;
-
-    const insertEvents = async (memoId: string, events: any[]) => {
-      const payloadRows = events.map((event, index) => ({
-        asistencia_id: event.id,
-        orden: index,
-        fecha_snapshot: dateOnly(event.fecha),
-        hora_programada_snapshot: event.hora_entrada_programada,
-        hora_llegada_snapshot: event.hora_entrada_real,
-        minutos_snapshot: number(event.minutos_retraso),
-        minutos_adeudados_snapshot: number(event.minutos_adeudados ?? event.minutos_retraso),
-        estado_snapshot: event.estado_entrada,
-        categoria_snapshot: event.categoria_llegada,
-        porcentaje_snapshot: number(event.porcentaje_descuento),
-        foto_url_snapshot: event.foto_llegada_url,
-        ubicacion_snapshot: event.ubicacion_llegada_direccion,
-      }));
-      const result = await client.query(
-        `INSERT INTO public.asistencia_memorando_eventos
-           (memorando_id, asistencia_id, orden, fecha_snapshot, hora_programada_snapshot,
-            hora_llegada_snapshot, minutos_snapshot, minutos_adeudados_snapshot,
-            estado_snapshot, categoria_snapshot, porcentaje_snapshot, foto_url_snapshot, ubicacion_snapshot)
-         SELECT $1, x.asistencia_id, x.orden, x.fecha_snapshot, x.hora_programada_snapshot,
-                x.hora_llegada_snapshot, x.minutos_snapshot, x.minutos_adeudados_snapshot,
-                x.estado_snapshot, x.categoria_snapshot, x.porcentaje_snapshot,
-                x.foto_url_snapshot, x.ubicacion_snapshot
-           FROM jsonb_to_recordset($2::jsonb) AS x(
-             asistencia_id uuid, orden integer, fecha_snapshot date,
-             hora_programada_snapshot time, hora_llegada_snapshot time,
-             minutos_snapshot integer, minutos_adeudados_snapshot integer,
-             estado_snapshot text, categoria_snapshot text, porcentaje_snapshot numeric,
-             foto_url_snapshot text, ubicacion_snapshot text)
-         ON CONFLICT (memorando_id, asistencia_id) DO NOTHING`,
-        [memoId, JSON.stringify(payloadRows)],
-      );
-      return result.rowCount || 0;
-    };
-
-    const renderTemplate = (template: string, events: any[]) => template
-      .replaceAll("{trabajador}", [events[0].usuario_nombre, events[0].usuario_apellido].filter(Boolean).join(" "))
-      .replaceAll("{desde}", formatAttendanceDate(range.start))
-      .replaceAll("{hasta}", formatAttendanceDate(range.end))
-      .replaceAll("{eventos}", String(events.length))
-      .replaceAll("{minutos}", String(events.reduce((sum, event) => sum + number(event.minutos_adeudados ?? event.minutos_retraso), 0)));
-
-    for (const events of groups.values()) {
-      const usuarioId = events[0].usuario_id;
-      const periodId = events[0].periodo_id || null;
-      const existing = await client.query(
-        `SELECT * FROM public.asistencia_memorandos
-          WHERE usuario_id = $1 AND periodo_id IS NOT DISTINCT FROM $2::uuid
-          ORDER BY generado_en DESC LIMIT 1 FOR UPDATE`,
-        [usuarioId, periodId],
-      );
-      if (existing.rows[0]) {
-        const memo = existing.rows[0];
-        if (memo.eliminado_en || memo.estado === "anulado") {
-          existentes += 1;
-          continue;
-        }
-        documentIds.push(memo.id);
-        if (memo.estado === "firmado") {
-          existentes += 1;
-          continue;
-        }
-        const added = await insertEvents(memo.id, events);
-        if (added) {
-          await client.query("UPDATE public.asistencia_memorandos SET updated_at = clock_timestamp() WHERE id = $1", [memo.id]);
-          actualizados += 1;
-        } else {
-          existentes += 1;
-        }
-        continue;
-      }
-
-      sequence += 1;
-      const year = range.start.slice(0, 4);
-      const numero = `MEMO-${year}-${String(sequence).padStart(3, "0")}`;
-      const tipo = inferMemoType(events);
-      const result = await client.query(
-        `INSERT INTO public.asistencia_memorandos
-           (usuario_id, periodo_id, numero, tipo, estado, titulo, narrativa,
-            fundamento, regimen_sancionatorio, plantilla_version, generado_por_id)
-         VALUES ($1, $2, $3, $4, 'generado', $5, $6, $7, $8, 'asistencia-v3-quincenal', $9)
-         RETURNING id`,
-        [
-          usuarioId,
-          periodId,
-          numero,
-          tipo,
-          renderTemplate(titleTemplate, events),
-          renderTemplate(narrativeTemplate, events),
-          String(payload.fundamento || "").trim() || null,
-          String(payload.regimenSancionatorio || "").trim() || null,
-          user.id,
-        ],
-      );
-      await insertEvents(result.rows[0].id, events);
-      documentIds.push(result.rows[0].id);
-      creados += 1;
-    }
-
-    const { rows: memoRows } = documentIds.length
-      ? await client.query(
-        `SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido,
-                p.fecha_inicio AS periodo_fecha_inicio, p.fecha_fin AS periodo_fecha_fin
-           FROM public.asistencia_memorandos m
-           LEFT JOIN public.usuarios u ON u.id = m.usuario_id
-           LEFT JOIN public.periodos_liquidacion p ON p.id = m.periodo_id
-          WHERE m.id = ANY($1::uuid[])
-          ORDER BY u.apellido, u.nombre, m.generado_en`,
-        [documentIds],
-      )
-      : { rows: [] };
-    const memoIds = memoRows.map((memo) => memo.id);
-    const { rows: memoEvents } = memoIds.length
-      ? await client.query("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = ANY($1::uuid[]) ORDER BY memorando_id, orden, fecha_snapshot", [memoIds])
-      : { rows: [] };
-    const eventsByMemo = new Map<string, any[]>();
-    for (const event of memoEvents) eventsByMemo.set(event.memorando_id, [...(eventsByMemo.get(event.memorando_id) || []), event]);
-    const memorandos = memoRows.map((memo) => mapMemo(memo, eventsByMemo.get(memo.id) || []));
-    return { creados, actualizados, existentes, total: groups.size, fechaInicio: periodLabelStart, fechaFin: periodLabelEnd, memorandos };
-  });
-}
-
-function formatAttendanceDate(value: string) {
-  const [year, month, day] = value.slice(0, 10).split("-");
-  return year && month && day ? `${day}/${month}/${year}` : value;
 }
 
 async function updateAttendanceMemo(payload: Payload, user: UserContext) {
@@ -3665,7 +3626,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       // Las fechas de un mantenimiento perteneciente a un contrato son
       // derivadas del cronograma contractual. Solo las filas independientes
       // pueden recibir una fecha manual desde este endpoint.
-      const scheduledDate = contractDate || dateOnly(payload.fechaProgramada) || dateOnly(current.fecha_programada);
+      const scheduledDate = dateOnly(payload.fechaProgramada) || dateOnly(current.fecha_programada) || contractDate;
       const { rows } = await dbQuery(
         `UPDATE public.mantenimientos_programados
             SET estado = COALESCE($2, estado),
@@ -3859,7 +3820,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
         : null;
       // Nunca permitimos que una edición administrativa desincronice una
       // fila contractual. Las filas sin contrato conservan la edición manual.
-      const scheduledDate = contractDate || dateOnly(payload.fechaProgramada || current.fecha_programada);
+      const scheduledDate = dateOnly(payload.fechaProgramada) || dateOnly(current.fecha_programada) || contractDate;
       if (normalizedState === "ejecutado" && scheduledDate && scheduledDate > bogotaClock().date) {
         throw new Error(`Este mantenimiento estará disponible desde el ${scheduledDate}.`);
       }
@@ -4019,7 +3980,6 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "attendance.fortnightly": return attendanceFortnightly(payload, user);
     case "attendance.memos": return attendanceMemos(payload, user);
     case "attendance.memo.create": return createAttendanceMemo(payload, user);
-    case "attendance.memo.create_fortnight": return createAttendanceFortnightMemos(payload, user);
     case "attendance.memo.update": return updateAttendanceMemo(payload, user);
 
     case "arrivals.list": {
@@ -4417,15 +4377,17 @@ function buildContractSchedule(payload: Payload) {
 
   if (supplied.length > 0) {
     if (supplied.length !== count) throw new Error("El cronograma debe tener exactamente la cantidad de mantenimientos configurada.");
-    return supplied.map((item, index) => ({
-      ...item,
-      // `numero` identifica la posición en el contrato; `mes` es el mes
-      // calendario usado por los informes. La fecha es autoritativa del
-      // contrato y no se acepta una fecha vieja enviada por el formulario.
-      numero: integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12),
-      mes: generated[index].mes,
-      fechaProgramada: generated[index].fechaProgramada,
-    }));
+    return supplied.map((item, index) => {
+      const fechaProgramada = dateOnly(item.fechaProgramada) || generated[index].fechaProgramada;
+      return {
+        ...item,
+        // `numero` identifies the contract slot, while the administrator's
+        // saved date and its calendar month are authoritative for operations.
+        numero: integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12),
+        mes: Number(fechaProgramada.slice(5, 7)) || generated[index].mes,
+        fechaProgramada,
+      };
+    });
   }
 
   return generated;
@@ -5889,10 +5851,18 @@ async function syncAttendanceDiscount(attendanceId: string, technicianId: string
       )`,
     [technicianId, periodId],
   );
-  const rawPercentage = attendanceRows
-    .filter((row) => Boolean(row.descuento_aplicado))
-    .reduce((sum, row) => sum + percentage(row.porcentaje_descuento), 0);
-  const normalizedPercentage = Math.min(100, Math.max(0, rawPercentage));
+  const discountedAttendanceRows = attendanceRows.filter((row) => Boolean(row.descuento_aplicado));
+  // Keep the period discount consistent with the canonical liquidation query:
+  // use the highest configured attendance penalty, not the sum of repeated
+  // daily events (e.g. five 30% no-shows must not become a 100% deduction).
+  const rawPercentage = discountedAttendanceRows.reduce(
+    (sum, row) => sum + percentage(row.porcentaje_descuento),
+    0,
+  );
+  const normalizedPercentage = Math.min(100, Math.max(0, discountedAttendanceRows.reduce(
+    (max, row) => Math.max(max, percentage(row.porcentaje_descuento)),
+    0,
+  )));
   if (normalizedPercentage <= 0) {
     await dbQuery("DELETE FROM public.asistencia_descuentos WHERE periodo_id = $1 AND tecnico_id = $2", [periodId, technicianId]);
     await dbQuery(

@@ -706,10 +706,11 @@ export function generateComprobantePDF(data: {
   tecnico: string;
   cedula?: string;
   items: { actividad: string; fecha: string; valorBase: number; porcentaje: number; valorLiquidado: number }[];
-  desplazamientos?: { descripcion: string; fecha: string; valor: number }[];
+  desplazamientos?: { descripcion: string; fecha: string; valor: number; descuento?: number }[];
   totalAuxilio: number;
   totalDescuentoTardanza?: number;
   totalRodamiento: number;
+  totalDescuentoRecorridos?: number;
   totalExtraLider?: number;
   grandTotal: number;
 }): void {
@@ -796,23 +797,27 @@ export function generateComprobantePDF(data: {
     ensurePageSpace(18);
     doc.setFontSize(9);
     doc.setTextColor(60);
-    doc.text("CONCEPTO: RECORRIDOS Y DESPLAZAMIENTOS", 14, y);
+    doc.text("CONCEPTO: BONO POR RECORRIDO", 14, y);
     y += 6;
 
     autoTable(doc, {
       startY: y,
-      head: [["Descripción", "Fecha", "Valor"]],
+      head: [["Subtipo / descripción", "Fecha", "Valor base", "Descuento", "Valor liquidado"]],
       body: (data.desplazamientos || []).map((item) => [
         item.descripcion || "Recorrido",
         item.fecha,
         formatCurrencyPDF(item.valor),
+        item.descuento ? `-${formatCurrencyPDF(item.descuento)}` : formatCurrencyPDF(0),
+        formatCurrencyPDF(Math.max(0, item.valor - (item.descuento || 0))),
       ]),
       styles: { fontSize: 8, cellPadding: 2.5, overflow: "linebreak", valign: "middle" },
       headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255] },
       columnStyles: {
-        0: { cellWidth: tableContentWidth - 52 },
-        1: { cellWidth: 24 },
-        2: { cellWidth: 28, halign: "right" },
+        0: { cellWidth: 66 },
+        1: { cellWidth: 22 },
+        2: { cellWidth: 30, halign: "right" },
+        3: { cellWidth: 30, halign: "right" },
+        4: { cellWidth: tableContentWidth - 148, halign: "right" },
       },
       theme: "grid",
       margin: tableMargin,
@@ -823,7 +828,7 @@ export function generateComprobantePDF(data: {
     y = (doc as any).lastAutoTable.finalY + 6;
     doc.setFontSize(8);
     doc.setTextColor(100);
-    doc.text(`Cantidad de desplazamientos: ${(data.desplazamientos || []).length}`, 14, y);
+    doc.text(`Actividades en bono por recorrido: ${(data.desplazamientos || []).length}`, 14, y);
     y += 8;
   }
 
@@ -831,6 +836,7 @@ export function generateComprobantePDF(data: {
   let totalsBlockHeight = 11;
   if ((data.totalDescuentoTardanza || 0) > 0) totalsBlockHeight += 12;
   if (data.totalRodamiento > 0) totalsBlockHeight += 6;
+  if ((data.totalDescuentoRecorridos || 0) > 0) totalsBlockHeight += 12;
   if ((data.totalExtraLider || 0) > 0) totalsBlockHeight += 6;
   totalsBlockHeight += 40 + legalBlockHeight;
   ensurePageSpace(totalsBlockHeight);
@@ -846,7 +852,7 @@ export function generateComprobantePDF(data: {
 
   if ((data.totalDescuentoTardanza || 0) > 0) {
     doc.setTextColor(180, 50, 50);
-    doc.text("Descuento por Tardanza:", totalsX - 5, y);
+    doc.text("Descuento Tardanza · Auxilio:", totalsX - 5, y);
     doc.text(`-${formatCurrencyPDF(data.totalDescuentoTardanza || 0)}`, pageWidth - 14, y, { align: "right" });
     y += 6;
 
@@ -859,9 +865,22 @@ export function generateComprobantePDF(data: {
 
   if (data.totalRodamiento > 0) {
     doc.setTextColor(60);
-    doc.text("Comp. Rodamiento y Transporte:", totalsX - 30, y);
+    doc.text("Bono por Recorrido:", totalsX - 10, y);
     doc.setTextColor(30);
     doc.text(formatCurrencyPDF(data.totalRodamiento), pageWidth - 14, y, { align: "right" });
+    y += 6;
+  }
+
+  if ((data.totalDescuentoRecorridos || 0) > 0) {
+    doc.setTextColor(180, 50, 50);
+    doc.text("Descuento Tardanza · Visitas:", totalsX - 5, y);
+    doc.text(`-${formatCurrencyPDF(data.totalDescuentoRecorridos || 0)}`, pageWidth - 14, y, { align: "right" });
+    y += 6;
+
+    doc.setTextColor(60);
+    doc.text("Bono por Recorrido Neto:", totalsX - 10, y);
+    doc.setTextColor(30);
+    doc.text(formatCurrencyPDF(data.totalRodamiento - (data.totalDescuentoRecorridos || 0)), pageWidth - 14, y, { align: "right" });
     y += 6;
   }
 

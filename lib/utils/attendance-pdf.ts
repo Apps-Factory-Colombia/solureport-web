@@ -88,6 +88,13 @@ function minuteBefore(value?: string) {
   return `${String(Math.floor(previous / 60)).padStart(2, "0")}:${String(previous % 60).padStart(2, "0")}`;
 }
 
+function durationLabel(totalMinutes: number) {
+  const minutes = Math.max(0, Math.floor(Number(totalMinutes) || 0));
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return hours ? `${hours}h ${remainder}m` : `${remainder}m`;
+}
+
 function addPolicyCards(doc: jsPDF, company: CompanySettings, startY: number) {
   const lateStart = safe(company.horaInicioDescuentoTardanza, "08:05");
   const cutoff = safe(company.horaDescuentoAutomatico, "08:30");
@@ -95,10 +102,16 @@ function addPolicyCards(doc: jsPDF, company: CompanySettings, startY: number) {
   const latePercentage = Number(company.porcentajeDescuentoTardanza ?? 5);
   const noReportPercentage = Number(company.porcentajeDescuentoNoReportado ?? 30);
   const reposicionPercentage = Number(company.porcentajeDescuentoReposicion ?? 0);
+  const noReportMinutes = Math.max(0, Number(company.minutosNoReportado ?? 30));
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8);
+  doc.setTextColor(24, 34, 54);
+  doc.text("PACTO OPERATIVO DE HORARIOS Y CRITERIO DE LIQUIDACION DE ACTIVIDADES", 14, startY + 4);
+  startY += 8;
   const bands: Array<{ title: string; detail: string; color: [number, number, number]; fill: [number, number, number] }> = [
-    { title: "TOLERANCIA", detail: `Antes de ${lateStart}\nSin descuento`, color: [31, 158, 98], fill: [238, 250, 243] },
+    { title: "0% TOLERANCIA", detail: `Hasta ${minuteBefore(lateStart)}\nSin descuento`, color: [31, 158, 98], fill: [238, 250, 243] },
     { title: `RETARDO LEVE -${latePercentage}%`, detail: `${lateStart} a ${lateEnd}\nSi reporta su llegada`, color: [215, 132, 22], fill: [255, 248, 230] },
-    { title: `CORTE ${cutoff}`, detail: `Sin reporte: -${noReportPercentage}%\nSi reporta: reposicion ${reposicionPercentage}%`, color: [202, 57, 57], fill: [255, 240, 240] },
+    { title: `RETARDO MAYOR / SIN REGISTRO -${noReportPercentage}%`, detail: `Sin registro al corte ${cutoff} (+${noReportMinutes} min)\nRegistro posterior: reposicion ${reposicionPercentage}%`, color: [202, 57, 57], fill: [255, 240, 240] },
   ];
   const gap = 4;
   const width = (182 - gap * 2) / 3;
@@ -106,18 +119,19 @@ function addPolicyCards(doc: jsPDF, company: CompanySettings, startY: number) {
     const x = 14 + index * (width + gap);
     doc.setFillColor(...band.fill);
     doc.setDrawColor(...band.color);
-    doc.roundedRect(x, startY, width, 22, 1.5, 1.5, "FD");
+    doc.roundedRect(x, startY, width, 25, 1.5, 1.5, "FD");
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(8);
+    doc.setFontSize(7);
     doc.setTextColor(...band.color);
-    doc.text(band.title, x + 3, startY + 5);
+    const titleLines = doc.splitTextToSize(band.title, width - 6).slice(0, 2);
+    doc.text(titleLines, x + 3, startY + 4.5);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(7.5);
     doc.setTextColor(60, 72, 94);
-    doc.text(band.detail.split("\n"), x + 3, startY + 10);
+    doc.text(band.detail.split("\n"), x + 3, startY + (titleLines.length > 1 ? 12 : 10));
   });
   doc.setTextColor(30, 38, 53);
-  return startY + 27;
+  return startY + 30;
 }
 
 function addMetricCards(doc: jsPDF, metrics: Array<{ value: string; label: string; color: [number, number, number] }>, startY: number) {
@@ -295,30 +309,6 @@ export async function generateAttendanceMemoPDF({ memo, user, company }: { memo:
   doc.save(`memorando_${memo.numero}.pdf`);
 }
 
-export async function generateAttendanceMemosFortnightlyPDF({
-  memos,
-  users,
-  company,
-  fechaInicio,
-  fechaFin,
-}: {
-  memos: AttendanceMemo[];
-  users: User[];
-  company: CompanySettings;
-  fechaInicio: string;
-  fechaFin: string;
-}) {
-  if (!memos.length) return;
-  const doc = new jsPDF({ orientation: "portrait", format: "a4" });
-  const usersById = new Map(users.map((user) => [user.id, user]));
-  for (const [index, memo] of memos.entries()) {
-    if (index > 0) doc.addPage();
-    await appendAttendanceMemo(doc, { memo, user: memo.usuarioId ? usersById.get(memo.usuarioId) : undefined, company });
-  }
-  addFooter(doc, company, `Memorandos quincenales - ${dateLabel(fechaInicio)} al ${dateLabel(fechaFin)}`);
-  doc.save(`memorandos_quincena_${fechaInicio}_${fechaFin}.pdf`);
-}
-
 function numberText(value: number) {
   return String(Math.max(0, Number(value) || 0));
 }
@@ -356,13 +346,13 @@ export function generateAttendanceFortnightlyPDF({
   })).filter((worker) => worker.incidencias.length > 0);
   const events = employees.flatMap((worker) => worker.incidencias.map((row) => ({ ...row, nombreTrabajador: worker.nombre })));
   const minutes = events.reduce((sum, row) => sum + Number(row.minutosAdeudados ?? row.minutosRetraso ?? 0), 0);
-  const discount = employees.reduce((sum, worker) => sum + Math.min(100, worker.incidencias.reduce((total, row) => total + Number(row.porcentajeDescuento || 0), 0)), 0);
+  const discountedEvents = events.filter((row) => Number(row.porcentajeDescuento || 0) > 0).length;
   const title = "Informe Oficial de Control de Asistencia y Liquidacion de Retardos";
   let y = reportHeader(doc, company, title, `Reporte biometrico quincenal | Periodo del ${dateLong(report.fechaInicio)} al ${dateLong(report.fechaFin)}`);
   y = addPolicyCards(doc, company, y);
   y = addMetricCards(doc, [
-    { value: `${minutes} min`, label: "Tiempo adeudado", color: [199, 39, 39] },
-    { value: `-${discount}%`, label: "Descuentos acumulados", color: [199, 39, 39] },
+    { value: durationLabel(minutes), label: "Tiempo adeudado total", color: [199, 39, 39] },
+    { value: String(discountedEvents), label: "Eventos con descuento aplicado", color: [199, 39, 39] },
     { value: String(events.length), label: "Novedades registradas", color: [28, 38, 58] },
     { value: String(employees.length), label: "Trabajadores auditados", color: [28, 38, 58] },
   ], y);
@@ -372,7 +362,7 @@ export function generateAttendanceFortnightlyPDF({
   doc.setFont("helvetica", "bold");
   doc.setFontSize(11);
   doc.setTextColor(24, 34, 54);
-  doc.text("LIQUIDACION INDIVIDUAL: TIEMPO ADEUDADO Y DESCUENTO QUINCENAL", 19, y + 5);
+  doc.text("LIQUIDACION INDIVIDUAL: TIEMPO ADEUDADO Y % A DESCONTAR", 19, y + 5);
   y += 11;
 
   const cardWidth = 89;
@@ -426,7 +416,7 @@ export function generateAttendanceFortnightlyPDF({
   doc.text("TABLA RESUMEN QUINCENAL", 19, cardY + 5);
   autoTable(doc, {
     startY: cardY + 9,
-    head: [["Colaborador / Tecnico", "Eventos", "Tiempo adeudado", "Leves", "Fuera del corte / no registro", "% quincenal"]],
+    head: [["Colaborador / Tecnico", "Eventos", "Tiempo adeudado", `Leves (-${Number(company.porcentajeDescuentoTardanza ?? 5)}%)`, `Mayores / no reg. (-${Number(company.porcentajeDescuentoNoReportado ?? 30)}%)`, "% descuento quincenal"]],
     body: employees.map((worker) => [
       worker.nombre,
       String(worker.incidencias.length),
@@ -435,7 +425,7 @@ export function generateAttendanceFortnightlyPDF({
       String(worker.incidencias.filter((row) => ["tardanza_mayor", "reposicion", "no_reportado"].includes(row.categoriaLlegada || "") || row.estadoEntrada === "no_reportado").length),
       `-${Math.min(100, worker.incidencias.reduce((sum, row) => sum + Number(row.porcentajeDescuento || 0), 0))}%`,
     ]),
-    foot: [["IMPACTO TOTAL CONSOLIDADO", String(events.length), `${minutes} min`, String(events.filter((row) => row.categoriaLlegada === "tardanza_leve").length), String(events.filter((row) => ["tardanza_mayor", "reposicion", "no_reportado"].includes(row.categoriaLlegada || "") || row.estadoEntrada === "no_reportado").length), `-${discount}%`]],
+    foot: [["IMPACTO TOTAL (porcentajes individuales)", String(events.length), `${minutes} min`, String(events.filter((row) => row.categoriaLlegada === "tardanza_leve").length), String(events.filter((row) => ["tardanza_mayor", "reposicion", "no_reportado"].includes(row.categoriaLlegada || "") || row.estadoEntrada === "no_reportado").length), "—"]],
     theme: "grid",
     headStyles: { fillColor: [21, 31, 51], textColor: [255, 255, 255], fontSize: 7 },
     footStyles: { fillColor: [238, 242, 248], textColor: [30, 42, 65], fontStyle: "bold", fontSize: 7 },

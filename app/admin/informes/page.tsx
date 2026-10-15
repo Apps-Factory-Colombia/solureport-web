@@ -82,6 +82,27 @@ const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
 const TABLE_PAGE_SIZE = 10;
 const ALL_PERIODS_VALUE = "__todos_los_periodos__";
 
+function EvidenceImage({ src, alt, className }: { src: string; alt: string; className: string }) {
+  const [failedSource, setFailedSource] = useState<string | null>(null);
+
+  if (failedSource === src) {
+    return (
+      <span
+        role="img"
+        aria-label={`${alt}: no disponible`}
+        className={cn("flex items-center justify-center bg-secondary/30 p-2 text-center text-xs text-muted-foreground", className)}
+      >
+        Evidencia no disponible
+      </span>
+    );
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={src} alt={alt} className={className} onError={() => setFailedSource(src)} />
+  );
+}
+
 function getLatestPeriodId(periods: LiquidationPeriod[]) {
   return [...periods]
     .sort((left, right) => right.fechaFin.localeCompare(left.fechaFin) || right.fechaInicio.localeCompare(left.fechaInicio))[0]?.id
@@ -3390,6 +3411,7 @@ export default function InformesPage() {
                     <TableBody>
                       {paginatedPreventivos.items.map((row) => {
                         const r = row.report;
+                        const totalFotos = row.reports.reduce((sum, item) => sum + getEvidenceCount(item), 0);
                         const tech = usersById.get(r.tecnicoId);
                         const client = r.clienteId ? clientsById.get(r.clienteId) : null;
                         const leader = usersById.get(r.liderGrupoId);
@@ -3450,7 +3472,7 @@ export default function InformesPage() {
                             <TableCell>
                               <div className="flex items-center gap-1 text-xs text-muted-foreground">
                                 <ImageIcon className="h-3 w-3" />
-                                {getEvidenceCount(r)}
+                                {totalFotos}
                               </div>
                             </TableCell>
                             <TableCell className="text-xs text-foreground/80">
@@ -4066,11 +4088,14 @@ export default function InformesPage() {
                           ...(participantReport.fotosAntes || []),
                           ...(participantReport.fotosDespues || []),
                         ];
-                        const participantStatus = participantReport.estadoAprobacionLider === "aprobado"
-                          ? "Aprobado"
-                          : participantReport.estadoAprobacionLider === "rechazado"
-                            ? "Rechazado"
-                            : "Pendiente";
+                        const hasSubmittedDelivery = ["enviada", "aprobada"].includes(participantReport.estadoEntrega || "");
+                        const participantStatus = participantReport.estadoAprobacionLider === "rechazado"
+                          ? "Rechazado"
+                          : !hasSubmittedDelivery
+                            ? "Sin entrega reportada"
+                            : participantReport.estadoAprobacionLider === "aprobado"
+                              ? "Aprobado"
+                              : "Pendiente de aprobación";
 
                         return (
                           <div key={participantReport.id} className="rounded-lg border border-border/50 bg-background/40 p-4 space-y-3">
@@ -4089,12 +4114,20 @@ export default function InformesPage() {
                                     ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
                                     : participantStatus === "Rechazado"
                                       ? "border-red-500/20 bg-red-500/10 text-red-400"
-                                      : "border-amber-500/20 bg-amber-500/10 text-amber-400"
+                                      : participantStatus === "Sin entrega reportada"
+                                        ? "border-slate-500/20 bg-slate-500/10 text-slate-400"
+                                        : "border-amber-500/20 bg-amber-500/10 text-amber-400"
                                 )}
                               >
                                 {participantStatus}
                               </Badge>
                             </div>
+
+                            {!hasSubmittedDelivery && (
+                              <p className="rounded-md border border-slate-500/20 bg-slate-500/5 p-3 text-sm text-muted-foreground">
+                                Este técnico todavía no ha enviado su entrega ni sus evidencias. El mantenimiento seguirá pendiente hasta que reporten todos los técnicos asignados.
+                              </p>
+                            )}
 
                             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                               <div className="rounded-md border border-border/50 bg-secondary/20 p-3">
@@ -4143,8 +4176,7 @@ export default function InformesPage() {
                                       <div className="grid grid-cols-2 gap-2">
                                         {participantReport.fotosAntes.map((url, index) => (
                                           <a key={`${participantReport.id}-antes-${index}`} href={url} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/30">
-                                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                                            <img src={url} alt={`Antes ${index + 1} de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
+                                            <EvidenceImage src={url} alt={`Antes ${index + 1} de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
                                           </a>
                                         ))}
                                       </div>
@@ -4156,8 +4188,7 @@ export default function InformesPage() {
                                       <div className="grid grid-cols-2 gap-2">
                                         {participantReport.fotosDespues.map((url, index) => (
                                           <a key={`${participantReport.id}-despues-${index}`} href={url} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/30">
-                                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                                            <img src={url} alt={`Después ${index + 1} de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
+                                            <EvidenceImage src={url} alt={`Después ${index + 1} de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
                                           </a>
                                         ))}
                                       </div>
@@ -4167,8 +4198,7 @@ export default function InformesPage() {
                                     <div className="space-y-2">
                                       <p className="text-xs text-muted-foreground">Foto de bitácora</p>
                                       <a href={participantReport.fotoBitacora} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/30">
-                                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                                        <img src={participantReport.fotoBitacora} alt={`Bitácora de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
+                                        <EvidenceImage src={participantReport.fotoBitacora} alt={`Bitácora de ${getParticipantName(participantReport.tecnicoId)}`} className="h-full w-full object-cover" />
                                       </a>
                                     </div>
                                   )}
@@ -4494,8 +4524,7 @@ export default function InformesPage() {
                           <div className="grid grid-cols-2 gap-2">
                             {activeDetailReport.fotosAntes.map((url, index) => (
                               <a key={`antes-${index}`} href={url} target="_blank" rel="noreferrer" className="aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/20">
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img src={url} alt={`Antes ${index + 1}`} className="h-full w-full object-cover" />
+                                <EvidenceImage src={url} alt={`Antes ${index + 1}`} className="h-full w-full object-cover" />
                               </a>
                             ))}
                           </div>
@@ -4507,8 +4536,7 @@ export default function InformesPage() {
                           <div className="grid grid-cols-2 gap-2">
                             {activeDetailReport.fotosDespues.map((url, index) => (
                               <a key={`despues-${index}`} href={url} target="_blank" rel="noreferrer" className="aspect-square overflow-hidden rounded-md border border-border/50 bg-secondary/20">
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img src={url} alt={`Después ${index + 1}`} className="h-full w-full object-cover" />
+                                <EvidenceImage src={url} alt={`Después ${index + 1}`} className="h-full w-full object-cover" />
                               </a>
                             ))}
                           </div>
@@ -4523,8 +4551,7 @@ export default function InformesPage() {
                             rel="noreferrer"
                             className="block max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/20"
                           >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={activeDetailReport.fotoBitacora} alt="Foto de bitácora" className="h-full w-full object-cover" />
+                            <EvidenceImage src={activeDetailReport.fotoBitacora} alt="Foto de bitácora" className="h-full w-full object-cover" />
                           </a>
                         </div>
                       )}
@@ -4537,8 +4564,7 @@ export default function InformesPage() {
                             rel="noreferrer"
                             className="block max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/20"
                           >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={activeDetailReport.fotoHerramienta} alt="Foto de herramienta" className="h-full w-full object-cover" />
+                            <EvidenceImage src={activeDetailReport.fotoHerramienta} alt="Foto de herramienta" className="h-full w-full object-cover" />
                           </a>
                         </div>
                       )}
@@ -4551,8 +4577,7 @@ export default function InformesPage() {
                             rel="noreferrer"
                             className="block max-w-md overflow-hidden rounded-md border border-border/50 bg-secondary/20"
                           >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img src={activeDetailReport.fotoEvidencia} alt="Foto de evidencia de actividad grupal" className="h-full w-full object-cover" />
+                            <EvidenceImage src={activeDetailReport.fotoEvidencia} alt="Foto de evidencia de actividad grupal" className="h-full w-full object-cover" />
                           </a>
                         </div>
                       )}
