@@ -151,6 +151,7 @@ export default function LlegadasPage() {
   const [historyFilters, setHistoryFilters] = useState({ userId: NO_USER, start: monthStart(getBogotaDate()), end: getBogotaDate(), search: "", status: "todos" as StatusFilter });
   const [history, setHistory] = useState<AttendanceHistoryResponse | null>(null);
   const [historyPage, setHistoryPage] = useState(1);
+  const [historyWorkerPage, setHistoryWorkerPage] = useState(1);
   const [memoSearch, setMemoSearch] = useState("");
   const [memoUserId, setMemoUserId] = useState(ALL_USERS);
   const [memoStatus, setMemoStatus] = useState("todos");
@@ -192,6 +193,16 @@ export default function LlegadasPage() {
   const [ruleForm, setRuleForm] = useState<RuleForm>({ horaInicio: "08:05", horaCorte: "08:30", minutosNoReportado: "30", tardanzaPorcentaje: "5", reposicionPorcentaje: "0", noReportadoPorcentaje: "30" });
 
   const eligibleUsers = useMemo(() => users.filter((user) => user.rol !== "admin"), [users]);
+  const filteredHistoryUsers = useMemo(() => {
+    const query = normalizeSearch(historySearch.trim());
+    return eligibleUsers
+      .filter((user) => !query || normalizeSearch(`${fullName(user)} ${user.email || ""} ${user.rol}`).includes(query))
+      .sort((a, b) => fullName(a).localeCompare(fullName(b), "es"));
+  }, [eligibleUsers, historySearch]);
+  const visibleHistoryUsers = useMemo(
+    () => filteredHistoryUsers.slice((historyWorkerPage - 1) * PAGE_SIZE, historyWorkerPage * PAGE_SIZE),
+    [filteredHistoryUsers, historyWorkerPage],
+  );
 
   const syncSettings = useCallback((value: CompanySettings) => {
     setSettings(value);
@@ -526,9 +537,33 @@ export default function LlegadasPage() {
           </TabsContent>
 
           <TabsContent value="historial" className="space-y-4">
-            <HistoryToolbar filters={historyFilters} users={eligibleUsers} onChange={(patch) => { if (patch.userId !== undefined) setHistory(null); setHistoryFilters((current) => ({ ...current, ...patch })); setHistoryPage(1); }} />
+            <HistoryToolbar
+              filters={historyFilters}
+              selectedWorker={eligibleUsers.find((user) => user.id === historyFilters.userId)}
+              onBack={() => {
+                setHistory(null);
+                setHistoryFilters((current) => ({ ...current, userId: NO_USER, search: "", status: "todos" }));
+                setHistoryPage(1);
+              }}
+              onChange={(patch) => {
+                if (patch.userId !== undefined) setHistory(null);
+                if (patch.search !== undefined) setHistoryWorkerPage(1);
+                setHistoryFilters((current) => ({ ...current, ...patch }));
+                setHistoryPage(1);
+              }}
+            />
             {historyFilters.userId === NO_USER ? (
-              <EmptyPanel icon={UserRound} title="Busca un trabajador" description="Escribe al menos dos letras para encontrar a una persona. Su historial aparecerá como tarjetas detalladas." />
+              <HistoryWorkerList
+                users={visibleHistoryUsers}
+                total={filteredHistoryUsers.length}
+                page={historyWorkerPage}
+                onPageChange={setHistoryWorkerPage}
+                onSelect={(userId) => {
+                  setHistory(null);
+                  setHistoryPage(1);
+                  setHistoryFilters((current) => ({ ...current, userId, search: "", status: "todos" }));
+                }}
+              />
             ) : (
               <AttendanceHistoryCards title={`Historial · ${fullName(eligibleUsers.find((user) => user.id === historyFilters.userId)) || "Trabajador"}`} subtitle={`${formatDate(historyFilters.start)} al ${formatDate(historyFilters.end)} · consulta individual`} rows={history?.records || []} summary={history?.summary} loading={historyLoading} page={historyPage} onPageChange={setHistoryPage} total={history?.total || 0} onEdit={openEdit} onSelect={setSelectedRecord} />
             )}
@@ -682,14 +717,45 @@ function DayToolbar({ date, setDate, search, setSearch, status, setStatus }: { d
   </div>;
 }
 
-function HistoryToolbar({ filters, users, onChange }: { filters: { userId: string; start: string; end: string; search: string; status: StatusFilter }; users: User[]; onChange: (patch: Partial<typeof filters>) => void }) {
-  return <div className="grid gap-3 rounded-xl border border-border/50 bg-card/60 p-3 sm:grid-cols-2 xl:grid-cols-5 xl:items-end">
-    <WorkerPicker label="Trabajador" users={users} value={filters.userId} onChange={(userId) => onChange({ userId })} clearValue={NO_USER} />
+function HistoryToolbar({ filters, selectedWorker, onBack, onChange }: { filters: { userId: string; start: string; end: string; search: string; status: StatusFilter }; selectedWorker?: User; onBack: () => void; onChange: (patch: Partial<typeof filters>) => void }) {
+  return <div className={cn("grid gap-3 rounded-xl border border-border/50 bg-card/60 p-3 sm:grid-cols-2 xl:items-end", selectedWorker ? "xl:grid-cols-5" : "xl:grid-cols-3")}>
+    {selectedWorker ? (
+      <div className="min-w-0">
+        <Label>Trabajador seleccionado</Label>
+        <Button variant="outline" className="mt-1 w-full justify-start gap-2 overflow-hidden" onClick={onBack}>
+          <ChevronLeft className="h-4 w-4 shrink-0" />
+          <span className="truncate">{fullName(selectedWorker)}</span>
+          <span className="ml-auto shrink-0 text-xs text-muted-foreground">Cambiar</span>
+        </Button>
+      </div>
+    ) : (
+      <SearchField label="Buscar trabajador" value={filters.search} onChange={(search) => onChange({ search })} placeholder="Nombre o correo..." />
+    )}
     <DatePicker label="Desde" value={filters.start} onChange={(start) => onChange({ start })} />
     <DatePicker label="Hasta" value={filters.end} onChange={(end) => onChange({ end })} />
-    <SearchField label="Buscar en sus registros" value={filters.search} onChange={(search) => onChange({ search })} placeholder="Observación..." />
-    <div><Label>Estado</Label><Select value={filters.status} onValueChange={(status) => onChange({ status: status as StatusFilter })}><SelectTrigger className="mt-1 w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="todos">Todos</SelectItem><SelectItem value="a_tiempo">A tiempo</SelectItem><SelectItem value="tarde">Tarde</SelectItem><SelectItem value="no_reportado">No reportó</SelectItem></SelectContent></Select></div>
+    {selectedWorker && <SearchField label="Buscar en sus registros" value={filters.search} onChange={(search) => onChange({ search })} placeholder="Observación u hora..." />}
+    {selectedWorker && <div><Label>Estado</Label><Select value={filters.status} onValueChange={(status) => onChange({ status: status as StatusFilter })}><SelectTrigger className="mt-1 w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="todos">Todos</SelectItem><SelectItem value="a_tiempo">A tiempo</SelectItem><SelectItem value="tarde">Tarde</SelectItem><SelectItem value="no_reportado">No reportó</SelectItem></SelectContent></Select></div>}
   </div>;
+}
+
+function HistoryWorkerList({ users, total, page, onPageChange, onSelect }: { users: User[]; total: number; page: number; onPageChange: (page: number) => void; onSelect: (userId: string) => void }) {
+  return <Card className="overflow-hidden border-border/50 bg-card/70 shadow-none">
+    <CardHeader className="flex flex-row items-center justify-between gap-3 border-b border-border/40 px-4 py-3 sm:px-5">
+      <div><CardTitle className="text-base">Trabajadores</CardTitle><p className="text-xs text-muted-foreground">Selecciona una persona para consultar su historial detallado de asistencia.</p></div>
+      <Badge variant="outline">{total} personas</Badge>
+    </CardHeader>
+    {!total ? <CardContent className="p-10 text-center"><UserRound className="mx-auto h-7 w-7 text-muted-foreground/50" /><p className="mt-3 text-sm font-medium">No hay trabajadores para esa búsqueda</p><p className="mt-1 text-xs text-muted-foreground">Prueba con otro nombre o correo.</p></CardContent> : <>
+      <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Trabajador</TableHead><TableHead>Perfil</TableHead><TableHead className="text-right">Historial</TableHead></TableRow></TableHeader><TableBody>{users.map((user) => {
+        const name = fullName(user) || user.email || "Trabajador";
+        return <TableRow key={user.id}>
+          <TableCell><div className="flex min-w-48 items-center gap-3"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gold/10 text-xs font-semibold text-gold">{name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span><div className="min-w-0"><p className="truncate font-medium">{name}</p>{user.email && <p className="truncate text-xs text-muted-foreground">{user.email}</p>}</div></div></TableCell>
+          <TableCell className="capitalize text-muted-foreground">{user.rol.replaceAll("_", " ")}</TableCell>
+          <TableCell className="text-right"><Button variant="outline" size="sm" aria-label={`Ver historial de ${name}`} onClick={() => onSelect(user.id)}>Ver historial<ChevronRight className="h-4 w-4" /></Button></TableCell>
+        </TableRow>;
+      })}</TableBody></Table></div>
+      <Pagination page={page} pageSize={PAGE_SIZE} total={total} onPageChange={onPageChange} />
+    </>}
+  </Card>;
 }
 
 function SummaryGrid({ summary }: { summary: AttendanceDaySummary }) {
