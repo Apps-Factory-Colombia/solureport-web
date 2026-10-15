@@ -173,6 +173,13 @@ export interface CompanySettings {
   diasDescuentoAutomatico?: ScheduleDay[];
   horaDescuentoAutomatico?: string;
   porcentajeDescuentoNoReportado?: number;
+  minutosGraciaTardanza?: number;
+  minutosCorteNoReportado?: number;
+  minutosNoReportado?: number;
+  porcentajeDescuentoReposicion?: number;
+  memorandoAsistenciaAutomatico?: boolean;
+  fundamentoAsistencia?: string;
+  regimenSancionatorioAsistencia?: string;
   porcentajeExtraLider: number;
   extraLiderActivo: boolean;
   costoRevisionLider: number;
@@ -251,6 +258,16 @@ export interface ArrivalRecord {
   estadoSalida?: "normal" | "salida_anticipada" | "no_reportado";
   tarde: boolean;
   minutosRetraso: number;
+  minutosAdeudados?: number;
+  categoriaLlegada?: "a_tiempo" | "tardanza_leve" | "reposicion" | "tardanza_mayor" | "no_reportado";
+  reglaId?: string;
+  reglaVersion?: string;
+  porcentajeReglaAplicada?: number;
+  tipoDescuento?: string;
+  calculadoEn?: string;
+  motivoAjuste?: string;
+  ajustadoPorId?: string;
+  ajustadoEn?: string;
   razonTardanza?: string;
   fotoLlegadaUrl?: string;
   ubicacionLlegadaPrecisionMetros?: number;
@@ -261,6 +278,82 @@ export interface ArrivalRecord {
   descuentoAplicado: boolean;
   porcentajeDescuento: number;
   fechaCreacion: string;
+}
+
+export type AttendanceMemoStatus = "pendiente" | "generado" | "por_firmar" | "firmado" | "anulado";
+
+export interface AttendanceMemoEvent {
+  id?: string;
+  asistenciaId?: string;
+  fecha: string;
+  horaProgramada?: string;
+  horaLlegada?: string;
+  minutosRetraso: number;
+  minutosAdeudados: number;
+  estado?: string;
+  categoria?: string;
+  porcentaje: number;
+  fotoUrl?: string;
+  ubicacion?: string;
+}
+
+export interface AttendanceMemo {
+  id: string;
+  usuarioId?: string;
+  periodoId?: string;
+  numero: string;
+  tipo: string;
+  estado: AttendanceMemoStatus;
+  titulo: string;
+  narrativa?: string;
+  fundamento?: string;
+  regimenSancionatorio?: string;
+  plantillaVersion?: string;
+  pdfUrl?: string;
+  generadoEn: string;
+  firmadoEn?: string;
+  firmaTrabajadorNombre?: string;
+  firmaTrabajadorDocumento?: string;
+  eventos: AttendanceMemoEvent[];
+}
+
+export interface AttendanceDaySummary {
+  fecha: string;
+  total: number;
+  reportados: number;
+  aTiempo: number;
+  tardanzas: number;
+  reposiciones: number;
+  noReportados: number;
+  minutosAdeudados: number;
+  descuentoTotal: number;
+}
+
+export interface AttendanceFortnightlyReport {
+  fechaInicio: string;
+  fechaFin: string;
+  periodoId?: string;
+  generatedAt: string;
+  summary: {
+    eventos: number;
+    trabajadores: number;
+    minutosAdeudados: number;
+    tardanzasLeves: number;
+    tardanzasMayores: number;
+    noReportados: number;
+    descuentoTotal: number;
+  };
+  trabajadores: Array<{
+    usuarioId: string;
+    nombre: string;
+    eventos: number;
+    minutosAdeudados: number;
+    tardanzasLeves: number;
+    tardanzasMayores: number;
+    noReportados: number;
+    porcentajeDescuento: number;
+    registros: ArrivalRecord[];
+  }>;
 }
 
 export type TipoInforme = "mantenimiento_preventivo" | "visita_tecnica" | "recorrido" | "actividad_grupal";

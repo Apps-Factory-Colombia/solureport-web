@@ -1,1131 +1,147 @@
 "use client";
+/* eslint-disable @next/next/no-img-element */
 
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AdminHeader } from "@/components/layout/admin-header";
 import { AdminPageLoader } from "@/components/layout/admin-page-loader";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Switch } from "@/components/ui/switch";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
-import {
-  Pagination,
-  PaginationContent,
-  PaginationEllipsis,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-} from "@/components/ui/pagination";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Search,
-  Clock,
-  AlertTriangle,
-  CheckCircle2,
-  Send,
-  Ban,
-  MessageSquareWarning,
-  FileWarning,
-  Percent,
-  ImageIcon,
-  MapPin,
-  Pencil,
-  RefreshCw,
-  Settings2,
-} from "lucide-react";
-import { ArrivalRecord, ScheduleDay, User, CompanySettings } from "@/lib/types";
-import { ensureNoRegistradosForToday, getLlegadas, updateLlegada } from "@/lib/data/services/llegadas";
+import { AlertTriangle, CalendarDays, Camera, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Download, FileDown, FileText, MapPin, Pencil, RefreshCw, Search, Send, Settings2, ShieldAlert, Timer, UserRound, XCircle } from "lucide-react";
+import { AttendanceDaySummary, AttendanceFortnightlyReport, AttendanceMemo, CompanySettings, User } from "@/lib/types";
 import { getUsuarios } from "@/lib/data/services/usuarios";
-import { getConfiguracion, updateConfiguracion } from "@/lib/data/services/configuracion";
 import { createNotificacion } from "@/lib/data/services/notificaciones";
+import { getConfiguracion, updateConfiguracion } from "@/lib/data/services/configuracion";
+import { updateLlegada } from "@/lib/data/services/llegadas";
+import { AttendanceDayResponse, createAttendanceMemo, getAttendanceDay, getAttendanceFortnightly, getAttendanceMemos, updateAttendanceMemo } from "@/lib/data/services/asistencia";
 import { cn } from "@/lib/utils";
 
-function formatLocationTimestamp(value?: string) {
-  if (!value) return null;
+type AttendanceRow = AttendanceDayResponse["records"][number];
+type AttendanceTab = "dia" | "historial" | "quincena" | "memorandos" | "reglas";
 
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
+const EMPTY_COMPANY_SETTINGS: CompanySettings = {
+  nombre: "SoluReport",
+  logo: "",
+  correoRemitente: "",
+  correoEmpresa: "",
+  plantillaReportePDF: "",
+  porcentajeDescuentoTardanza: 5,
+  porcentajeExtraLider: 0,
+  extraLiderActivo: false,
+  costoRevisionLider: 0,
+  costoVisitaTecnicaDefault: 0,
+  costoRecorridoNormal: 0,
+  costoRecorridoHerramienta: 0,
+};
 
-  return new Intl.DateTimeFormat("es-CO", {
-    dateStyle: "short",
-    timeStyle: "short",
-  }).format(parsed);
+function getBogotaDate() { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date()); }
+function formatDate(value?: string) { if (!value) return "—"; const [year, month, day] = value.slice(0, 10).split("-"); return year && month && day ? `${day}/${month}/${year}` : value; }
+function formatLongDate(value: string) { return new Intl.DateTimeFormat("es-CO", { dateStyle: "full", timeZone: "America/Bogota" }).format(new Date(`${value}T12:00:00-05:00`)); }
+function shiftDate(value: string, days: number) { const date = new Date(`${value}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + days); return date.toISOString().slice(0, 10); }
+function money(value?: number) { return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(value || 0); }
+
+function statusMeta(row: AttendanceRow) {
+  if (row.estadoEntrada === "no_reportado" || row.categoriaLlegada === "no_reportado") return { label: "No reportó", className: "border-red-500/30 bg-red-500/10 text-red-300", icon: XCircle };
+  if (row.categoriaLlegada === "reposicion" || row.categoriaLlegada === "tardanza_mayor") return { label: "Reposición", className: "border-orange-500/30 bg-orange-500/10 text-orange-300", icon: ShieldAlert };
+  if (row.tarde || row.categoriaLlegada === "tardanza_leve") return { label: "Tarde · 5%", className: "border-amber-500/30 bg-amber-500/10 text-amber-300", icon: AlertTriangle };
+  return { label: "A tiempo", className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300", icon: CheckCircle2 };
 }
 
-function getBogotaDate() {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
-}
-
-const WEEKDAY_OPTIONS: Array<{ value: ScheduleDay; label: string }> = [
-  { value: "lunes", label: "Lunes" },
-  { value: "martes", label: "Martes" },
-  { value: "miercoles", label: "Miércoles" },
-  { value: "jueves", label: "Jueves" },
-  { value: "viernes", label: "Viernes" },
-  { value: "sabado", label: "Sábado" },
-  { value: "domingo", label: "Domingo" },
-];
-
-function getWeekdayForDate(fecha: string): ScheduleDay {
-  const [year, month, day] = fecha.split("-").map(Number);
-  const dayIndex = new Date(Date.UTC(year, (month || 1) - 1, day || 1, 12)).getUTCDay();
-  return ["domingo", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado"][dayIndex] as ScheduleDay;
-}
-
-function calculateDelay(scheduled?: string, real?: string) {
-  if (!scheduled || !real) return 0;
-  const [scheduledHour, scheduledMinute] = scheduled.split(":").map(Number);
-  const [realHour, realMinute] = real.split(":").map(Number);
-  return Math.max(0, realHour * 60 + realMinute - (scheduledHour * 60 + scheduledMinute));
+function SummaryCard({ label, value, detail, tone, icon: Icon }: { label: string; value: string | number; detail?: string; tone: string; icon: typeof Clock3 }) {
+  return <Card className="border-border/50 bg-card/70 shadow-none"><CardContent className="flex items-start gap-3 p-4"><div className={cn("rounded-xl p-2.5", tone)}><Icon className="h-4 w-4" /></div><div className="min-w-0"><p className="text-xl font-semibold text-foreground">{value}</p><p className="truncate text-xs text-muted-foreground">{label}</p>{detail && <p className="mt-1 text-[11px] text-muted-foreground/80">{detail}</p>}</div></CardContent></Card>;
 }
 
 export default function LlegadasPage() {
-  const [records, setRecords] = useState<ArrivalRecord[]>([]);
+  const [activeTab, setActiveTab] = useState<AttendanceTab>("dia");
+  const [selectedDate, setSelectedDate] = useState(getBogotaDate());
+  const [day, setDay] = useState<AttendanceDayResponse | null>(null);
   const [users, setUsers] = useState<User[]>([]);
-  const [companySettings, setCompanySettings] = useState<CompanySettings | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [settings, setSettings] = useState<CompanySettings | null>(null);
+  const [memos, setMemos] = useState<AttendanceMemo[]>([]);
+  const [fortnight, setFortnight] = useState<AttendanceFortnightlyReport | null>(null);
+  const [fortnightMonth, setFortnightMonth] = useState(getBogotaDate().slice(0, 7));
+  const [fortnightHalf, setFortnightHalf] = useState<"primera" | "segunda">("primera");
   const [search, setSearch] = useState("");
-  const [dateFilter, setDateFilter] = useState("");
-  const [dayFilter, setDayFilter] = useState<"todos" | ScheduleDay>("todos");
-  const [statusFilter, setStatusFilter] = useState<string>("todos");
-  const [messageOpen, setMessageOpen] = useState(false);
-  const [selectedRecord, setSelectedRecord] = useState<ArrivalRecord | null>(null);
-  const [messageType, setMessageType] = useState<"pedagogico" | "citacion_descargos">("pedagogico");
-  const [messageText, setMessageText] = useState("");
-  const [discountOpen, setDiscountOpen] = useState(false);
-  const [discountPercent, setDiscountPercent] = useState("5");
-  const [configuredDiscountPercent, setConfiguredDiscountPercent] = useState("5");
-  const [configuredLateStartTime, setConfiguredLateStartTime] = useState("08:05");
-  const [configuredDiscountTime, setConfiguredDiscountTime] = useState("");
-  const [configuredNoReportDiscountPercent, setConfiguredNoReportDiscountPercent] = useState("30");
-  const [automaticDiscountDays, setAutomaticDiscountDays] = useState<ScheduleDay[]>([
-    "lunes", "martes", "miercoles", "jueves", "viernes",
-  ]);
-  const [settingsSaving, setSettingsSaving] = useState(false);
-  const [attendanceEditOpen, setAttendanceEditOpen] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("todos");
+  const [loading, setLoading] = useState(true);
+  const [dayLoading, setDayLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [selectedRecord, setSelectedRecord] = useState<AttendanceRow | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
   const [attendanceStatus, setAttendanceStatus] = useState<"a_tiempo" | "tarde" | "no_reportado">("no_reportado");
   const [attendanceTime, setAttendanceTime] = useState("");
   const [attendanceReason, setAttendanceReason] = useState("");
   const [attendanceSaving, setAttendanceSaving] = useState(false);
-  const [processingAutomatic, setProcessingAutomatic] = useState(false);
-  const [arrivalDetailRecord, setArrivalDetailRecord] = useState<ArrivalRecord | null>(null);
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 10;
+  const [messageOpen, setMessageOpen] = useState(false);
+  const [messageText, setMessageText] = useState("");
+  const [messageType, setMessageType] = useState<"pedagogico" | "citacion_descargos">("pedagogico");
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [memoSaving, setMemoSaving] = useState(false);
+  const [ruleForm, setRuleForm] = useState({ horaInicio: "08:05", horaCorte: "08:30", gracia: "5", corte: "30", noReportado: "30", leve: "5", reposicion: "0", noReportadoPct: "30", autoMemo: true, fundamento: "", regimen: "" });
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    try {
-      // The attendance list is independent from the user/settings lookups.
-      // Fetch it in the same batch so the automatic cutoff does not block the
-      // first paint of the screen.
-      const [u, s, initialRecords] = await Promise.all([getUsuarios(), getConfiguracion(), getLlegadas()]);
-      const changed = await ensureNoRegistradosForToday(
-        u,
-        s.porcentajeDescuentoTardanza,
-        s.diasDescuentoAutomatico,
-        s.horaDescuentoAutomatico,
-        s.porcentajeDescuentoNoReportado,
-      );
-      const r = changed > 0 ? await getLlegadas() : initialRecords;
-      setRecords(r);
-      setUsers(u);
-      setCompanySettings(s);
-      setDiscountPercent(String(s.porcentajeDescuentoTardanza));
-      setConfiguredDiscountPercent(String(s.porcentajeDescuentoTardanza));
-      setConfiguredLateStartTime(s.horaInicioDescuentoTardanza || "08:05");
-      setConfiguredDiscountTime(s.horaDescuentoAutomatico || "");
-      setConfiguredNoReportDiscountPercent(String(s.porcentajeDescuentoNoReportado ?? 30));
-      setAutomaticDiscountDays(s.diasDescuentoAutomatico || []);
-    } catch (err) {
-      console.error("Error cargando llegadas:", err);
-    } finally {
-      setLoading(false);
-    }
+  const syncSettings = useCallback((value: CompanySettings) => {
+    setSettings(value);
+    setRuleForm({ horaInicio: value.horaInicioDescuentoTardanza || "08:05", horaCorte: value.horaDescuentoAutomatico || "08:30", gracia: String(value.minutosGraciaTardanza ?? 5), corte: String(value.minutosCorteNoReportado ?? 30), noReportado: String(value.minutosNoReportado ?? 30), leve: String(value.porcentajeDescuentoTardanza ?? 5), reposicion: String(value.porcentajeDescuentoReposicion ?? 0), noReportadoPct: String(value.porcentajeDescuentoNoReportado ?? 30), autoMemo: value.memorandoAsistenciaAutomatico ?? true, fundamento: value.fundamentoAsistencia || "", regimen: value.regimenSancionatorioAsistencia || "" });
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  const loadDay = useCallback(async (date: string) => {
+    setDayLoading(true); setError("");
+    try { setDay(await getAttendanceDay(date)); } catch (err) { setError(err instanceof Error ? err.message : "No se pudo cargar la asistencia."); }
+    finally { setDayLoading(false); }
+  }, []);
 
   useEffect(() => {
-    if (users.length === 0 || !companySettings) return;
+    let mounted = true;
+    (async () => {
+      setLoading(true);
+      try { const [loadedUsers, loadedSettings] = await Promise.all([getUsuarios(), getConfiguracion()]); if (!mounted) return; setUsers(loadedUsers); syncSettings(loadedSettings); await loadDay(selectedDate); }
+      catch (err) { if (mounted) setError(err instanceof Error ? err.message : "No se pudo cargar el módulo de asistencia."); }
+      finally { if (mounted) setLoading(false); }
+    })();
+    return () => { mounted = false; };
+  }, [loadDay, selectedDate, syncSettings]);
 
-    const timer = window.setInterval(async () => {
-      try {
-        const changed = await ensureNoRegistradosForToday(
-          users,
-          companySettings.porcentajeDescuentoTardanza,
-          companySettings.diasDescuentoAutomatico,
-          companySettings.horaDescuentoAutomatico,
-          companySettings.porcentajeDescuentoNoReportado,
-        );
-        if (changed > 0) setRecords(await getLlegadas());
-      } catch (err) {
-        console.error("Error en el corte automático de asistencia:", err);
-      }
-    }, 60_000);
+  useEffect(() => { if (activeTab !== "quincena") return; getAttendanceFortnightly(fortnightMonth, fortnightHalf).then(setFortnight).catch((err) => setError(err instanceof Error ? err.message : "No se pudo cargar la quincena.")); }, [activeTab, fortnightHalf, fortnightMonth]);
+  useEffect(() => { if (activeTab !== "memorandos") return; getAttendanceMemos().then(setMemos).catch((err) => setError(err instanceof Error ? err.message : "No se pudieron cargar los memorandos.")); }, [activeTab]);
 
-    return () => window.clearInterval(timer);
-  }, [users, companySettings]);
+  const filteredRecords = useMemo(() => { const records = day?.records || []; return records.filter((row) => { const text = `${row.usuarioNombre || ""} ${row.razonTardanza || ""}`.toLowerCase(); const matchesSearch = !search.trim() || text.includes(search.trim().toLowerCase()); const matchesStatus = statusFilter === "todos" || (statusFilter === "no_reportado" ? row.estadoEntrada === "no_reportado" : statusFilter === "tarde" ? row.tarde && row.estadoEntrada !== "no_reportado" : row.categoriaLlegada === "a_tiempo"); return matchesSearch && matchesStatus; }); }, [day?.records, search, statusFilter]);
+  const refresh = async () => { await loadDay(selectedDate); if (activeTab === "memorandos") setMemos(await getAttendanceMemos()); };
 
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [search, dateFilter, dayFilter, statusFilter]);
+  const openEdit = (row: AttendanceRow) => { setSelectedRecord(row); setAttendanceStatus(row.estadoEntrada || "no_reportado"); setAttendanceTime(row.horaLlegada || ""); setAttendanceReason(row.razonTardanza || ""); setEditOpen(true); };
+  const saveEdit = async () => { if (!selectedRecord) return; setAttendanceSaving(true); try { await updateLlegada(selectedRecord.id, { estadoEntrada: attendanceStatus, horaLlegada: attendanceStatus === "no_reportado" ? null : attendanceTime || null, razonTardanza: attendanceReason.trim() || (attendanceStatus === "no_reportado" ? "No registró la entrada." : null) }); setEditOpen(false); await refresh(); } catch (err) { setError(err instanceof Error ? err.message : "No se pudo actualizar la asistencia."); } finally { setAttendanceSaving(false); } };
+  const sendMessage = async () => { if (!selectedRecord || !messageText.trim()) return; try { await updateLlegada(selectedRecord.id, { mensajeEnviado: messageText.trim(), tipoMensaje: messageType }); await createNotificacion({ usuarioId: selectedRecord.usuarioId, titulo: messageType === "pedagogico" ? "Mensaje pedagógico" : "Citación a descargos", mensaje: messageText.trim(), tipo: "general", datos: { registroAsistenciaId: selectedRecord.id, tipoMensaje: messageType } }); setMessageOpen(false); setMessageText(""); await refresh(); } catch (err) { setError(err instanceof Error ? err.message : "No se pudo enviar el mensaje."); } };
+  const createMemo = async (ids: string[], userId?: string, periodId?: string) => { setMemoSaving(true); try { const memo = await createAttendanceMemo({ asistenciaIds: ids, usuarioId: userId, periodoId: periodId }); setMemos((current) => [memo, ...current.filter((item) => item.id !== memo.id)]); setSelectedRecord(null); setActiveTab("memorandos"); } catch (err) { setError(err instanceof Error ? err.message : "No se pudo generar el memorando."); } finally { setMemoSaving(false); } };
+  const downloadMemo = async (memo: AttendanceMemo) => { const user = users.find((item) => item.id === memo.usuarioId); const { generateAttendanceMemoPDF } = await import("@/lib/utils/attendance-pdf"); generateAttendanceMemoPDF({ memo, user, company: settings || EMPTY_COMPANY_SETTINGS }); };
+  const saveRules = async () => { setSettingsSaving(true); try { const updated = await updateConfiguracion({ horaInicioDescuentoTardanza: ruleForm.horaInicio, horaDescuentoAutomatico: ruleForm.horaCorte, minutosGraciaTardanza: Math.max(0, Number(ruleForm.gracia) || 0), minutosCorteNoReportado: Math.max(1, Number(ruleForm.corte) || 30), minutosNoReportado: Math.max(0, Number(ruleForm.noReportado) || 30), porcentajeDescuentoTardanza: Math.min(100, Math.max(0, Number(ruleForm.leve) || 0)), porcentajeDescuentoReposicion: Math.min(100, Math.max(0, Number(ruleForm.reposicion) || 0)), porcentajeDescuentoNoReportado: Math.min(100, Math.max(0, Number(ruleForm.noReportadoPct) || 0)), memorandoAsistenciaAutomatico: ruleForm.autoMemo, fundamentoAsistencia: ruleForm.fundamento, regimenSancionatorioAsistencia: ruleForm.regimen }); syncSettings(updated); await refresh(); } catch (err) { setError(err instanceof Error ? err.message : "No se pudo guardar la configuración."); } finally { setSettingsSaving(false); } };
 
-  if (loading) {
-    return (
-      <div>
-        <AdminHeader title="Control de Llegadas" />
-        <AdminPageLoader
-          title="Cargando llegadas"
-          message="Estamos preparando los registros de asistencia y tardanzas."
-          showStats={false}
-          rows={6}
-        />
-      </div>
-    );
-  }
+  if (loading) return <div><AdminHeader title="Registro de Asistencia" /><AdminPageLoader title="Cargando asistencia" message="Estamos preparando la jornada y sus reglas de liquidación." showStats={false} rows={7} /></div>;
+  const summary: AttendanceDaySummary = day?.summary || { fecha: selectedDate, total: 0, reportados: 0, aTiempo: 0, tardanzas: 0, reposiciones: 0, noReportados: 0, minutosAdeudados: 0, descuentoTotal: 0 };
+  const defaultCompany = settings || EMPTY_COMPANY_SETTINGS;
 
-  const filtered = records.filter((r) => {
-    const user = users.find((u) => u.id === r.usuarioId);
-    const matchesSearch =
-      user?.nombre.toLowerCase().includes(search.toLowerCase()) ||
-      user?.apellido.toLowerCase().includes(search.toLowerCase());
-    const matchesDate = !dateFilter || r.fecha === dateFilter;
-    const matchesDay = dayFilter === "todos" || getWeekdayForDate(r.fecha) === dayFilter;
-    const matchesStatus =
-      statusFilter === "todos" ||
-      (statusFilter === "tarde" && r.tarde && r.estadoEntrada !== "no_reportado") ||
-      (statusFilter === "puntual" && r.estadoEntrada === "a_tiempo") ||
-      (statusFilter === "no_registrado" && r.estadoEntrada === "no_reportado");
-    return matchesSearch && matchesDate && matchesDay && matchesStatus;
-  });
-
-  const totalPages = Math.ceil(filtered.length / itemsPerPage);
-  const startIndex = (currentPage - 1) * itemsPerPage;
-  const endIndex = startIndex + itemsPerPage;
-  const currentRecords = filtered.slice(startIndex, endIndex);
-
-  const todayRecords = records.filter(
-    (r) => r.fecha === getBogotaDate()
-  );
-  const tardanzasHoy = todayRecords.filter((r) => r.tarde && r.estadoEntrada !== "no_reportado").length;
-  const puntualesHoy = todayRecords.filter((r) => r.estadoEntrada === "a_tiempo").length;
-  const noRegistradosHoy = todayRecords.filter((r) => r.estadoEntrada === "no_reportado").length;
-  const totalTarde = records.filter((r) => r.tarde && r.estadoEntrada !== "no_reportado").length;
-
-  const handleSaveConfiguredDiscount = async () => {
-    if (!configuredDiscountTime.trim()) {
-      alert("Debes configurar una hora de corte para activar el descuento automático.");
-      return;
-    }
-    const value = Math.max(0, Math.min(100, Number(configuredDiscountPercent) || 0));
-    setSettingsSaving(true);
-    try {
-      const updated = await updateConfiguracion({
-        porcentajeDescuentoTardanza: value,
-        horaInicioDescuentoTardanza: configuredLateStartTime,
-        diasDescuentoAutomatico: automaticDiscountDays,
-        horaDescuentoAutomatico: configuredDiscountTime,
-        porcentajeDescuentoNoReportado: Math.max(0, Math.min(100, Number(configuredNoReportDiscountPercent) || 0)),
-      });
-      setCompanySettings(updated);
-      setConfiguredDiscountPercent(String(updated.porcentajeDescuentoTardanza));
-      setDiscountPercent(String(updated.porcentajeDescuentoTardanza));
-      setConfiguredLateStartTime(updated.horaInicioDescuentoTardanza || "08:05");
-      setAutomaticDiscountDays(updated.diasDescuentoAutomatico || []);
-      setConfiguredDiscountTime(updated.horaDescuentoAutomatico || "");
-      setConfiguredNoReportDiscountPercent(String(updated.porcentajeDescuentoNoReportado ?? 30));
-    } catch (err) {
-      console.error("Error actualizando descuento configurado:", err);
-    } finally {
-      setSettingsSaving(false);
-    }
-  };
-
-  const handleProcessAutomatic = async () => {
-    setProcessingAutomatic(true);
-    try {
-      await ensureNoRegistradosForToday(
-        users,
-        companySettings?.porcentajeDescuentoTardanza || 0,
-        companySettings?.diasDescuentoAutomatico,
-        companySettings?.horaDescuentoAutomatico,
-        companySettings?.porcentajeDescuentoNoReportado,
-      );
-      await loadData();
-    } catch (err) {
-      console.error("Error procesando asistencia automática:", err);
-    } finally {
-      setProcessingAutomatic(false);
-    }
-  };
-
-  const toggleAutomaticDiscountDay = (day: ScheduleDay) => {
-    setAutomaticDiscountDays((current) =>
-      current.includes(day) ? current.filter((item) => item !== day) : [...current, day]
-    );
-  };
-
-  const handleOpenAttendanceEdit = (record: ArrivalRecord) => {
-    setSelectedRecord(record);
-    setAttendanceStatus(record.estadoEntrada || "no_reportado");
-    setAttendanceTime(record.horaLlegada || "");
-    setAttendanceReason(record.razonTardanza || "");
-    setAttendanceEditOpen(true);
-  };
-
-  const handleSaveAttendanceEdit = async () => {
-    if (!selectedRecord) return;
-    const isUnregistered = attendanceStatus === "no_reportado";
-    const realTime = isUnregistered ? null : attendanceTime || selectedRecord.horaLlegada || null;
-    setAttendanceSaving(true);
-    try {
-      await updateLlegada(selectedRecord.id, {
-        estadoEntrada: attendanceStatus,
-        horaLlegada: realTime,
-        minutosRetraso: attendanceStatus === "tarde" ? calculateDelay(selectedRecord.horaEsperada, realTime || undefined) : 0,
-        razonTardanza: attendanceReason.trim() || (isUnregistered ? "No registró la entrada." : null),
-      });
-      setAttendanceEditOpen(false);
-      setSelectedRecord(null);
-      await loadData();
-    } catch (err) {
-      console.error("Error actualizando estado de asistencia:", err);
-    } finally {
-      setAttendanceSaving(false);
-    }
-  };
-
-  const handleSendMessage = async () => {
-    if (!selectedRecord) return;
-    try {
-      await updateLlegada(selectedRecord.id, {
-        mensajeEnviado: messageText,
-        tipoMensaje: messageType,
-      });
-
-      const user = users.find((u) => u.id === selectedRecord.usuarioId);
-      if (user) {
-        await createNotificacion({
-          usuarioId: user.id,
-          titulo: messageType === "pedagogico" ? "Mensaje Pedagógico" : "Citación a Descargos",
-          mensaje: messageText,
-          tipo: "general",
-          datos: { registroAsistenciaId: selectedRecord.id, tipoMensaje: messageType },
-        });
-      }
-
-      setMessageOpen(false);
-      setSelectedRecord(null);
-      setMessageText("");
-      await loadData();
-    } catch (err) {
-      console.error("Error enviando mensaje:", err);
-    }
-  };
-
-  const handleApplyDiscount = async () => {
-    if (!selectedRecord) return;
-    try {
-      await updateLlegada(selectedRecord.id, {
-        descuentoAplicado: true,
-        porcentajeDescuento: Number(discountPercent),
-      });
-      setDiscountOpen(false);
-      setSelectedRecord(null);
-      await loadData();
-    } catch (err) {
-      console.error("Error aplicando descuento:", err);
-    }
-  };
-
-  const defaultPedagogicoMsg =
-    "Se le recuerda la importancia de la puntualidad para el correcto desarrollo de las actividades programadas. Este mensaje tiene carácter formativo y busca el mejoramiento continuo del servicio.";
-  const defaultCitacionMsg =
-    "Por medio del presente se le cita a descargos por incumplimiento reiterado del horario laboral establecido. Favor presentarse en la oficina administrativa para dar explicación de los hechos.";
-
-  return (
-    <div>
-      <AdminHeader title="Registro de Asistencia" />
-      <div className="min-w-0 space-y-5 p-4 sm:p-6">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-emerald-500/10 p-2.5">
-                <CheckCircle2 className="h-5 w-5 text-emerald-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-emerald-400">{puntualesHoy}</p>
-                <p className="text-xs text-muted-foreground">Puntuales Hoy</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-red-500/10 p-2.5">
-                <AlertTriangle className="h-5 w-5 text-red-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-red-400">{tardanzasHoy}</p>
-                <p className="text-xs text-muted-foreground">Tardanzas Hoy</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-amber-500/10 p-2.5">
-                <Clock className="h-5 w-5 text-amber-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-foreground">{totalTarde}</p>
-                <p className="text-xs text-muted-foreground">Total Tardanzas (Período)</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className="rounded-lg bg-gold/10 p-2.5">
-                <Percent className="h-5 w-5 text-gold" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-gold">
-                  {companySettings?.porcentajeDescuentoTardanza || 0}%
-                </p>
-                <p className="text-xs text-muted-foreground">Descuento Configurado</p>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className="border-border/50 bg-card/80">
-            <CardContent className="flex items-center gap-3 p-4">
-              <div className="rounded-lg bg-sky-500/10 p-2.5">
-                <Ban className="h-5 w-5 text-sky-400" />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-sky-400">{noRegistradosHoy}</p>
-                <p className="text-xs text-muted-foreground">No registrados hoy</p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        <div className="space-y-3">
-          <div className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl border border-border/50 bg-card/60 p-3">
-            <div className="relative min-w-[220px] flex-1">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Buscar por nombre..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="pl-10 bg-secondary/50 border-border/50"
-              />
-            </div>
-            <Input
-              type="date"
-              value={dateFilter}
-              onChange={(e) => setDateFilter(e.target.value)}
-              className="w-full sm:w-44 bg-secondary/50 border-border/50"
-            />
-            <Select value={dayFilter} onValueChange={(value: "todos" | ScheduleDay) => setDayFilter(value)}>
-              <SelectTrigger className="w-full sm:w-44 bg-secondary/50 border-border/50">
-                <SelectValue placeholder="Día de la semana" />
-              </SelectTrigger>
-              <SelectContent className="bg-card border-border">
-                <SelectItem value="todos">Todos los días</SelectItem>
-                {WEEKDAY_OPTIONS.map((day) => (
-                  <SelectItem key={day.value} value={day.value}>{day.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-full sm:w-44 bg-secondary/50 border-border/50">
-                <SelectValue placeholder="Estado" />
-              </SelectTrigger>
-              <SelectContent className="bg-card border-border">
-                <SelectItem value="todos">Todos</SelectItem>
-                <SelectItem value="puntual">Puntuales</SelectItem>
-                <SelectItem value="tarde">Tardanzas</SelectItem>
-                <SelectItem value="no_registrado">No registrados</SelectItem>
-              </SelectContent>
-            </Select>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={handleProcessAutomatic}
-              disabled={processingAutomatic}
-              className="gap-2 border-border/50 bg-secondary/30"
-              title={`Procesar el corte automático de las ${configuredDiscountTime}`}
-            >
-              <RefreshCw className={cn("h-4 w-4", processingAutomatic && "animate-spin")} />
-              <span className="hidden sm:inline">Actualizar corte</span>
-            </Button>
-          </div>
-
-          <div className="rounded-2xl border border-gold/20 bg-gradient-to-br from-gold/10 via-card/80 to-card/60 p-4 shadow-sm">
-            <div className="min-w-0 flex-1 space-y-3">
-              <div className="grid gap-4 sm:grid-cols-[minmax(0,120px)_minmax(0,120px)_minmax(0,120px)_minmax(0,120px)_minmax(0,1fr)] sm:items-end">
-                <div className="space-y-1.5">
-                  <Label className="flex items-center gap-2 text-xs text-foreground/80">
-                    <Settings2 className="h-3.5 w-3.5 text-gold" />
-                    Tardanza (%)
-                  </Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max="100"
-                    value={configuredDiscountPercent}
-                    onChange={(event) => setConfiguredDiscountPercent(event.target.value)}
-                    className="bg-secondary/50 border-border/50"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs text-foreground/80">Desde las</Label>
-                  <Input
-                    type="time"
-                    value={configuredLateStartTime}
-                    onChange={(event) => setConfiguredLateStartTime(event.target.value)}
-                    className="bg-secondary/50 border-border/50"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs text-foreground/80">No reportado (%)</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max="100"
-                    value={configuredNoReportDiscountPercent}
-                    onChange={(event) => setConfiguredNoReportDiscountPercent(event.target.value)}
-                    className="bg-secondary/50 border-border/50"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs text-foreground/80">Corte no reporte</Label>
-                  <Input
-                    type="time"
-                    value={configuredDiscountTime}
-                    onChange={(event) => setConfiguredDiscountTime(event.target.value)}
-                    className="bg-secondary/50 border-border/50"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <Label className="text-xs text-foreground/80">Días con descuento automático</Label>
-                    <span className="text-[11px] text-muted-foreground">{automaticDiscountDays.length}/7 activos</span>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {WEEKDAY_OPTIONS.map((day) => {
-                      const active = automaticDiscountDays.includes(day.value);
-                      return (
-                        <button
-                          key={day.value}
-                          type="button"
-                          aria-pressed={active}
-                          onClick={() => toggleAutomaticDiscountDay(day.value)}
-                          className={cn(
-                            "rounded-full border px-2.5 py-1 text-xs transition-colors",
-                            active
-                              ? "border-gold/50 bg-gold text-background"
-                              : "border-border/60 bg-secondary/40 text-muted-foreground hover:text-foreground"
-                          )}
-                        >
-                          {day.label.slice(0, 3)}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-[11px] leading-4 text-muted-foreground">
-                  Reportes desde la primera hora aplican la tardanza normal; si no hay reporte al corte, aplica el porcentaje de no reportado.
-                </p>
-                <Button
-                  type="button"
-                  onClick={handleSaveConfiguredDiscount}
-                  disabled={settingsSaving}
-                  className="shrink-0 bg-gold text-background hover:bg-gold-dark"
-                >
-                  {settingsSaving ? "Guardando..." : "Guardar configuración"}
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
-          <CardContent className="p-0">
-            <Table className="min-w-[1180px]">
-              <TableHeader>
-                <TableRow className="border-border/50 hover:bg-transparent">
-                  <TableHead className="text-muted-foreground">Empleado</TableHead>
-                  <TableHead className="text-muted-foreground">Fecha</TableHead>
-                  <TableHead className="text-muted-foreground">Entrada</TableHead>
-                  <TableHead className="text-muted-foreground">Salida</TableHead>
-                  <TableHead className="text-muted-foreground">Retraso</TableHead>
-                  <TableHead className="text-muted-foreground">Evidencia</TableHead>
-                  <TableHead className="text-muted-foreground">Estado</TableHead>
-                  <TableHead className="text-muted-foreground">Mensaje</TableHead>
-                  <TableHead className="text-muted-foreground">Descuento</TableHead>
-                  <TableHead className="text-muted-foreground w-28">Acciones</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {currentRecords.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={10} className="h-28 text-center text-sm text-muted-foreground">
-                      No hay registros que coincidan con los filtros seleccionados.
-                    </TableCell>
-                  </TableRow>
-                )}
-                {currentRecords.map((record) => {
-                  const user = users.find((u) => u.id === record.usuarioId);
-                  const hasArrivalDetail = Boolean(
-                    record.fotoLlegadaUrl ||
-                    record.ubicacionLlegadaDireccion ||
-                    record.ubicacionLlegadaPrecisionMetros !== undefined ||
-                    record.ubicacionLlegadaTimestamp
-                  );
-
-                  return (
-                    <TableRow
-                      key={record.id}
-                      className={cn(
-                        "border-border/50 hover:bg-secondary/30",
-                        record.tarde && "bg-red-500/3",
-                        record.estadoEntrada === "no_reportado" && "bg-sky-500/5"
-                      )}
-                    >
-                      <TableCell>
-                        <p className="font-medium text-foreground">
-                          {user?.nombre} {user?.apellido}
-                        </p>
-                        <p className="text-xs text-muted-foreground">{user?.rol}</p>
-                      </TableCell>
-                      <TableCell className="text-sm text-foreground/80">{record.fecha}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-col gap-1">
-                          <span className="text-xs text-muted-foreground">Prog: {record.horaEsperada}</span>
-                          <div className="flex items-center gap-2">
-                            <span className={cn("text-sm font-medium", record.tarde ? "text-red-400" : "text-emerald-400")}>
-                              Real: {record.horaLlegada || "--:--"}
-                            </span>
-                            {record.estadoEntrada !== "no_reportado" && (
-                              <Badge variant="outline" className={cn("text-[10px] px-1 py-0 h-4", record.tarde ? "bg-red-500/10 text-red-400 border-red-500/20" : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20")}>
-                                {record.tarde ? "Tarde" : "Puntual"}
-                              </Badge>
-                            )}
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex flex-col gap-1">
-                          <span className="text-xs text-muted-foreground">Prog: {record.horaSalidaProgramada || "--:--"}</span>
-                          <div className="flex items-center gap-2">
-                            <span className={cn("text-sm font-medium", record.estadoSalida === "salida_anticipada" ? "text-amber-400" : "text-foreground/80")}>
-                              Real: {record.horaSalidaReal || "--:--"}
-                            </span>
-                            {record.estadoSalida && record.estadoSalida !== "no_reportado" && (
-                              <Badge variant="outline" className={cn("text-[10px] px-1 py-0 h-4", record.estadoSalida === "salida_anticipada" ? "bg-amber-500/10 text-amber-400 border-amber-500/20" : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20")}>
-                                {record.estadoSalida === "salida_anticipada" ? "Anticipada" : "Normal"}
-                              </Badge>
-                            )}
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        {record.estadoEntrada === "no_reportado" ? (
-                          <Badge
-                            variant="outline"
-                            className="bg-sky-500/10 text-sky-300 border-sky-500/20 text-xs"
-                          >
-                            No registrado
-                          </Badge>
-                        ) : record.tarde ? (
-                          <Badge
-                            variant="outline"
-                            className="bg-red-500/10 text-red-400 border-red-500/20 text-xs"
-                          >
-                            +{record.minutosRetraso} min
-                          </Badge>
-                        ) : (
-                          <span className="text-xs text-emerald-400">A tiempo</span>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <div className="max-w-60 space-y-2.5">
-                          <div className="rounded-lg border border-border/50 bg-secondary/20 p-2">
-                            <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                              Foto
-                            </p>
-                            {record.fotoLlegadaUrl ? (
-                              <button
-                                type="button"
-                                onClick={() => setArrivalDetailRecord(record)}
-                                className="group relative h-14 w-14 overflow-hidden rounded-md border border-border/50 bg-secondary/40"
-                                title="Ver detalle de llegada"
-                              >
-                                <img
-                                  src={record.fotoLlegadaUrl}
-                                  alt={`Foto de llegada de ${user?.nombre || "empleado"}`}
-                                  className="h-full w-full object-cover transition-transform group-hover:scale-105"
-                                />
-                              </button>
-                            ) : (
-                              <p className="text-xs text-muted-foreground">Sin foto</p>
-                            )}
-                          </div>
-
-                          <div className="rounded-lg border border-border/50 bg-secondary/20 p-2">
-                            <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                              Ubicacion
-                            </p>
-                            {record.ubicacionLlegadaDireccion ? (
-                              <div className="space-y-1.5 text-xs text-muted-foreground">
-                                <div className="flex items-start gap-1.5">
-                                  <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gold" />
-                                  <span className="line-clamp-3 text-foreground/80">
-                                    {record.ubicacionLlegadaDireccion}
-                                  </span>
-                                </div>
-                                {record.ubicacionLlegadaPrecisionMetros !== undefined && (
-                                  <p>Precision: {record.ubicacionLlegadaPrecisionMetros.toFixed(1)} m</p>
-                                )}
-                                {formatLocationTimestamp(record.ubicacionLlegadaTimestamp) && (
-                                  <p>Capturada: {formatLocationTimestamp(record.ubicacionLlegadaTimestamp)}</p>
-                                )}
-                              </div>
-                            ) : (
-                              <p className="text-xs text-muted-foreground">Sin ubicacion</p>
-                            )}
-                          </div>
-
-                          {hasArrivalDetail && (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-8 w-full border-border/50 bg-background/40 text-xs"
-                              onClick={() => setArrivalDetailRecord(record)}
-                            >
-                              Ver detalle
-                            </Button>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            "text-xs",
-                            record.estadoEntrada === "no_reportado"
-                              ? "bg-sky-500/10 text-sky-300 border-sky-500/20"
-                              : record.tarde
-                              ? "bg-red-500/10 text-red-400 border-red-500/20"
-                              : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                          )}
-                        >
-                          {record.estadoEntrada === "no_reportado"
-                            ? "No registrado"
-                            : record.tarde ? "Tarde" : "Puntual"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>
-                        {record.tipoMensaje ? (
-                          <Badge
-                            variant="outline"
-                            className={cn(
-                              "text-[10px]",
-                              record.tipoMensaje === "pedagogico"
-                                ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                                : "bg-red-500/10 text-red-400 border-red-500/20"
-                            )}
-                          >
-                            {record.tipoMensaje === "pedagogico"
-                              ? "Pedagógico"
-                              : "Citación"}
-                          </Badge>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {record.descuentoAplicado ? (
-                          <Badge
-                            variant="outline"
-                            className="bg-gold/10 text-gold border-gold/20 text-xs"
-                          >
-                            -{record.porcentajeDescuento}%
-                          </Badge>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-sky-300 hover:text-sky-200 hover:bg-sky-500/10"
-                              title="Editar estado de asistencia"
-                              onClick={() => handleOpenAttendanceEdit(record)}
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </Button>
-                          {record.tarde && (
-                            <>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-amber-400 hover:text-amber-300 hover:bg-amber-500/10"
-                              title="Enviar mensaje"
-                              onClick={() => {
-                                setSelectedRecord(record);
-                                setMessageType("pedagogico");
-                                setMessageText(defaultPedagogicoMsg);
-                                setMessageOpen(true);
-                              }}
-                            >
-                              <Send className="h-3.5 w-3.5" />
-                            </Button>
-                            </>
-                          )}
-                          </div>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-
-            {totalPages > 1 && (
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/50 p-3">
-                <p className="text-xs text-muted-foreground">
-                  Mostrando {startIndex + 1}-{Math.min(endIndex, filtered.length)} de {filtered.length}
-                </p>
-                <Pagination>
-                  <PaginationContent className="flex-wrap justify-center">
-                    <PaginationItem>
-                      <PaginationPrevious
-                        onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                        className={currentPage === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
-                      />
-                    </PaginationItem>
-                    {Array.from({ length: totalPages }).map((_, i) => {
-                      const page = i + 1;
-                      const visible = page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1;
-                      const previousVisible = page > 1 && (page - 1 === 1 || page - 1 === totalPages || Math.abs(page - 1 - currentPage) <= 1);
-                      if (!visible) return previousVisible ? (
-                        <PaginationItem key={`ellipsis-${page}`}><PaginationEllipsis /></PaginationItem>
-                      ) : null;
-                      return (
-                      <PaginationItem key={page}>
-                        <PaginationLink
-                          onClick={() => setCurrentPage(page)}
-                          isActive={currentPage === page}
-                          className="cursor-pointer"
-                        >
-                          {page}
-                        </PaginationLink>
-                      </PaginationItem>
-                      );
-                    })}
-                    <PaginationItem>
-                      <PaginationNext
-                        onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                        className={currentPage === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
-                      />
-                    </PaginationItem>
-                  </PaginationContent>
-                </Pagination>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      <Dialog open={attendanceEditOpen} onOpenChange={setAttendanceEditOpen}>
-        <DialogContent className="bg-card border-border sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="text-foreground">Editar estado de asistencia</DialogTitle>
-          </DialogHeader>
-          {selectedRecord && (() => {
-            const user = users.find((u) => u.id === selectedRecord.usuarioId);
-            return (
-              <div className="space-y-4">
-                <div className="rounded-lg border border-border/50 bg-secondary/30 p-3">
-                  <p className="text-sm text-foreground">
-                    <span className="font-medium">{user?.nombre} {user?.apellido}</span>
-                    <span className="text-muted-foreground"> · {selectedRecord.fecha}</span>
-                  </p>
-                </div>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label className="text-foreground/80">Estado de entrada</Label>
-                    <Select
-                      value={attendanceStatus}
-                      onValueChange={(value: "a_tiempo" | "tarde" | "no_reportado") => setAttendanceStatus(value)}
-                    >
-                      <SelectTrigger className="bg-secondary/50 border-border/50">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent className="bg-card border-border">
-                        <SelectItem value="a_tiempo">A tiempo</SelectItem>
-                        <SelectItem value="tarde">Tarde</SelectItem>
-                        <SelectItem value="no_reportado">No registrado</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="text-foreground/80">Hora real</Label>
-                    <Input
-                      type="time"
-                      value={attendanceTime}
-                      disabled={attendanceStatus === "no_reportado"}
-                      onChange={(event) => setAttendanceTime(event.target.value)}
-                      className="bg-secondary/50 border-border/50"
-                    />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-foreground/80">Observación</Label>
-                  <Textarea
-                    value={attendanceReason}
-                    onChange={(event) => setAttendanceReason(event.target.value)}
-                    placeholder={`Ej. No reportó la entrada antes del corte de las ${configuredDiscountTime}`}
-                    className="min-h-24 bg-secondary/50 border-border/50"
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Al guardar como no registrado se elimina la hora de entrada y se conserva/aplica el descuento configurado.
-                </p>
-              </div>
-            );
-          })()}
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setAttendanceEditOpen(false)} className="text-muted-foreground">
-              Cancelar
-            </Button>
-            <Button
-              onClick={handleSaveAttendanceEdit}
-              disabled={attendanceSaving}
-              className="gap-2 bg-gold text-background hover:bg-gold-dark"
-            >
-              <Pencil className="h-4 w-4" />
-              {attendanceSaving ? "Guardando..." : "Guardar cambios"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={messageOpen} onOpenChange={setMessageOpen}>
-        <DialogContent className="bg-card border-border sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="text-foreground">Enviar Mensaje</DialogTitle>
-          </DialogHeader>
-          {selectedRecord && (() => {
-            const user = users.find((u) => u.id === selectedRecord.usuarioId);
-            return (
-              <div className="space-y-4">
-                <div className="rounded-lg border border-border/50 bg-secondary/30 p-3">
-                  <p className="text-sm text-foreground">
-                    <span className="font-medium">{user?.nombre} {user?.apellido}</span>
-                    {" — "}
-                    Llegó a las {selectedRecord.horaLlegada} ({selectedRecord.minutosRetraso} min de retraso)
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-foreground/80">Tipo de Mensaje</Label>
-                  <Select
-                    value={messageType}
-                    onValueChange={(v: "pedagogico" | "citacion_descargos") => {
-                      setMessageType(v);
-                      setMessageText(
-                        v === "pedagogico" ? defaultPedagogicoMsg : defaultCitacionMsg
-                      );
-                    }}
-                  >
-                    <SelectTrigger className="bg-secondary/50 border-border/50">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="bg-card border-border">
-                      <SelectItem value="pedagogico">
-                        <div className="flex items-center gap-2">
-                          <MessageSquareWarning className="h-4 w-4 text-amber-400" />
-                          Mensaje Pedagógico
-                        </div>
-                      </SelectItem>
-                      <SelectItem value="citacion_descargos">
-                        <div className="flex items-center gap-2">
-                          <FileWarning className="h-4 w-4 text-red-400" />
-                          Citación a Descargos
-                        </div>
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-foreground/80">Mensaje</Label>
-                  <Textarea
-                    value={messageText}
-                    onChange={(e) => setMessageText(e.target.value)}
-                    className="bg-secondary/50 border-border/50 min-h-25"
-                  />
-                </div>
-              </div>
-            );
-          })()}
-          <DialogFooter>
-            <Button
-              variant="ghost"
-              onClick={() => setMessageOpen(false)}
-              className="text-muted-foreground"
-            >
-              Cancelar
-            </Button>
-            <Button
-              onClick={handleSendMessage}
-              className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
-            >
-              <Send className="h-4 w-4" />
-              Enviar Mensaje
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={discountOpen} onOpenChange={setDiscountOpen}>
-        <DialogContent className="bg-card border-border sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="text-foreground">
-              {selectedRecord?.descuentoAplicado ? "Editar Descuento" : "Aplicar Descuento por Tardanza"}
-            </DialogTitle>
-          </DialogHeader>
-          {selectedRecord && (() => {
-            const user = users.find((u) => u.id === selectedRecord.usuarioId);
-            return (
-              <div className="space-y-4">
-                <div className="rounded-lg border border-border/50 bg-secondary/30 p-3">
-                  <p className="text-sm text-foreground">
-                    <span className="font-medium">{user?.nombre} {user?.apellido}</span>
-                    {" — "}
-                    {selectedRecord.minutosRetraso} minutos de retraso
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-foreground/80">Porcentaje de Descuento sobre Actividades</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max="100"
-                    value={discountPercent}
-                    onChange={(e) => setDiscountPercent(e.target.value)}
-                    className="bg-secondary/50 border-border/50"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Se descontará este porcentaje de las actividades del técnico/líder en este período.
-                  </p>
-                </div>
-              </div>
-            );
-          })()}
-          <DialogFooter>
-            <Button
-              variant="ghost"
-              onClick={() => setDiscountOpen(false)}
-              className="text-muted-foreground"
-            >
-              Cancelar
-            </Button>
-            <Button
-              onClick={handleApplyDiscount}
-              className="gap-2 bg-red-500 hover:bg-red-600 text-white font-semibold"
-            >
-              <Ban className="h-4 w-4" />
-              {selectedRecord?.descuentoAplicado ? "Actualizar Descuento" : "Aplicar Descuento"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={Boolean(arrivalDetailRecord)} onOpenChange={(open) => !open && setArrivalDetailRecord(null)}>
-        <DialogContent className="bg-card border-border sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-foreground">
-              <ImageIcon className="h-5 w-5 text-gold" />
-              Detalle de llegada
-            </DialogTitle>
-          </DialogHeader>
-          {arrivalDetailRecord && (
-            <div className="grid gap-4 md:grid-cols-[minmax(0,1.4fr)_minmax(280px,1fr)]">
-              <div className="overflow-hidden rounded-lg border border-border/50 bg-secondary/20">
-                {arrivalDetailRecord.fotoLlegadaUrl ? (
-                  <img
-                    src={arrivalDetailRecord.fotoLlegadaUrl}
-                    alt="Foto de llegada"
-                    className="max-h-[70vh] w-full object-contain"
-                  />
-                ) : (
-                  <div className="flex min-h-72 items-center justify-center p-6 text-sm text-muted-foreground">
-                    Sin foto de llegada
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-4 rounded-lg border border-border/50 bg-secondary/20 p-4">
-                <div className="space-y-1">
-                  <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Direccion
-                  </p>
-                  <p className="text-sm text-foreground/85">
-                    {arrivalDetailRecord.ubicacionLlegadaDireccion || "Sin ubicacion"}
-                  </p>
-                </div>
-
-                <div className="space-y-1">
-                  <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Precision
-                  </p>
-                  <p className="text-sm text-foreground/85">
-                    {arrivalDetailRecord.ubicacionLlegadaPrecisionMetros !== undefined
-                      ? `${arrivalDetailRecord.ubicacionLlegadaPrecisionMetros.toFixed(1)} m`
-                      : "Sin precision"}
-                  </p>
-                </div>
-
-                <div className="space-y-1">
-                  <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Fecha de captura
-                  </p>
-                  <p className="text-sm text-foreground/85">
-                    {formatLocationTimestamp(arrivalDetailRecord.ubicacionLlegadaTimestamp) || "Sin fecha de captura"}
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
+  return <div><AdminHeader title="Registro de Asistencia" /><main className="min-w-0 space-y-5 p-4 sm:p-6"><div className="flex flex-col justify-between gap-3 md:flex-row md:items-end"><div><p className="text-sm text-muted-foreground">Control operativo y evidencia para liquidación</p><h2 className="mt-1 text-2xl font-semibold tracking-tight">Asistencia</h2></div><div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={refresh} disabled={dayLoading}><RefreshCw className={cn("h-4 w-4", dayLoading && "animate-spin")} />Actualizar</Button>{activeTab === "quincena" && fortnight && <Button size="sm" onClick={async () => { const { generateAttendanceFortnightlyPDF } = await import("@/lib/utils/attendance-pdf"); generateAttendanceFortnightlyPDF({ report: fortnight, company: defaultCompany }); }}><Download className="h-4 w-4" />Descargar quincena</Button>}</div></div>{error && <div className="flex items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"><span>{error}</span><Button variant="ghost" size="sm" onClick={() => setError("")}>Cerrar</Button></div>}<Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as AttendanceTab)}><TabsList className="w-full justify-start overflow-x-auto bg-card/70 p-1 sm:w-fit"><TabsTrigger value="dia"><Clock3 className="h-4 w-4" />Día actual</TabsTrigger><TabsTrigger value="historial"><CalendarDays className="h-4 w-4" />Historial</TabsTrigger><TabsTrigger value="quincena"><FileDown className="h-4 w-4" />Quincena</TabsTrigger><TabsTrigger value="memorandos"><FileText className="h-4 w-4" />Memorandos</TabsTrigger><TabsTrigger value="reglas"><Settings2 className="h-4 w-4" />Reglas</TabsTrigger></TabsList><TabsContent value="dia" className="space-y-5"><DayToolbar date={selectedDate} setDate={setSelectedDate} search={search} setSearch={setSearch} statusFilter={statusFilter} setStatusFilter={setStatusFilter} /><SummaryGrid summary={summary} /><AttendanceTable rows={filteredRecords} loading={dayLoading} onSelect={setSelectedRecord} onEdit={openEdit} onMemo={(row) => createMemo([row.id], row.usuarioId, row.periodoId)} onMessage={(row) => { setSelectedRecord(row); setMessageOpen(true); }} memoSaving={memoSaving} /></TabsContent><TabsContent value="historial" className="space-y-5"><DayToolbar date={selectedDate} setDate={setSelectedDate} search={search} setSearch={setSearch} statusFilter={statusFilter} setStatusFilter={setStatusFilter} /><SummaryGrid summary={summary} /><AttendanceTable rows={filteredRecords} loading={dayLoading} onSelect={setSelectedRecord} onEdit={openEdit} onMemo={(row) => createMemo([row.id], row.usuarioId, row.periodoId)} onMessage={(row) => { setSelectedRecord(row); setMessageOpen(true); }} memoSaving={memoSaving} /></TabsContent><TabsContent value="quincena" className="space-y-5"><div className="flex flex-col gap-3 rounded-xl border border-border/50 bg-card/60 p-4 sm:flex-row sm:items-end"><div><Label>Mes</Label><Input type="month" value={fortnightMonth} onChange={(event) => setFortnightMonth(event.target.value)} className="mt-1 w-full sm:w-44" /></div><div><Label>Periodo</Label><Select value={fortnightHalf} onValueChange={(value) => setFortnightHalf(value as "primera" | "segunda")}><SelectTrigger className="mt-1 w-full sm:w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="primera">1 al 15</SelectItem><SelectItem value="segunda">16 al cierre</SelectItem></SelectContent></Select></div><div className="ml-auto text-sm text-muted-foreground">Consulta consolidada · no carga todo el histórico</div></div><FortnightView report={fortnight} onMemo={createMemo} memoSaving={memoSaving} /></TabsContent><TabsContent value="memorandos" className="space-y-4"><div className="flex items-center justify-between"><div><h3 className="font-semibold">Memorandos generados</h3><p className="text-sm text-muted-foreground">PDF con hora, foto, regla aplicada y espacio de firma.</p></div><Badge variant="outline">{memos.length} documentos</Badge></div><MemoList memos={memos} users={users} onDownload={downloadMemo} onUpdate={async (memo, action) => { await updateAttendanceMemo({ id: memo.id, action }); setMemos(await getAttendanceMemos()); }} /></TabsContent><TabsContent value="reglas" className="space-y-5"><RulesPanel form={ruleForm} setForm={setRuleForm} saving={settingsSaving} onSave={saveRules} /></TabsContent></Tabs></main><Sheet open={Boolean(selectedRecord)} onOpenChange={(open) => !open && setSelectedRecord(null)}><SheetContent className="w-full overflow-y-auto border-border bg-card sm:max-w-xl"><SheetHeader><SheetTitle>Detalle de asistencia</SheetTitle><SheetDescription>{selectedRecord?.usuarioNombre || "Trabajador"} · {formatDate(selectedRecord?.fecha)}</SheetDescription></SheetHeader>{selectedRecord && <RecordDetail row={selectedRecord} onEdit={() => openEdit(selectedRecord)} onMemo={() => createMemo([selectedRecord.id], selectedRecord.usuarioId, selectedRecord.periodoId)} onMessage={() => setMessageOpen(true)} memoSaving={memoSaving} />}</SheetContent></Sheet><Dialog open={editOpen} onOpenChange={setEditOpen}><DialogContent><DialogHeader><DialogTitle>Ajustar registro de asistencia</DialogTitle></DialogHeader><div className="space-y-4"><div><Label>Estado</Label><Select value={attendanceStatus} onValueChange={(value) => setAttendanceStatus(value as typeof attendanceStatus)}><SelectTrigger className="mt-1"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="a_tiempo">A tiempo</SelectItem><SelectItem value="tarde">Tarde</SelectItem><SelectItem value="no_reportado">No reportó</SelectItem></SelectContent></Select></div><div><Label>Hora de llegada</Label><Input className="mt-1" type="time" value={attendanceTime} onChange={(event) => setAttendanceTime(event.target.value)} disabled={attendanceStatus === "no_reportado"} /></div><div><Label>Motivo / observación</Label><Textarea className="mt-1" value={attendanceReason} onChange={(event) => setAttendanceReason(event.target.value)} placeholder="Deja trazabilidad del ajuste..." /></div></div><DialogFooter><Button variant="outline" onClick={() => setEditOpen(false)}>Cancelar</Button><Button onClick={saveEdit} disabled={attendanceSaving}>{attendanceSaving ? "Guardando..." : "Guardar y recalcular"}</Button></DialogFooter></DialogContent></Dialog><Dialog open={messageOpen} onOpenChange={setMessageOpen}><DialogContent><DialogHeader><DialogTitle>Enviar comunicación</DialogTitle></DialogHeader><div className="space-y-4"><div><Label>Tipo</Label><Select value={messageType} onValueChange={(value) => setMessageType(value as typeof messageType)}><SelectTrigger className="mt-1"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pedagogico">Mensaje pedagógico</SelectItem><SelectItem value="citacion_descargos">Citación a descargos</SelectItem></SelectContent></Select></div><div><Label>Mensaje</Label><Textarea className="mt-1 min-h-32" value={messageText} onChange={(event) => setMessageText(event.target.value)} placeholder="Escribe la comunicación para el trabajador..." /></div></div><DialogFooter><Button variant="outline" onClick={() => setMessageOpen(false)}>Cancelar</Button><Button onClick={sendMessage} disabled={!messageText.trim()}><Send className="h-4 w-4" />Enviar</Button></DialogFooter></DialogContent></Dialog></div>;
 }
+
+function DayToolbar({ date, setDate, search, setSearch, statusFilter, setStatusFilter }: { date: string; setDate: (value: string) => void; search: string; setSearch: (value: string) => void; statusFilter: string; setStatusFilter: (value: string) => void }) { return <div className="flex flex-col gap-3 rounded-xl border border-border/50 bg-card/60 p-3 lg:flex-row lg:items-center"><div className="flex items-center gap-1"><Button variant="ghost" size="icon-sm" onClick={() => setDate(shiftDate(date, -1))}><ChevronLeft className="h-4 w-4" /></Button><div className="min-w-52 text-center"><p className="text-sm font-medium capitalize">{formatLongDate(date)}</p><p className="text-[11px] text-muted-foreground">{date === getBogotaDate() ? "Jornada actual" : `Consulta del ${formatDate(date)}`}</p></div><Button variant="ghost" size="icon-sm" onClick={() => setDate(shiftDate(date, 1))}><ChevronRight className="h-4 w-4" /></Button></div><Input type="date" value={date} onChange={(event) => setDate(event.target.value)} className="w-full lg:w-40" /><div className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar trabajador u observación..." className="pl-9" /></div><Select value={statusFilter} onValueChange={setStatusFilter}><SelectTrigger className="w-full lg:w-40"><SelectValue placeholder="Estado" /></SelectTrigger><SelectContent><SelectItem value="todos">Todos</SelectItem><SelectItem value="a_tiempo">A tiempo</SelectItem><SelectItem value="tarde">Tarde</SelectItem><SelectItem value="no_reportado">No reportó</SelectItem></SelectContent></Select></div>; }
+function SummaryGrid({ summary }: { summary: AttendanceDaySummary }) { return <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7"><SummaryCard label="Trabajadores" value={summary.total} tone="bg-slate-500/10 text-slate-300" icon={UserRound} /><SummaryCard label="Reportaron" value={summary.reportados} tone="bg-sky-500/10 text-sky-300" icon={CheckCircle2} /><SummaryCard label="A tiempo" value={summary.aTiempo} tone="bg-emerald-500/10 text-emerald-300" icon={CheckCircle2} /><SummaryCard label="Tardanzas" value={summary.tardanzas} tone="bg-amber-500/10 text-amber-300" icon={AlertTriangle} /><SummaryCard label="Reposiciones" value={summary.reposiciones} tone="bg-orange-500/10 text-orange-300" icon={ShieldAlert} /><SummaryCard label="No reportaron" value={summary.noReportados} tone="bg-red-500/10 text-red-300" icon={XCircle} /><SummaryCard label="Descuento aplicado" value={`${summary.descuentoTotal}%`} detail={`${summary.minutosAdeudados} min adeudados`} tone="bg-gold/10 text-gold" icon={Timer} /></div>; }
+
+function AttendanceTable({ rows, loading, onSelect, onEdit, onMemo, onMessage, memoSaving }: { rows: AttendanceRow[]; loading: boolean; onSelect: (row: AttendanceRow) => void; onEdit: (row: AttendanceRow) => void; onMemo: (row: AttendanceRow) => void; onMessage: (row: AttendanceRow) => void; memoSaving: boolean }) { return <Card className="overflow-hidden border-border/50 bg-card/70 shadow-none"><CardHeader className="flex flex-row items-center justify-between gap-3 border-b border-border/40 px-4 py-3 sm:px-6"><div><CardTitle className="text-base">Registros del día</CardTitle><p className="text-xs text-muted-foreground">La vista solo consulta la fecha seleccionada.</p></div><Badge variant="outline">{rows.length} filas</Badge></CardHeader><CardContent className="p-0">{loading ? <div className="p-8 text-center text-sm text-muted-foreground">Cargando registros...</div> : rows.length === 0 ? <div className="p-12 text-center"><CalendarDays className="mx-auto h-8 w-8 text-muted-foreground/50" /><p className="mt-3 text-sm font-medium">No hay registros para estos filtros</p><p className="mt-1 text-xs text-muted-foreground">Prueba otra fecha o limpia la búsqueda.</p></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Trabajador</TableHead><TableHead>Programada</TableHead><TableHead>Llegada</TableHead><TableHead>Estado</TableHead><TableHead>Minutos</TableHead><TableHead>Liquidación</TableHead><TableHead className="text-right">Acciones</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => { const meta = statusMeta(row); const Icon = meta.icon; return <TableRow key={row.id} className="cursor-pointer" onClick={() => onSelect(row)}><TableCell><div className="flex items-center gap-2"><div className="flex h-8 w-8 items-center justify-center rounded-full bg-gold/10 text-xs font-semibold text-gold">{(row.usuarioNombre || "?").split(" ").map((part) => part[0]).slice(0, 2).join("")}</div><div><p className="font-medium">{row.usuarioNombre || row.usuarioId}</p><p className="text-xs text-muted-foreground">{row.razonTardanza || "Sin observaciones"}</p></div></div></TableCell><TableCell className="text-muted-foreground">{row.horaEsperada || "—"}</TableCell><TableCell className="font-medium">{row.horaLlegada || "—"}{row.fotoLlegadaUrl && <Camera className="ml-1 inline h-3 w-3 text-sky-300" />}</TableCell><TableCell><Badge variant="outline" className={meta.className}><Icon className="h-3 w-3" />{meta.label}</Badge></TableCell><TableCell>{row.minutosAdeudados || row.minutosRetraso || 0} min</TableCell><TableCell><span className={cn("font-medium", (row.porcentajeDescuento || 0) > 0 ? "text-amber-300" : "text-muted-foreground")}>{row.porcentajeDescuento || 0}%</span>{row.liquidacionValor ? <p className="text-[11px] text-muted-foreground">{money(row.liquidacionValor)}</p> : null}</TableCell><TableCell className="text-right" onClick={(event) => event.stopPropagation()}><div className="flex justify-end gap-1"><Button variant="ghost" size="icon-sm" title="Editar" onClick={() => onEdit(row)}><Pencil className="h-4 w-4" /></Button>{row.categoriaLlegada !== "a_tiempo" && <Button variant="ghost" size="icon-sm" title="Generar memorando" onClick={() => onMemo(row)} disabled={memoSaving}><FileText className="h-4 w-4 text-gold" /></Button>}<Button variant="ghost" size="icon-sm" title="Enviar comunicación" onClick={() => onMessage(row)}><Send className="h-4 w-4" /></Button></div></TableCell></TableRow>; })}</TableBody></Table></div>}</CardContent></Card>; }
+
+function RecordDetail({ row, onEdit, onMemo, onMessage, memoSaving }: { row: AttendanceRow; onEdit: () => void; onMemo: () => void; onMessage: () => void; memoSaving: boolean }) { const meta = statusMeta(row); const Icon = meta.icon; return <div className="space-y-5 px-4 pb-6"><div className="flex items-center gap-3 rounded-xl border border-border/50 bg-background/40 p-3"><div className="flex h-11 w-11 items-center justify-center rounded-full bg-gold/10 font-semibold text-gold">{(row.usuarioNombre || "?").split(" ").map((part) => part[0]).slice(0, 2).join("")}</div><div><p className="font-semibold">{row.usuarioNombre || row.usuarioId}</p><p className="text-xs text-muted-foreground">{formatDate(row.fecha)}</p></div><Badge variant="outline" className={cn("ml-auto", meta.className)}><Icon className="h-3 w-3" />{meta.label}</Badge></div>{row.fotoLlegadaUrl ? <div className="overflow-hidden rounded-xl border border-border/50 bg-background/40"><img src={row.fotoLlegadaUrl} alt="Evidencia de llegada" className="max-h-72 w-full object-contain" /><p className="border-t border-border/50 p-2 text-xs text-muted-foreground"><Camera className="mr-1 inline h-3 w-3" />Evidencia fotográfica capturada en asistencia</p></div> : <div className="rounded-xl border border-dashed border-border/60 p-6 text-center text-sm text-muted-foreground"><Camera className="mx-auto mb-2 h-5 w-5" />No hay fotografía asociada</div>}<div className="grid grid-cols-2 gap-3 text-sm"><Detail label="Hora programada" value={row.horaEsperada || "—"} /><Detail label="Hora reportada" value={row.horaLlegada || "No reportó"} /><Detail label="Minutos adeudados" value={`${row.minutosAdeudados || row.minutosRetraso || 0} min`} /><Detail label="Regla aplicada" value={`${row.porcentajeReglaAplicada ?? row.porcentajeDescuento ?? 0}% · ${row.categoriaLlegada || "legacy"}`} /><Detail label="Liquidación" value={row.liquidacionValor ? money(row.liquidacionValor) : "Pendiente / sin descuento"} /><Detail label="Periodo" value={row.periodoFechaInicio && row.periodoFechaFin ? `${formatDate(row.periodoFechaInicio)} - ${formatDate(row.periodoFechaFin)}` : "Sin periodo"} /></div>{row.ubicacionLlegadaDireccion && <div className="rounded-lg bg-background/40 p-3 text-sm"><MapPin className="mr-2 inline h-4 w-4 text-sky-300" />{row.ubicacionLlegadaDireccion}</div>}<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={onEdit}><Pencil className="h-4 w-4" />Ajustar</Button>{row.categoriaLlegada !== "a_tiempo" && <Button size="sm" onClick={onMemo} disabled={memoSaving}><FileText className="h-4 w-4" />Generar memorando</Button>}<Button variant="outline" size="sm" onClick={onMessage}><Send className="h-4 w-4" />Comunicar</Button></div></div>; }
+function Detail({ label, value }: { label: string; value: string }) { return <div className="rounded-lg bg-background/40 p-3"><p className="text-[11px] text-muted-foreground">{label}</p><p className="mt-1 break-words font-medium">{value}</p></div>; }
+
+function FortnightView({ report, onMemo, memoSaving }: { report: AttendanceFortnightlyReport | null; onMemo: (ids: string[], userId?: string, periodId?: string) => void; memoSaving: boolean }) { if (!report) return <Card className="border-border/50 bg-card/70"><CardContent className="p-12 text-center text-sm text-muted-foreground">Cargando consolidado quincenal...</CardContent></Card>; return <div className="space-y-4"><div className="grid grid-cols-2 gap-3 md:grid-cols-5"><SummaryCard label="Eventos" value={report.summary.eventos} tone="bg-slate-500/10 text-slate-300" icon={FileText} /><SummaryCard label="Trabajadores" value={report.summary.trabajadores} tone="bg-sky-500/10 text-sky-300" icon={UserRound} /><SummaryCard label="Tardanzas leves" value={report.summary.tardanzasLeves} tone="bg-amber-500/10 text-amber-300" icon={AlertTriangle} /><SummaryCard label="No reportados" value={report.summary.noReportados} tone="bg-red-500/10 text-red-300" icon={XCircle} /><SummaryCard label="Minutos adeudados" value={report.summary.minutosAdeudados} tone="bg-gold/10 text-gold" icon={Timer} /></div><Card className="overflow-hidden border-border/50 bg-card/70"><CardHeader className="border-b border-border/40 px-4 py-3"><CardTitle className="text-base">Detalle por trabajador</CardTitle><p className="text-xs text-muted-foreground">{formatDate(report.fechaInicio)} al {formatDate(report.fechaFin)}</p></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Trabajador</TableHead><TableHead>Eventos</TableHead><TableHead>Minutos</TableHead><TableHead>Tardanzas</TableHead><TableHead>No reportados</TableHead><TableHead>Descuento</TableHead><TableHead /></TableRow></TableHeader><TableBody>{report.trabajadores.map((worker) => <TableRow key={worker.usuarioId}><TableCell className="font-medium">{worker.nombre}</TableCell><TableCell>{worker.eventos}</TableCell><TableCell>{worker.minutosAdeudados}</TableCell><TableCell>{worker.tardanzasLeves + worker.tardanzasMayores}</TableCell><TableCell>{worker.noReportados}</TableCell><TableCell className="text-amber-300">{worker.porcentajeDescuento}%</TableCell><TableCell className="text-right">{worker.registros?.some((row) => row.categoriaLlegada !== "a_tiempo") && <Button size="sm" variant="outline" onClick={() => onMemo(worker.registros?.filter((row) => row.categoriaLlegada !== "a_tiempo").map((row) => row.id) || [], worker.usuarioId, report.periodoId)} disabled={memoSaving}><FileText className="h-3 w-3" />Memorando</Button>}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card></div>; }
+
+function MemoList({ memos, users, onDownload, onUpdate }: { memos: AttendanceMemo[]; users: User[]; onDownload: (memo: AttendanceMemo) => void; onUpdate: (memo: AttendanceMemo, action: "firmar" | "anular") => void }) { if (!memos.length) return <Card className="border-border/50 bg-card/70"><CardContent className="p-12 text-center text-sm text-muted-foreground"><FileText className="mx-auto mb-3 h-8 w-8" />Aún no hay memorandos generados.</CardContent></Card>; return <div className="grid gap-3 lg:grid-cols-2">{memos.map((memo) => <Card key={memo.id} className="border-border/50 bg-card/70"><CardContent className="space-y-4 p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-semibold">{memo.numero}</p><p className="text-sm text-muted-foreground">{users.find((user) => user.id === memo.usuarioId)?.nombre || memo.usuarioId} · {memo.titulo}</p></div><Badge variant="outline">{memo.estado}</Badge></div><div className="grid grid-cols-3 gap-2 text-center text-xs"><div className="rounded bg-background/40 p-2"><p className="text-lg font-semibold">{memo.eventos.length}</p><p className="text-muted-foreground">eventos</p></div><div className="rounded bg-background/40 p-2"><p className="text-lg font-semibold">{memo.eventos.reduce((sum, event) => sum + event.minutosAdeudados, 0)}</p><p className="text-muted-foreground">minutos</p></div><div className="rounded bg-background/40 p-2"><p className="text-lg font-semibold">{memo.eventos.reduce((sum, event) => sum + event.porcentaje, 0)}%</p><p className="text-muted-foreground">descuento</p></div></div><div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => onDownload(memo)}><Download className="h-4 w-4" />Descargar PDF</Button>{memo.estado !== "firmado" && memo.estado !== "anulado" && <Button size="sm" variant="outline" onClick={() => onUpdate(memo, "firmar")}>Marcar firmado</Button>}{memo.estado !== "anulado" && <Button size="sm" variant="ghost" onClick={() => onUpdate(memo, "anular")}>Anular</Button>}</div></CardContent></Card>)}</div>; }
+
+function RulesPanel({ form, setForm, saving, onSave }: { form: { horaInicio: string; horaCorte: string; gracia: string; corte: string; noReportado: string; leve: string; reposicion: string; noReportadoPct: string; autoMemo: boolean; fundamento: string; regimen: string }; setForm: (value: { horaInicio: string; horaCorte: string; gracia: string; corte: string; noReportado: string; leve: string; reposicion: string; noReportadoPct: string; autoMemo: boolean; fundamento: string; regimen: string }) => void; saving: boolean; onSave: () => void }) { const update = (key: keyof typeof form, value: string | boolean) => setForm({ ...form, [key]: value }); return <Card className="border-border/50 bg-card/70"><CardHeader className="border-b border-border/40"><CardTitle className="flex items-center gap-2 text-base"><Settings2 className="h-4 w-4 text-gold" />Reglas de asistencia y liquidación</CardTitle><p className="text-sm text-muted-foreground">Todo es modificable. Los cambios se aplican al siguiente cálculo y quedan auditables.</p></CardHeader><CardContent className="space-y-6 p-4 sm:p-6"><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><TimeField label="Inicio de tardanza" value={form.horaInicio} onChange={(value) => update("horaInicio", value)} /><TimeField label="Corte de no reporte" value={form.horaCorte} onChange={(value) => update("horaCorte", value)} /><Field label="Minutos de gracia" value={form.gracia} onChange={(value) => update("gracia", value)} suffix="min" /><Field label="Minutos sin reporte" value={form.noReportado} onChange={(value) => update("noReportado", value)} suffix="min" /><Field label="Descuento tardanza leve" value={form.leve} onChange={(value) => update("leve", value)} suffix="%" /><Field label="Descuento reposición" value={form.reposicion} onChange={(value) => update("reposicion", value)} suffix="%" /><Field label="Descuento no reportado" value={form.noReportadoPct} onChange={(value) => update("noReportadoPct", value)} suffix="%" /><Field label="Corte relativo" value={form.corte} onChange={(value) => update("corte", value)} suffix="min" /></div><div className="flex items-center justify-between rounded-xl border border-border/50 bg-background/30 p-4"><div><p className="text-sm font-medium">Generar memorando sugerido automáticamente</p><p className="text-xs text-muted-foreground">El administrador siempre podrá editar, descargar o anular.</p></div><Switch checked={form.autoMemo} onCheckedChange={(checked) => update("autoMemo", checked)} /></div><div className="grid gap-4 lg:grid-cols-2"><div><Label>Fundamento de asistencia</Label><Textarea className="mt-1 min-h-28" value={form.fundamento} onChange={(event) => update("fundamento", event.target.value)} placeholder="Norma, contrato o política interna..." /></div><div><Label>Régimen sancionatorio</Label><Textarea className="mt-1 min-h-28" value={form.regimen} onChange={(event) => update("regimen", event.target.value)} placeholder="Descripción del régimen aplicable..." /></div></div><div className="flex justify-end"><Button onClick={onSave} disabled={saving}>{saving ? "Guardando..." : "Guardar reglas"}</Button></div></CardContent></Card>; }
+function Field({ label, value, onChange, suffix }: { label: string; value: string; onChange: (value: string) => void; suffix: string }) { return <div><Label>{label}</Label><div className="relative mt-1"><Input type="number" min="0" value={value} onChange={(event) => onChange(event.target.value)} className="pr-12" /><span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">{suffix}</span></div></div>; }
+function TimeField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) { return <div><Label>{label}</Label><Input className="mt-1" type="time" value={value} onChange={(event) => onChange(event.target.value)} /></div>; }

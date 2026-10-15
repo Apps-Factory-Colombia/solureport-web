@@ -16,6 +16,10 @@ const readRequestsInFlight = new Map<string, Promise<unknown>>();
 let readCacheGeneration = 0;
 const cacheableActions = new Set([
   "arrivals.list",
+  "attendance.day",
+  "attendance.history",
+  "attendance.fortnightly",
+  "attendance.memos",
   "catalog.list",
   "clients.get",
   "clients.list",

@@ -136,27 +136,35 @@ function percentage(value: unknown, fallback = 0) {
   return Math.max(0, Math.min(100, number(value, fallback)));
 }
 
-function attendanceDiscountForTime(settings: any, actualMinutes: number | null) {
-  const lateStartMinutes = timeMinutes(settings.horaInicioDescuentoTardanza);
-  const noReportCutoffMinutes = timeMinutes(settings.horaDescuentoAutomatico);
+function attendanceThresholds(settings: any, scheduledMinutes: number | null) {
+  const graceMinutes = Math.max(0, Math.floor(number(settings.minutosGraciaTardanza, 5)));
+  const noReportMinutes = Math.max(graceMinutes + 1, Math.floor(number(settings.minutosCorteNoReportado, 30)));
+  const configuredLateStart = timeMinutes(settings.horaInicioDescuentoTardanza);
+  const configuredCutoff = timeMinutes(settings.horaDescuentoAutomatico);
+  const lateStartMinutes = scheduledMinutes == null ? configuredLateStart : scheduledMinutes + graceMinutes;
+  const noReportCutoffMinutes = scheduledMinutes == null ? configuredCutoff : scheduledMinutes + noReportMinutes;
+  return { lateStartMinutes, noReportCutoffMinutes };
+}
+
+function attendanceDiscountForTime(settings: any, actualMinutes: number | null, scheduledMinutes: number | null) {
+  const { lateStartMinutes, noReportCutoffMinutes } = attendanceThresholds(settings, scheduledMinutes);
   const latePercentage = percentage(settings.porcentajeDescuentoTardanza);
   const noReportPercentage = percentage(settings.porcentajeDescuentoNoReportado, 30);
+  const reposicionPercentage = percentage(settings.porcentajeDescuentoReposicion, 0);
+  const scheduled = scheduledMinutes ?? lateStartMinutes ?? 0;
 
   if (actualMinutes == null) {
-    return { estado: "no_reportado", minutosRetraso: 0, porcentaje: noReportPercentage };
+    return { estado: "no_reportado", categoria: "no_reportado", minutosRetraso: 0, minutosAdeudados: Math.max(0, Math.floor(number(settings.minutosNoReportado, 30))), porcentaje: noReportPercentage };
   }
-
   if (lateStartMinutes == null || actualMinutes < lateStartMinutes) {
-    return { estado: "a_tiempo", minutosRetraso: 0, porcentaje: 0 };
+    return { estado: "a_tiempo", categoria: "a_tiempo", minutosRetraso: 0, minutosAdeudados: 0, porcentaje: 0 };
   }
 
-  const severeLate = noReportCutoffMinutes != null && actualMinutes >= noReportCutoffMinutes;
-  const threshold = severeLate ? noReportCutoffMinutes : lateStartMinutes;
-  return {
-    estado: "tarde",
-    minutosRetraso: threshold == null ? 0 : Math.max(0, actualMinutes - threshold),
-    porcentaje: severeLate ? noReportPercentage : latePercentage,
-  };
+  const minutesLate = Math.max(0, actualMinutes - scheduled);
+  if (noReportCutoffMinutes != null && actualMinutes >= noReportCutoffMinutes) {
+    return { estado: "tarde", categoria: "reposicion", minutosRetraso: minutesLate, minutosAdeudados: minutesLate, porcentaje: reposicionPercentage };
+  }
+  return { estado: "tarde", categoria: "tardanza_leve", minutosRetraso: minutesLate, minutosAdeudados: minutesLate, porcentaje: latePercentage };
 }
 
 function bogotaClock() {
@@ -2807,6 +2815,289 @@ function requestedUserRole(payload: Payload): string | undefined {
   return payload.rol === undefined ? undefined : String(payload.rol);
 }
 
+function attendanceDate(value: unknown, fallback = bogotaClock().date) {
+  const candidate = String(value || fallback).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(candidate)) throw new Error("La fecha de asistencia no es válida.");
+  return candidate;
+}
+
+function attendanceRange(payload: Payload) {
+  if (payload.fechaInicio && payload.fechaFin) {
+    const start = attendanceDate(payload.fechaInicio);
+    const end = attendanceDate(payload.fechaFin);
+    if (start > end) throw new Error("El rango de asistencia es inválido.");
+    return { start, end };
+  }
+  const month = String(payload.mes || bogotaClock().date.slice(0, 7)).slice(0, 7);
+  const half = payload.quincena === "segunda" ? "segunda" : "primera";
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("El mes de la quincena no es válido.");
+  const [year, monthNumber] = month.split("-").map(Number);
+  const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  return {
+    start: `${month}-${half === "primera" ? "01" : "16"}`,
+    end: `${month}-${String(half === "primera" ? 15 : lastDay).padStart(2, "0")}`,
+  };
+}
+
+async function attendanceRows(start: string, end: string, payload: Payload = {}) {
+  const values: unknown[] = [start, end];
+  const conditions = ["r.fecha BETWEEN $1 AND $2"];
+  if (payload.usuarioId) {
+    values.push(payload.usuarioId);
+    conditions.push(`r.usuario_id = $${values.length}`);
+  }
+  if (payload.estado && payload.estado !== "todos") {
+    values.push(payload.estado);
+    conditions.push(`r.estado_entrada = $${values.length}`);
+  }
+  if (payload.search) {
+    values.push(`%${String(payload.search).trim()}%`);
+    conditions.push(`(u.nombre || ' ' || u.apellido) ILIKE $${values.length}`);
+  }
+  const limit = Math.min(2000, Math.max(1, Number(payload.limit) || 500));
+  const offset = Math.max(0, Number(payload.offset) || 0);
+  values.push(limit, offset);
+  const { rows } = await dbQuery(
+    `SELECT r.*,
+            left(r.hora_entrada_programada::text, 5) AS hora_esperada,
+            left(r.hora_entrada_real::text, 5) AS hora_llegada,
+            left(r.hora_salida_programada::text, 5) AS hora_salida_programada_text,
+            left(r.hora_salida_real::text, 5) AS hora_salida_real_text,
+            u.nombre AS usuario_nombre,
+            u.apellido AS usuario_apellido,
+            u.avatar_url AS usuario_avatar,
+            p.id AS periodo_id,
+            p.estado AS periodo_estado,
+            p.fecha_inicio AS periodo_fecha_inicio,
+            p.fecha_fin AS periodo_fecha_fin,
+            COALESCE((SELECT MAX(li.porcentaje_descuento_tardanza)
+                        FROM public.liquidacion_items li
+                       WHERE li.tecnico_id = r.usuario_id
+                         AND li.periodo_id = p.id
+                         AND li.estado <> 'anulado'), 0) AS liquidacion_porcentaje,
+            COALESCE((SELECT SUM(li.descuento_tardanza)
+                        FROM public.liquidacion_items li
+                       WHERE li.tecnico_id = r.usuario_id
+                         AND li.periodo_id = p.id
+                         AND li.estado <> 'anulado'), 0) AS liquidacion_valor,
+            (SELECT am.estado
+               FROM public.asistencia_memorando_eventos ame
+               JOIN public.asistencia_memorandos am ON am.id = ame.memorando_id
+              WHERE ame.asistencia_id = r.id
+              ORDER BY am.created_at DESC
+              LIMIT 1) AS memorando_estado
+       FROM public.registros_asistencia r
+       JOIN public.usuarios u ON u.id = r.usuario_id
+       LEFT JOIN LATERAL (
+         SELECT id, estado, fecha_inicio, fecha_fin
+           FROM public.periodos_liquidacion
+          WHERE r.fecha BETWEEN fecha_inicio AND fecha_fin
+          ORDER BY fecha_inicio DESC
+          LIMIT 1
+       ) p ON TRUE
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY r.fecha DESC, r.hora_entrada_programada ASC, u.apellido ASC, u.nombre ASC
+      LIMIT $${values.length - 1} OFFSET $${values.length}`,
+    values,
+  );
+  return rows;
+}
+
+function mapAttendanceRow(row: any): any {
+  return {
+    ...mapArrival(row),
+    usuarioNombre: [row.usuario_nombre, row.usuario_apellido].filter(Boolean).join(" "),
+    usuarioAvatar: row.usuario_avatar || undefined,
+    periodoId: row.periodo_id || undefined,
+    periodoEstado: row.periodo_estado || undefined,
+    periodoFechaInicio: dateOnly(row.periodo_fecha_inicio) || undefined,
+    periodoFechaFin: dateOnly(row.periodo_fecha_fin) || undefined,
+    liquidacionPorcentaje: number(row.liquidacion_porcentaje),
+    liquidacionValor: number(row.liquidacion_valor),
+    memorandoEstado: row.memorando_estado || undefined,
+  };
+}
+
+function attendanceSummary(rows: any[], fecha = "") {
+  return {
+    fecha,
+    total: rows.length,
+    reportados: rows.filter((row) => row.estado_entrada !== "no_reportado").length,
+    aTiempo: rows.filter((row) => (row.categoria_llegada || row.estado_entrada) === "a_tiempo").length,
+    tardanzas: rows.filter((row) => ["tardanza_leve", "tardanza_mayor"].includes(row.categoria_llegada)).length,
+    reposiciones: rows.filter((row) => row.categoria_llegada === "reposicion").length,
+    noReportados: rows.filter((row) => row.estado_entrada === "no_reportado").length,
+    minutosAdeudados: rows.reduce((sum, row) => sum + number(row.minutos_adeudados ?? row.minutos_retraso), 0),
+    descuentoTotal: rows.reduce((sum, row) => sum + number(row.porcentaje_descuento), 0),
+  };
+}
+
+function inferMemoType(rows: any[]) {
+  if (rows.some((row) => row.categoria_llegada === "no_reportado")) return "omision_marcacion";
+  if (rows.some((row) => row.categoria_llegada === "reposicion")) return "reposicion";
+  if (rows.some((row) => row.categoria_llegada === "tardanza_mayor")) return "retardo_severo";
+  return "impuntualidad";
+}
+
+function mapMemo(row: any, events: any[] = []): any {
+  return {
+    id: row.id,
+    usuarioId: row.usuario_id || undefined,
+    periodoId: row.periodo_id || undefined,
+    numero: row.numero,
+    tipo: row.tipo,
+    estado: row.estado,
+    titulo: row.titulo,
+    narrativa: row.narrativa || undefined,
+    fundamento: row.fundamento || undefined,
+    regimenSancionatorio: row.regimen_sancionatorio || undefined,
+    plantillaVersion: row.plantilla_version || undefined,
+    pdfUrl: row.pdf_url || undefined,
+    firmadoEn: row.firmado_en || undefined,
+    firmaTrabajadorNombre: row.firma_trabajador_nombre || undefined,
+    firmaTrabajadorDocumento: row.firma_trabajador_documento || undefined,
+    generadoEn: row.generado_en || row.created_at,
+    usuarioNombre: [row.usuario_nombre, row.usuario_apellido].filter(Boolean).join(" "),
+    eventos: events.map((event) => ({
+      id: event.id,
+      asistenciaId: event.asistencia_id || undefined,
+      fecha: dateOnly(event.fecha_snapshot) || "",
+      horaProgramada: event.hora_programada_snapshot ? String(event.hora_programada_snapshot).slice(0, 5) : undefined,
+      horaLlegada: event.hora_llegada_snapshot ? String(event.hora_llegada_snapshot).slice(0, 5) : undefined,
+      minutosRetraso: number(event.minutos_snapshot),
+      minutosAdeudados: number(event.minutos_adeudados_snapshot),
+      estado: event.estado_snapshot || undefined,
+      categoria: event.categoria_snapshot || undefined,
+      porcentaje: number(event.porcentaje_snapshot),
+      fotoUrl: event.foto_url_snapshot || undefined,
+      ubicacion: event.ubicacion_snapshot || undefined,
+    })),
+  };
+}
+
+async function attendanceDay(payload: Payload, user: UserContext) {
+  await requireAdmin(user);
+  const fecha = attendanceDate(payload.fecha);
+  if (fecha === bogotaClock().date) {
+    const users = (await userRows()).map(mapUser);
+    const settings = await getConfig();
+    await ensureArrivals({ users, fecha, porcentajeNoReportado: settings.porcentajeDescuentoNoReportado, automaticDays: settings.diasDescuentoAutomatico });
+  }
+  const rows = await attendanceRows(fecha, fecha, payload);
+  const periodRow = rows.find((row) => row.periodo_id);
+  const period = periodRow
+    ? { id: periodRow.periodo_id, fechaInicio: dateOnly(periodRow.periodo_fecha_inicio), fechaFin: dateOnly(periodRow.periodo_fecha_fin), estado: periodRow.periodo_estado }
+    : null;
+  return { fecha, records: rows.map(mapAttendanceRow), summary: attendanceSummary(rows, fecha), period };
+}
+
+async function attendanceHistory(payload: Payload, user: UserContext) {
+  await requireAdmin(user);
+  const start = attendanceDate(payload.fechaInicio, bogotaClock().date);
+  const end = attendanceDate(payload.fechaFin, start);
+  const rows = await attendanceRows(start, end, payload);
+  return { fechaInicio: start, fechaFin: end, total: rows.length, records: rows.map(mapAttendanceRow), summary: attendanceSummary(rows) };
+}
+
+async function attendanceFortnightly(payload: Payload, user: UserContext) {
+  await requireAdmin(user);
+  const range = attendanceRange(payload);
+  const rows = await attendanceRows(range.start, range.end, { ...payload, limit: 2000, offset: 0 });
+  const groups = new Map<string, any>();
+  for (const row of rows) {
+    const current = groups.get(row.usuario_id) || { usuarioId: row.usuario_id, nombre: [row.usuario_nombre, row.usuario_apellido].filter(Boolean).join(" "), registros: [] };
+    current.registros.push(mapAttendanceRow(row));
+    groups.set(row.usuario_id, current);
+  }
+  const trabajadores = Array.from(groups.values()).map((group) => ({
+    ...group,
+    eventos: group.registros.length,
+    minutosAdeudados: group.registros.reduce((sum: number, row: any) => sum + number(row.minutosAdeudados), 0),
+    tardanzasLeves: group.registros.filter((row: any) => row.categoriaLlegada === "tardanza_leve").length,
+    tardanzasMayores: group.registros.filter((row: any) => row.categoriaLlegada === "tardanza_mayor").length,
+    noReportados: group.registros.filter((row: any) => row.categoriaLlegada === "no_reportado").length,
+    porcentajeDescuento: group.registros.reduce((sum: number, row: any) => sum + number(row.porcentajeDescuento), 0),
+  })).sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
+  const summary = {
+    eventos: rows.length,
+    trabajadores: trabajadores.length,
+    minutosAdeudados: rows.reduce((sum, row) => sum + number(row.minutos_adeudados), 0),
+    tardanzasLeves: rows.filter((row) => row.categoria_llegada === "tardanza_leve").length,
+    tardanzasMayores: rows.filter((row) => row.categoria_llegada === "tardanza_mayor").length,
+    noReportados: rows.filter((row) => row.categoria_llegada === "no_reportado").length,
+    descuentoTotal: rows.reduce((sum, row) => sum + number(row.porcentaje_descuento), 0),
+  };
+  const period = rows.find((row) => row.periodo_id);
+  return { fechaInicio: range.start, fechaFin: range.end, periodoId: period?.periodo_id || undefined, generatedAt: new Date().toISOString(), summary, trabajadores };
+}
+
+async function attendanceMemos(payload: Payload, user: UserContext) {
+  await requireAdmin(user);
+  const values: unknown[] = [];
+  const conditions: string[] = [];
+  if (payload.usuarioId) { values.push(payload.usuarioId); conditions.push(`m.usuario_id = $${values.length}`); }
+  if (payload.periodoId) { values.push(payload.periodoId); conditions.push(`m.periodo_id = $${values.length}`); }
+  if (payload.estado && payload.estado !== "todos") { values.push(payload.estado); conditions.push(`m.estado = $${values.length}`); }
+  const { rows } = await dbQuery(`SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido FROM public.asistencia_memorandos m LEFT JOIN public.usuarios u ON u.id = m.usuario_id ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY m.generado_en DESC`, values);
+  const result = [];
+  for (const row of rows) {
+    const eventResult = await dbQuery("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = $1 ORDER BY orden, fecha_snapshot", [row.id]);
+    result.push(mapMemo(row, eventResult.rows));
+  }
+  return result;
+}
+
+async function createAttendanceMemo(payload: Payload, user: UserContext) {
+  await requireAdmin(user);
+  const eventIds = uniqueIds(jsonArray(payload.asistenciaIds).map((id) => String(id)));
+  if (!eventIds.length) throw new Error("Selecciona al menos una incidencia para generar el memorando.");
+  return withTransaction(async (client) => {
+    const { rows: events } = await client.query(`SELECT r.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido FROM public.registros_asistencia r JOIN public.usuarios u ON u.id = r.usuario_id WHERE r.id = ANY($1::uuid[]) ORDER BY r.fecha, r.hora_entrada_programada`, [eventIds]);
+    if (!events.length) throw new Error("No se encontraron las asistencias seleccionadas.");
+    const usuarioId = String(payload.usuarioId || events[0].usuario_id);
+    if (events.some((row) => row.usuario_id !== usuarioId)) throw new Error("Un memorando solo puede contener eventos del mismo trabajador.");
+    const tipo = String(payload.tipo || inferMemoType(events));
+    const periodId = payload.periodoId || null;
+    if (periodId) {
+      const existing = await client.query("SELECT id FROM public.asistencia_memorandos WHERE usuario_id = $1 AND periodo_id = $2 AND tipo = $3 AND estado <> 'anulado' LIMIT 1", [usuarioId, periodId, tipo]);
+      if (existing.rows[0]) {
+        const existingMemo = await client.query("SELECT m.*, u.nombre AS usuario_nombre, u.apellido AS usuario_apellido FROM public.asistencia_memorandos m LEFT JOIN public.usuarios u ON u.id = m.usuario_id WHERE m.id = $1", [existing.rows[0].id]);
+        const existingEvents = await client.query("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = $1 ORDER BY orden, fecha_snapshot", [existing.rows[0].id]);
+        return mapMemo(existingMemo.rows[0], existingEvents.rows);
+      }
+    }
+    const { rows: sequenceRows } = await client.query("SELECT COUNT(*)::int AS total FROM public.asistencia_memorandos");
+    const year = new Date().getFullYear();
+    const numero = `MEMO-${year}-${String(number(sequenceRows[0]?.total) + 1).padStart(3, "0")}`;
+    const settings = await getConfig();
+    const displayName = [events[0].usuario_nombre, events[0].usuario_apellido].filter(Boolean).join(" ");
+    const title = String(payload.titulo || `Llamado de atención por ${tipo.replaceAll("_", " ")}`);
+    const narrative = String(payload.narrativa || `Se deja constancia de las incidencias de asistencia registradas para ${displayName} durante el período seleccionado.`);
+    const memoResult = await client.query(`INSERT INTO public.asistencia_memorandos (usuario_id,periodo_id,numero,tipo,estado,titulo,narrativa,fundamento,regimen_sancionatorio,plantilla_version,generado_por_id) VALUES ($1,$2,$3,$4,'generado',$5,$6,$7,$8,'asistencia-v1',$9) RETURNING *`, [usuarioId, periodId, numero, tipo, title, narrative, settings.fundamentoAsistencia, settings.regimenSancionatorioAsistencia, user.id]);
+    for (const [index, event] of events.entries()) {
+      await client.query(`INSERT INTO public.asistencia_memorando_eventos (memorando_id,asistencia_id,orden,fecha_snapshot,hora_programada_snapshot,hora_llegada_snapshot,minutos_snapshot,minutos_adeudados_snapshot,estado_snapshot,categoria_snapshot,porcentaje_snapshot,foto_url_snapshot,ubicacion_snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (memorando_id,asistencia_id) DO NOTHING`, [memoResult.rows[0].id, event.id, index, event.fecha, event.hora_entrada_programada, event.hora_entrada_real, number(event.minutos_retraso), number(event.minutos_adeudados ?? event.minutos_retraso), event.estado_entrada, event.categoria_llegada, number(event.porcentaje_descuento), event.foto_llegada_url, event.ubicacion_llegada_direccion]);
+    }
+    await client.query("UPDATE public.asistencia_memorandos SET updated_at = clock_timestamp() WHERE id = $1", [memoResult.rows[0].id]);
+    const eventResult = await client.query("SELECT * FROM public.asistencia_memorando_eventos WHERE memorando_id = $1 ORDER BY orden", [memoResult.rows[0].id]);
+    return mapMemo({ ...memoResult.rows[0], usuario_nombre: events[0].usuario_nombre, usuario_apellido: events[0].usuario_apellido }, eventResult.rows);
+  });
+}
+
+async function updateAttendanceMemo(payload: Payload, user: UserContext) {
+  await requireAdmin(user);
+  const id = String(payload.id || "");
+  if (!id) throw new Error("Falta el memorando.");
+  if (payload.action === "firmar") {
+    const { rows } = await dbQuery("UPDATE public.asistencia_memorandos SET estado = 'firmado', firmado_en = clock_timestamp(), firma_trabajador_nombre = $2, firma_trabajador_documento = $3, updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [id, payload.nombre || null, payload.documento || null]);
+    return mapMemo(rows[0]);
+  }
+  if (payload.action === "anular") {
+    const { rows } = await dbQuery("UPDATE public.asistencia_memorandos SET estado = 'anulado', anulado_en = clock_timestamp(), motivo_anulacion = $2, updated_at = clock_timestamp() WHERE id = $1 RETURNING *", [id, payload.motivo || "Anulado por administración"]);
+    return mapMemo(rows[0]);
+  }
+  throw new Error("Acción de memorando no soportada.");
+}
+
 async function execute(action: string, payload: Payload, user: UserContext): Promise<unknown> {
   switch (action) {
     case "users.list": {
@@ -3433,6 +3724,13 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
     case "reports.leaderConfig": { await requireAdmin(user); return upsertLeaderExtraConfiguration(payload); }
     case "reports.saveEvidence": { await saveEvidence(payload, user); return true; }
 
+    case "attendance.day": return attendanceDay(payload, user);
+    case "attendance.history": return attendanceHistory(payload, user);
+    case "attendance.fortnightly": return attendanceFortnightly(payload, user);
+    case "attendance.memos": return attendanceMemos(payload, user);
+    case "attendance.memo.create": return createAttendanceMemo(payload, user);
+    case "attendance.memo.update": return updateAttendanceMemo(payload, user);
+
     case "arrivals.list": {
       const values: unknown[] = [];
       const filter = payload.usuarioId ? "WHERE r.usuario_id = $1" : "";
@@ -3473,13 +3771,13 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
         // porcentaje manual que pueda dejar la liquidación desincronizada.
         const settings = await getConfig();
         const actualMinutes = timeMinutes(String(normalizedRow.hora_entrada_real || ""));
-        const rule = normalizedRow.estado_entrada === "no_reportado" && actualMinutes == null
-          ? attendanceDiscountForTime(settings, null)
-          : attendanceDiscountForTime(settings, actualMinutes);
-        const appliesDiscount = rule.porcentaje > 0 && (rule.estado === "tarde" || rule.estado === "no_reportado");
+        const effectiveActualMinutes = normalizedRow.estado_entrada === "no_reportado" ? null : actualMinutes;
+        const scheduledMinutes = timeMinutes(String(normalizedRow.hora_entrada_programada || ""));
+        const rule = attendanceDiscountForTime(settings, effectiveActualMinutes, scheduledMinutes);
+        const appliesDiscount = rule.porcentaje > 0;
         const refreshed = await dbQuery(
-          "UPDATE public.registros_asistencia SET estado_entrada = $2, minutos_retraso = $3, razon_tardanza = CASE WHEN $4 = true THEN razon_tardanza ELSE NULL END, descuento_aplicado = $4, porcentaje_descuento = $5, updated_at = clock_timestamp() WHERE id = $1 RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text",
-          [id, rule.estado, rule.minutosRetraso, appliesDiscount, appliesDiscount ? rule.porcentaje : 0],
+          "UPDATE public.registros_asistencia SET estado_entrada = $2, tarde = $3, minutos_retraso = $4, minutos_adeudados = $5, categoria_llegada = $6, razon_tardanza = CASE WHEN $7 = true THEN razon_tardanza ELSE NULL END, descuento_aplicado = $7, porcentaje_descuento = $8, porcentaje_regla_aplicada = $8, tipo_descuento = $9, regla_version = 'attendance-v3', calculado_en = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text",
+          [id, rule.estado, rule.estado === "tarde", rule.minutosRetraso, rule.minutosAdeudados, rule.categoria, appliesDiscount, appliesDiscount ? rule.porcentaje : 0, rule.categoria],
         );
         normalizedRow = refreshed.rows[0] || normalizedRow;
         await syncAttendanceDiscount(normalizedRow.id, normalizedRow.usuario_id, dateOnly(normalizedRow.fecha) || "");
@@ -3493,10 +3791,11 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       const actualMinutes = timeMinutes(actual);
       const fecha = payload.fecha || new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
       const settings = await getConfig();
-      const rule = attendanceDiscountForTime(settings, actualMinutes);
-      const appliesDiscount = rule.porcentaje > 0 && rule.estado === "tarde";
+      const scheduledMinutes = timeMinutes(scheduled);
+      const rule = attendanceDiscountForTime(settings, actualMinutes, scheduledMinutes);
+      const appliesDiscount = rule.porcentaje > 0;
       const discountPercentage = appliesDiscount ? rule.porcentaje : 0;
-      const { rows } = await dbQuery(`INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,hora_entrada_real,estado_entrada,minutos_retraso,razon_tardanza,foto_llegada_url,ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp,ubicacion_llegada_direccion,descuento_aplicado,porcentaje_descuento) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (usuario_id,fecha) DO UPDATE SET hora_entrada_programada=EXCLUDED.hora_entrada_programada,hora_salida_programada=EXCLUDED.hora_salida_programada,hora_entrada_real=EXCLUDED.hora_entrada_real,estado_entrada=EXCLUDED.estado_entrada,minutos_retraso=EXCLUDED.minutos_retraso,razon_tardanza=EXCLUDED.razon_tardanza,foto_llegada_url=EXCLUDED.foto_llegada_url,ubicacion_llegada_precision_metros=EXCLUDED.ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp=EXCLUDED.ubicacion_llegada_timestamp,ubicacion_llegada_direccion=EXCLUDED.ubicacion_llegada_direccion,descuento_aplicado=EXCLUDED.descuento_aplicado,porcentaje_descuento=EXCLUDED.porcentaje_descuento,updated_at=clock_timestamp() RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text`, [user.id, fecha, scheduled, payload.horaSalidaProgramada || "", actual, rule.estado, rule.minutosRetraso, rule.estado === "tarde" ? (payload.razonTardanza || null) : null, payload.fotoLlegadaUrl || null, payload.ubicacionLlegada?.accuracy || null, payload.ubicacionLlegada?.capturedAt || null, payload.ubicacionLlegada?.address || null, appliesDiscount, discountPercentage]);
+      const { rows } = await dbQuery(`INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,hora_entrada_real,estado_entrada,tarde,minutos_retraso,minutos_adeudados,categoria_llegada,razon_tardanza,foto_llegada_url,ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp,ubicacion_llegada_direccion,descuento_aplicado,porcentaje_descuento,porcentaje_regla_aplicada,tipo_descuento,regla_version,calculado_en) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT (usuario_id,fecha) DO UPDATE SET hora_entrada_programada=EXCLUDED.hora_entrada_programada,hora_salida_programada=EXCLUDED.hora_salida_programada,hora_entrada_real=EXCLUDED.hora_entrada_real,estado_entrada=EXCLUDED.estado_entrada,tarde=EXCLUDED.tarde,minutos_retraso=EXCLUDED.minutos_retraso,minutos_adeudados=EXCLUDED.minutos_adeudados,categoria_llegada=EXCLUDED.categoria_llegada,razon_tardanza=EXCLUDED.razon_tardanza,foto_llegada_url=EXCLUDED.foto_llegada_url,ubicacion_llegada_precision_metros=EXCLUDED.ubicacion_llegada_precision_metros,ubicacion_llegada_timestamp=EXCLUDED.ubicacion_llegada_timestamp,ubicacion_llegada_direccion=EXCLUDED.ubicacion_llegada_direccion,descuento_aplicado=EXCLUDED.descuento_aplicado,porcentaje_descuento=EXCLUDED.porcentaje_descuento,porcentaje_regla_aplicada=EXCLUDED.porcentaje_regla_aplicada,tipo_descuento=EXCLUDED.tipo_descuento,regla_version=EXCLUDED.regla_version,calculado_en=EXCLUDED.calculado_en,updated_at=clock_timestamp() RETURNING *, left(hora_entrada_programada::text,5) AS hora_esperada, left(hora_entrada_real::text,5) AS hora_llegada, left(hora_salida_programada::text,5) AS hora_salida_programada_text, left(hora_salida_real::text,5) AS hora_salida_real_text`, [user.id, fecha, scheduled, payload.horaSalidaProgramada || "", actual, rule.estado, rule.estado === "tarde", rule.minutosRetraso, rule.minutosAdeudados, rule.categoria, rule.estado === "tarde" ? (payload.razonTardanza || null) : null, payload.fotoLlegadaUrl || null, payload.ubicacionLlegada?.accuracy || null, payload.ubicacionLlegada?.capturedAt || null, payload.ubicacionLlegada?.address || null, appliesDiscount, discountPercentage, discountPercentage, rule.categoria, "attendance-v3", new Date().toISOString()]);
       await syncAttendanceDiscount(rows[0].id, user.id, fecha);
       return mapArrival(rows[0]);
     }
@@ -3619,13 +3918,13 @@ async function replaceGroupMembers(client: any, groupId: string, memberIds: stri
 }
 
 function configDefaults(): any {
-  return { nombre: "SOLUCIONES & AUTOMATIZACIONES S.A.S.", logo: "/logo.png", correoRemitente: "notificaciones@solucionesyautomatizaciones.com", correoEmpresa: "solucionesyautomatizaciones@hotmail.com", plantillaReportePDF: "default", porcentajeDescuentoTardanza: 5, horaInicioDescuentoTardanza: "08:05", diasDescuentoAutomatico: ["lunes", "martes", "miercoles", "jueves", "viernes"], horaDescuentoAutomatico: "08:30", porcentajeDescuentoNoReportado: 30, porcentajeExtraLider: 10, extraLiderActivo: true, costoRevisionLider: 0, costoVisitaTecnicaDefault: 0, costoRecorridoNormal: 0, costoRecorridoHerramienta: 0 };
+  return { nombre: "SOLUCIONES & AUTOMATIZACIONES S.A.S.", logo: "/logo.png", correoRemitente: "notificaciones@solucionesyautomatizaciones.com", correoEmpresa: "solucionesyautomatizaciones@hotmail.com", plantillaReportePDF: "default", porcentajeDescuentoTardanza: 5, horaInicioDescuentoTardanza: "08:05", diasDescuentoAutomatico: ["lunes", "martes", "miercoles", "jueves", "viernes"], horaDescuentoAutomatico: "08:30", porcentajeDescuentoNoReportado: 30, minutosGraciaTardanza: 5, minutosCorteNoReportado: 30, minutosNoReportado: 30, porcentajeDescuentoReposicion: 0, memorandoAsistenciaAutomatico: true, fundamentoAsistencia: "El trabajador debe iniciar sus labores en el horario acordado y registrar oportunamente su ingreso.", regimenSancionatorioAsistencia: "Texto sujeto a aprobación de la empresa.", porcentajeExtraLider: 10, extraLiderActivo: true, costoRevisionLider: 0, costoVisitaTecnicaDefault: 0, costoRecorridoNormal: 0, costoRecorridoHerramienta: 0 };
 }
 
 function mapConfig(row: any): any {
   const defaults = configDefaults();
   const days = jsonArray(row.dias_descuento_automatico).map((day) => numberToDay[number(day)]).filter(Boolean);
-  return { ...defaults, nombre: row.nombre || defaults.nombre, logo: row.logo_url || defaults.logo, correoRemitente: row.correo_remitente || defaults.correoRemitente, correoEmpresa: row.correo_empresa || defaults.correoEmpresa, plantillaReportePDF: row.plantilla_reporte || defaults.plantillaReportePDF, porcentajeDescuentoTardanza: percentage(row.porcentaje_descuento_tardanza, defaults.porcentajeDescuentoTardanza), horaInicioDescuentoTardanza: row.hora_inicio_descuento_tardanza ? String(row.hora_inicio_descuento_tardanza).slice(0, 5) : defaults.horaInicioDescuentoTardanza, diasDescuentoAutomatico: days.length ? days : defaults.diasDescuentoAutomatico, horaDescuentoAutomatico: row.hora_descuento_automatico ? String(row.hora_descuento_automatico).slice(0, 5) : defaults.horaDescuentoAutomatico, porcentajeDescuentoNoReportado: percentage(row.porcentaje_descuento_no_reportado, defaults.porcentajeDescuentoNoReportado), porcentajeExtraLider: number(row.porcentaje_extra_lider, defaults.porcentajeExtraLider), extraLiderActivo: row.extra_lider_activo ?? defaults.extraLiderActivo, costoRevisionLider: number(row.costo_revision_lider), costoVisitaTecnicaDefault: number(row.costo_visita_tecnica_default), costoRecorridoNormal: number(row.costo_recorrido_normal), costoRecorridoHerramienta: number(row.costo_recorrido_herramienta) };
+  return { ...defaults, nombre: row.nombre || defaults.nombre, logo: row.logo_url || defaults.logo, correoRemitente: row.correo_remitente || defaults.correoRemitente, correoEmpresa: row.correo_empresa || defaults.correoEmpresa, plantillaReportePDF: row.plantilla_reporte || defaults.plantillaReportePDF, porcentajeDescuentoTardanza: percentage(row.porcentaje_descuento_tardanza, defaults.porcentajeDescuentoTardanza), horaInicioDescuentoTardanza: row.hora_inicio_descuento_tardanza ? String(row.hora_inicio_descuento_tardanza).slice(0, 5) : defaults.horaInicioDescuentoTardanza, diasDescuentoAutomatico: days.length ? days : defaults.diasDescuentoAutomatico, horaDescuentoAutomatico: row.hora_descuento_automatico ? String(row.hora_descuento_automatico).slice(0, 5) : defaults.horaDescuentoAutomatico, porcentajeDescuentoNoReportado: percentage(row.porcentaje_descuento_no_reportado, defaults.porcentajeDescuentoNoReportado), minutosGraciaTardanza: number(row.minutos_gracia_tardanza, defaults.minutosGraciaTardanza), minutosCorteNoReportado: number(row.minutos_corte_no_reportado, defaults.minutosCorteNoReportado), minutosNoReportado: number(row.minutos_no_reportado, defaults.minutosNoReportado), porcentajeDescuentoReposicion: percentage(row.porcentaje_descuento_reposicion, defaults.porcentajeDescuentoReposicion), memorandoAsistenciaAutomatico: row.memorando_asistencia_automatico ?? defaults.memorandoAsistenciaAutomatico, fundamentoAsistencia: row.fundamento_asistencia || defaults.fundamentoAsistencia, regimenSancionatorioAsistencia: row.regimen_sancionatorio_asistencia || defaults.regimenSancionatorioAsistencia, porcentajeExtraLider: number(row.porcentaje_extra_lider, defaults.porcentajeExtraLider), extraLiderActivo: row.extra_lider_activo ?? defaults.extraLiderActivo, costoRevisionLider: number(row.costo_revision_lider), costoVisitaTecnicaDefault: number(row.costo_visita_tecnica_default), costoRecorridoNormal: number(row.costo_recorrido_normal), costoRecorridoHerramienta: number(row.costo_recorrido_herramienta) };
 }
 
 async function getConfig() { const { rows } = await dbQuery("SELECT * FROM public.configuracion_empresa WHERE id = 1"); return rows[0] ? mapConfig(rows[0]) : configDefaults(); }
@@ -3680,8 +3979,8 @@ async function updateConfig(payload: Payload) {
   if (lateStartMinutes == null) throw new Error("Debes configurar una hora válida para iniciar la tardanza reportada.");
   if (timeMinutes(cutoff) == null) throw new Error("Debes configurar una hora de corte válida para los descuentos automáticos.");
   if (lateStartMinutes >= (cutoffMinutes as number)) throw new Error("La hora de inicio de tardanza debe ser anterior a la hora de no reporte.");
-  const values = [settings.nombre, settings.logo || null, settings.correoRemitente, settings.correoEmpresa || null, settings.plantillaReportePDF || "default", percentage(settings.porcentajeDescuentoTardanza), lateStart, days.length ? days : [1, 2, 3, 4, 5], cutoff, percentage(settings.porcentajeDescuentoNoReportado, 30), settings.porcentajeExtraLider, settings.extraLiderActivo, settings.costoRevisionLider, settings.costoVisitaTecnicaDefault, settings.costoRecorridoNormal, settings.costoRecorridoHerramienta];
-  const { rows } = await dbQuery(`INSERT INTO public.configuracion_empresa (id,nombre,logo_url,correo_remitente,correo_empresa,plantilla_reporte,hora_inicio_descuento_tardanza,porcentaje_descuento_tardanza,dias_descuento_automatico,hora_descuento_automatico,porcentaje_descuento_no_reportado,porcentaje_extra_lider,extra_lider_activo,costo_revision_lider,costo_visita_tecnica_default,costo_recorrido_normal,costo_recorrido_herramienta) VALUES (1,$1,$2,$3,$4,$5,$7,$6,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT (id) DO UPDATE SET nombre=EXCLUDED.nombre, logo_url=EXCLUDED.logo_url, correo_remitente=EXCLUDED.correo_remitente, correo_empresa=EXCLUDED.correo_empresa, plantilla_reporte=EXCLUDED.plantilla_reporte, hora_inicio_descuento_tardanza=EXCLUDED.hora_inicio_descuento_tardanza, porcentaje_descuento_tardanza=EXCLUDED.porcentaje_descuento_tardanza, dias_descuento_automatico=EXCLUDED.dias_descuento_automatico, hora_descuento_automatico=EXCLUDED.hora_descuento_automatico, porcentaje_descuento_no_reportado=EXCLUDED.porcentaje_descuento_no_reportado, porcentaje_extra_lider=EXCLUDED.porcentaje_extra_lider, extra_lider_activo=EXCLUDED.extra_lider_activo, costo_revision_lider=EXCLUDED.costo_revision_lider, costo_visita_tecnica_default=EXCLUDED.costo_visita_tecnica_default, costo_recorrido_normal=EXCLUDED.costo_recorrido_normal, costo_recorrido_herramienta=EXCLUDED.costo_recorrido_herramienta, updated_at=clock_timestamp() RETURNING *`, values);
+  const values = [settings.nombre, settings.logo || null, settings.correoRemitente, settings.correoEmpresa || null, settings.plantillaReportePDF || "default", percentage(settings.porcentajeDescuentoTardanza), lateStart, days.length ? days : [1, 2, 3, 4, 5], cutoff, percentage(settings.porcentajeDescuentoNoReportado, 30), settings.porcentajeExtraLider, settings.extraLiderActivo, settings.costoRevisionLider, settings.costoVisitaTecnicaDefault, settings.costoRecorridoNormal, settings.costoRecorridoHerramienta, Math.max(0, Math.floor(number(settings.minutosGraciaTardanza, 5))), Math.max(1, Math.floor(number(settings.minutosCorteNoReportado, 30))), Math.max(0, Math.floor(number(settings.minutosNoReportado, 30))), percentage(settings.porcentajeDescuentoReposicion, 0), settings.memorandoAsistenciaAutomatico !== false, settings.fundamentoAsistencia || null, settings.regimenSancionatorioAsistencia || null];
+  const { rows } = await dbQuery(`INSERT INTO public.configuracion_empresa (id,nombre,logo_url,correo_remitente,correo_empresa,plantilla_reporte,hora_inicio_descuento_tardanza,porcentaje_descuento_tardanza,dias_descuento_automatico,hora_descuento_automatico,porcentaje_descuento_no_reportado,porcentaje_extra_lider,extra_lider_activo,costo_revision_lider,costo_visita_tecnica_default,costo_recorrido_normal,costo_recorrido_herramienta,minutos_gracia_tardanza,minutos_corte_no_reportado,minutos_no_reportado,porcentaje_descuento_reposicion,memorando_asistencia_automatico,fundamento_asistencia,regimen_sancionatorio_asistencia) VALUES (1,$1,$2,$3,$4,$5,$7,$6,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) ON CONFLICT (id) DO UPDATE SET nombre=EXCLUDED.nombre, logo_url=EXCLUDED.logo_url, correo_remitente=EXCLUDED.correo_remitente, correo_empresa=EXCLUDED.correo_empresa, plantilla_reporte=EXCLUDED.plantilla_reporte, hora_inicio_descuento_tardanza=EXCLUDED.hora_inicio_descuento_tardanza, porcentaje_descuento_tardanza=EXCLUDED.porcentaje_descuento_tardanza, dias_descuento_automatico=EXCLUDED.dias_descuento_automatico, hora_descuento_automatico=EXCLUDED.hora_descuento_automatico, porcentaje_descuento_no_reportado=EXCLUDED.porcentaje_descuento_no_reportado, porcentaje_extra_lider=EXCLUDED.porcentaje_extra_lider, extra_lider_activo=EXCLUDED.extra_lider_activo, costo_revision_lider=EXCLUDED.costo_revision_lider, costo_visita_tecnica_default=EXCLUDED.costo_visita_tecnica_default, costo_recorrido_normal=EXCLUDED.costo_recorrido_normal, costo_recorrido_herramienta=EXCLUDED.costo_recorrido_herramienta, minutos_gracia_tardanza=EXCLUDED.minutos_gracia_tardanza, minutos_corte_no_reportado=EXCLUDED.minutos_corte_no_reportado, minutos_no_reportado=EXCLUDED.minutos_no_reportado, porcentaje_descuento_reposicion=EXCLUDED.porcentaje_descuento_reposicion, memorando_asistencia_automatico=EXCLUDED.memorando_asistencia_automatico, fundamento_asistencia=EXCLUDED.fundamento_asistencia, regimen_sancionatorio_asistencia=EXCLUDED.regimen_sancionatorio_asistencia, updated_at=clock_timestamp() RETURNING *`, values);
   return mapConfig(rows[0]);
 }
 
@@ -5136,6 +5435,16 @@ function mapArrival(row: any): any {
     // Compatibility field for the UI; derived from the canonical V2 status.
     tarde: row.estado_entrada === "tarde",
     minutosRetraso: number(row.minutos_retraso),
+    minutosAdeudados: number(row.minutos_adeudados ?? row.minutos_retraso),
+    categoriaLlegada: row.categoria_llegada || (row.estado_entrada === "no_reportado" ? "no_reportado" : row.estado_entrada === "tarde" ? "tardanza_leve" : "a_tiempo"),
+    reglaId: row.regla_id || undefined,
+    reglaVersion: row.regla_version || undefined,
+    porcentajeReglaAplicada: number(row.porcentaje_regla_aplicada ?? row.porcentaje_descuento),
+    tipoDescuento: row.tipo_descuento || undefined,
+    calculadoEn: row.calculado_en || undefined,
+    motivoAjuste: row.motivo_ajuste || undefined,
+    ajustadoPorId: row.ajustado_por_id || undefined,
+    ajustadoEn: row.ajustado_en || undefined,
     razonTardanza: row.razon_tardanza || undefined,
     fotoLlegadaUrl: row.foto_llegada_url || undefined,
     ubicacionLlegadaPrecisionMetros: row.ubicacion_llegada_precision_metros == null ? undefined : number(row.ubicacion_llegada_precision_metros),
@@ -5157,10 +5466,8 @@ async function syncAttendanceDiscount(attendanceId: string, technicianId: string
   const periodId = periodRows[0]?.id;
   if (!periodId || periodRows[0]?.estado === "cerrado") return;
 
-  // El descuento es una regla del período: una llegada puntual no puede
-  // borrar una tardanza previa y un 5% no puede reemplazar un 30% ya ganado.
-  // Recalcular desde todas las asistencias también cubre cambios hechos por
-  // el administrador y evita aplicar descuentos acumulativos.
+  // Recalcular desde todas las asistencias evita descuentos acumulativos por
+  // reintentos y permite que la liquidación refleje el acumulado quincenal.
   const { rows: attendanceRows } = await dbQuery(
     `SELECT id, descuento_aplicado, porcentaje_descuento
        FROM public.registros_asistencia
@@ -5171,12 +5478,10 @@ async function syncAttendanceDiscount(attendanceId: string, technicianId: string
       )`,
     [technicianId, periodId],
   );
-  const normalizedPercentage = Math.max(
-    0,
-    ...attendanceRows
-      .filter((row) => Boolean(row.descuento_aplicado))
-      .map((row) => percentage(row.porcentaje_descuento)),
-  );
+  const rawPercentage = attendanceRows
+    .filter((row) => Boolean(row.descuento_aplicado))
+    .reduce((sum, row) => sum + percentage(row.porcentaje_descuento), 0);
+  const normalizedPercentage = Math.min(100, Math.max(0, rawPercentage));
   if (normalizedPercentage <= 0) {
     await dbQuery("DELETE FROM public.asistencia_descuentos WHERE periodo_id = $1 AND tecnico_id = $2", [periodId, technicianId]);
     await dbQuery(
@@ -5210,16 +5515,25 @@ async function syncAttendanceDiscount(attendanceId: string, technicianId: string
     "SELECT COALESCE(SUM(descuento_tardanza), 0) AS value FROM public.liquidacion_items WHERE tecnico_id = $1 AND periodo_id = $2 AND tipo <> 'recorrido' AND estado <> 'anulado' AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')",
     [technicianId, periodId],
   );
-  await dbQuery(
-    "DELETE FROM public.asistencia_descuentos WHERE periodo_id = $1 AND tecnico_id = $2 AND asistencia_id <> $3",
-    [periodId, technicianId, attendanceId],
-  );
-  await dbQuery(
-    `INSERT INTO public.asistencia_descuentos (asistencia_id, periodo_id, tecnico_id, porcentaje, valor)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (asistencia_id, periodo_id) DO UPDATE SET porcentaje = EXCLUDED.porcentaje, valor = EXCLUDED.valor, aplicado_en = clock_timestamp()`,
-    [attendanceId, periodId, technicianId, normalizedPercentage, roundCurrency(number(discountRows[0]?.value))],
-  );
+  const totalDiscount = roundCurrency(number(discountRows[0]?.value));
+  for (const row of attendanceRows) {
+    if (!row.descuento_aplicado) continue;
+    const eventPercentage = percentage(row.porcentaje_descuento);
+    const eventValue = rawPercentage > 0 ? roundCurrency(totalDiscount * eventPercentage / rawPercentage) : 0;
+    await dbQuery(
+      `INSERT INTO public.asistencia_descuentos
+        (asistencia_id, periodo_id, tecnico_id, porcentaje, porcentaje_acumulado, minutos_adeudados, valor, regla_version)
+       VALUES ($1, $2, $3, $4, $5, COALESCE((SELECT minutos_adeudados FROM public.registros_asistencia WHERE id = $1), 0), $6, COALESCE((SELECT regla_version FROM public.registros_asistencia WHERE id = $1), 'attendance-v3'))
+       ON CONFLICT (asistencia_id, periodo_id) DO UPDATE SET
+         porcentaje = EXCLUDED.porcentaje,
+         porcentaje_acumulado = EXCLUDED.porcentaje_acumulado,
+         minutos_adeudados = EXCLUDED.minutos_adeudados,
+         valor = EXCLUDED.valor,
+         regla_version = EXCLUDED.regla_version,
+         aplicado_en = clock_timestamp()`,
+      [row.id, periodId, technicianId, eventPercentage, normalizedPercentage, eventValue],
+    );
+  }
 }
 
 async function syncActivityAttendanceDiscounts(activityId: string) {
@@ -5248,11 +5562,7 @@ async function ensureArrivals(payload: Payload) {
   const fecha = payload.fecha || new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
   const currentDay = new Date(`${fecha}T12:00:00-05:00`).getUTCDay() || 7;
   const settings = await getConfig();
-  const cutoff = String(payload.horaCorte || settings.horaDescuentoAutomatico || "").slice(0, 5);
-  const cutoffMinutes = timeMinutes(cutoff);
-  if (cutoffMinutes == null) return 0;
   const clock = bogotaClock();
-  if (fecha === clock.date && clock.minutes < cutoffMinutes) return 0;
   const discountPercentage = percentage(
     payload.porcentajeNoReportado,
     percentage(settings.porcentajeDescuentoNoReportado, 30),
@@ -5270,7 +5580,12 @@ async function ensureArrivals(payload: Payload) {
       return entry.activo && scheduleDay === currentDay && entry.horaEntrada && entry.horaSalida;
     });
     if (!schedule) continue;
-    const result = await dbQuery("INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,estado_entrada,estado_salida,razon_tardanza,descuento_aplicado,porcentaje_descuento) VALUES ($1,$2,$3,$4,'no_reportado','no_reportado',$5,$6,$7) ON CONFLICT (usuario_id,fecha) DO UPDATE SET razon_tardanza = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.razon_tardanza ELSE registros_asistencia.razon_tardanza END, descuento_aplicado = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.descuento_aplicado ELSE registros_asistencia.descuento_aplicado END, porcentaje_descuento = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.porcentaje_descuento ELSE registros_asistencia.porcentaje_descuento END, updated_at = clock_timestamp() WHERE registros_asistencia.estado_entrada = 'no_reportado' RETURNING id", [item.id, fecha, schedule.horaEntrada, schedule.horaSalida, `[AUTO ${cutoff}] No registró la entrada antes del corte configurado.`, discountPercentage > 0, discountPercentage]);
+    const scheduledMinutes = timeMinutes(String(schedule.horaEntrada || ""));
+    const { noReportCutoffMinutes } = attendanceThresholds(settings, scheduledMinutes);
+    if (noReportCutoffMinutes == null) continue;
+    if (fecha === clock.date && clock.minutes < noReportCutoffMinutes) continue;
+    const cutoffLabel = `${String(Math.floor(noReportCutoffMinutes / 60)).padStart(2, "0")}:${String(noReportCutoffMinutes % 60).padStart(2, "0")}`;
+    const result = await dbQuery("INSERT INTO public.registros_asistencia (usuario_id,fecha,hora_entrada_programada,hora_salida_programada,estado_entrada,estado_salida,tarde,minutos_retraso,minutos_adeudados,categoria_llegada,razon_tardanza,descuento_aplicado,porcentaje_descuento,porcentaje_regla_aplicada,tipo_descuento,regla_version,calculado_en) VALUES ($1,$2,$3,$4,'no_reportado','no_reportado',false,0,$5,'no_reportado',$6,$7,$8,$8,'no_reportado','attendance-v3',clock_timestamp()) ON CONFLICT (usuario_id,fecha) DO UPDATE SET razon_tardanza = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.razon_tardanza ELSE registros_asistencia.razon_tardanza END, minutos_adeudados = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.minutos_adeudados ELSE registros_asistencia.minutos_adeudados END, categoria_llegada = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.categoria_llegada ELSE registros_asistencia.categoria_llegada END, descuento_aplicado = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.descuento_aplicado ELSE registros_asistencia.descuento_aplicado END, porcentaje_descuento = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.porcentaje_descuento ELSE registros_asistencia.porcentaje_descuento END, porcentaje_regla_aplicada = CASE WHEN registros_asistencia.estado_entrada = 'no_reportado' THEN EXCLUDED.porcentaje_regla_aplicada ELSE registros_asistencia.porcentaje_regla_aplicada END, updated_at = clock_timestamp() WHERE registros_asistencia.estado_entrada = 'no_reportado' RETURNING id", [item.id, fecha, schedule.horaEntrada, schedule.horaSalida, Math.max(0, Math.floor(number(settings.minutosNoReportado, 30))), `[AUTO ${cutoffLabel}] No registró la entrada antes del corte configurado.`, discountPercentage > 0, discountPercentage]);
     if (result.rows[0]) {
       await syncAttendanceDiscount(result.rows[0].id, item.id, fecha);
       changed += 1;
