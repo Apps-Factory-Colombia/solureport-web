@@ -261,14 +261,14 @@ VALUES
   ('00000000-0000-0000-0000-000000000002', 'despues', 'https://example.com/reportes/0002/despues-1.jpg', 1);
 
 -- ── 11. Registros de Asistencia (Llegadas) ──────────────────
-INSERT INTO registros_asistencia (usuario_id, fecha, hora_entrada_programada, hora_salida_programada, hora_entrada_real, estado_entrada, minutos_retraso, tarde)
+INSERT INTO registros_asistencia (usuario_id, fecha, hora_entrada_programada, hora_salida_programada, hora_entrada_real, estado_entrada, minutos_retraso)
 VALUES
-  ('10000000-0000-0000-0000-000000000003', '2025-02-24', '07:00', '17:00', '07:00', 'a_tiempo', 0, false),
-  ('10000000-0000-0000-0000-000000000004', '2025-02-24', '07:00', '17:00', '07:15', 'tarde', 15, true),
-  ('10000000-0000-0000-0000-000000000005', '2025-02-24', '07:00', '17:00', '06:55', 'a_tiempo', 0, false),
-  ('10000000-0000-0000-0000-000000000003', '2025-02-25', '07:00', '17:00', '07:25', 'tarde', 25, true),
-  ('10000000-0000-0000-0000-000000000004', '2025-02-25', '07:00', '17:00', '07:00', 'a_tiempo', 0, false),
-  ('10000000-0000-0000-0000-000000000005', '2025-02-25', '07:00', '17:00', '07:05', 'a_tiempo', 5, false);
+  ('10000000-0000-0000-0000-000000000003', '2025-02-24', '07:00', '17:00', '07:00', 'a_tiempo', 0),
+  ('10000000-0000-0000-0000-000000000004', '2025-02-24', '07:00', '17:00', '07:15', 'tarde', 15),
+  ('10000000-0000-0000-0000-000000000005', '2025-02-24', '07:00', '17:00', '06:55', 'a_tiempo', 0),
+  ('10000000-0000-0000-0000-000000000003', '2025-02-25', '07:00', '17:00', '07:25', 'tarde', 25),
+  ('10000000-0000-0000-0000-000000000004', '2025-02-25', '07:00', '17:00', '07:00', 'a_tiempo', 0),
+  ('10000000-0000-0000-0000-000000000005', '2025-02-25', '07:00', '17:00', '07:05', 'a_tiempo', 5);
 
 -- ── 12. Acumulación de Líderes ──────────────────────────────
 INSERT INTO acumulacion_lideres (lider_id, periodo_id, total_aprobado_pago, total_pendiente_pago, extra_lider, total_recorridos, total_acumulado, porcentaje_extra_lider_aplicado, extra_lider_activo)
