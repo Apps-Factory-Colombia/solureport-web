@@ -18,6 +18,7 @@ interface PDFReportData {
   fotosAntes?: string[];
   fotosDespues?: string[];
   fotoBitacora?: string;
+  evidenciasFotograficas?: Array<{ titulo: string; urls: string[] }>;
   firmaUrl?: string;
   receptor?: { nombre: string; cedula: string; cargo: string };
 }
@@ -291,18 +292,59 @@ function buildWrappedTableRows(
 }
 
 async function getBase64ImageFromUrl(imageUrl: string): Promise<string | null> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 12_000);
+
   try {
-    const response = await fetch(imageUrl);
+    const response = await fetch(imageUrl, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Image request failed with status ${response.status}`);
+    }
+
     const blob = await response.blob();
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
+    if (!blob.size) throw new Error("Image response was empty");
+
+    // Re-encode asynchronously to JPEG so WebP is supported and large phone
+    // photos don't make jsPDF downloads unnecessarily heavy.
+    const bitmap = await createImageBitmap(blob);
+    try {
+      const maxDimension = 1280;
+      const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Could not create image canvas");
+
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+      const compressedBlob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob(
+          (value) => value ? resolve(value) : reject(new Error("Could not compress evidence image")),
+          "image/jpeg",
+          0.8,
+        );
+      });
+
+      return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === "string"
+          ? resolve(reader.result)
+          : reject(new Error("Could not encode evidence image"));
+        reader.onerror = () => reject(reader.error || new Error("Could not read compressed evidence image"));
+        reader.readAsDataURL(compressedBlob);
+      });
+    } finally {
+      bitmap.close();
+    }
   } catch (error) {
-    console.error("Error loading image:", imageUrl, error);
+    // Avoid logging the URL; storage URLs may contain signed access tokens.
+    console.error("Error loading evidence image for PDF:", error);
     return null;
+  } finally {
+    window.clearTimeout(timeoutId);
   }
 }
 
@@ -317,7 +359,14 @@ function getPdfImageFormat(base64DataUrl: string): "PNG" | "JPEG" {
   return "JPEG";
 }
 
-export async function generateReportePDF(data: PDFReportData, asBase64: boolean = false): Promise<string | void> {
+export async function generateReportePDF(
+  data: PDFReportData,
+  asBase64: boolean = false,
+  options?: {
+    onEvidenceLoadError?: (count: number) => void;
+    onProgress?: (percent: number) => void;
+  },
+): Promise<string | void> {
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -433,6 +482,30 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
   }
 
   // Helper to render images in a grid
+  let failedEvidenceCount = 0;
+  const photoSections = data.evidenciasFotograficas || [
+    { titulo: `Registro Fotográfico - Antes (${data.fotosAntes?.length || 0})`, urls: data.fotosAntes || [] },
+    { titulo: `Registro Fotográfico - Después (${data.fotosDespues?.length || 0})`, urls: data.fotosDespues || [] },
+    { titulo: "Foto de Bitácora", urls: data.fotoBitacora ? [data.fotoBitacora] : [] },
+  ];
+  const uniquePhotoUrls = Array.from(new Set(photoSections.flatMap((section) => section.urls).filter(Boolean)));
+  const loadedImages = new Map<string, string | null>();
+  const imageBatchSize = 4;
+  let embeddedImageCount = 0;
+  options?.onProgress?.(0);
+
+  // Fetch across all participant sections together to avoid serial network
+  // waits, while keeping a small cap so many photos don't spike browser memory.
+  for (let index = 0; index < uniquePhotoUrls.length; index += imageBatchSize) {
+    const batchUrls = uniquePhotoUrls.slice(index, index + imageBatchSize);
+    const batchImages = await Promise.all(batchUrls.map((url) => getBase64ImageFromUrl(url)));
+    batchUrls.forEach((url, batchIndex) => loadedImages.set(url, batchImages[batchIndex]));
+    const completed = index + batchUrls.length;
+    options?.onProgress?.(uniquePhotoUrls.length
+      ? Math.round((completed / uniquePhotoUrls.length) * 90)
+      : 90);
+  }
+
   const renderImageGrid = async (title: string, urls: string[]) => {
     if (!urls || urls.length === 0) return;
 
@@ -457,11 +530,10 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
 
       checkPageBreak(imgHeight + margin + 10);
 
-      const url = urls[i];
-      const base64 = await getBase64ImageFromUrl(url);
+      const base64 = loadedImages.get(urls[i]) || null;
+      const x = 14 + col * (imgWidth + margin);
 
       if (base64) {
-        const x = 14 + col * (imgWidth + margin);
         const imgType = getPdfImageFormat(base64);
 
         try {
@@ -469,19 +541,39 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
           doc.setDrawColor(200);
           doc.rect(x, y, imgWidth, imgHeight);
         } catch (err) {
-          console.error("Error adding image to PDF:", err);
+          console.error("Error adding evidence image to PDF:", err);
+          failedEvidenceCount += 1;
+          doc.setFillColor(248, 245, 239);
+          doc.setDrawColor(200);
+          doc.rect(x, y, imgWidth, imgHeight, "FD");
           doc.setFontSize(8);
-          doc.text("Error al cargar imagen", x + 5, y + 20);
+          doc.setTextColor(100);
+          doc.text("Evidencia no disponible", x + imgWidth / 2, y + 20, { align: "center" });
         }
+      } else {
+        failedEvidenceCount += 1;
+        doc.setFillColor(248, 245, 239);
+        doc.setDrawColor(200);
+        doc.rect(x, y, imgWidth, imgHeight, "FD");
+        doc.setFontSize(8);
+        doc.setTextColor(100);
+        doc.text("Evidencia no disponible", x + imgWidth / 2, y + 20, { align: "center" });
       }
       col++;
+      embeddedImageCount += 1;
+      if (embeddedImageCount % 6 === 0) {
+        const denominator = Math.max(uniquePhotoUrls.length, 1);
+        options?.onProgress?.(Math.min(99, 90 + Math.floor((embeddedImageCount / denominator) * 9)));
+        // Let React paint progress updates while jsPDF embeds large photo sets.
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      }
     }
     y += imgHeight + margin + 5;
   };
 
-  await renderImageGrid(`Registro Fotográfico - Antes (${data.fotosAntes?.length || 0})`, data.fotosAntes || []);
-  await renderImageGrid(`Registro Fotográfico - Después (${data.fotosDespues?.length || 0})`, data.fotosDespues || []);
-  await renderImageGrid("Foto de Bitácora", data.fotoBitacora ? [data.fotoBitacora] : []);
+  for (const section of photoSections) {
+    await renderImageGrid(section.titulo, section.urls);
+  }
 
   // Receptor & Firma
   checkPageBreak(60);
@@ -570,11 +662,18 @@ export async function generateReportePDF(data: PDFReportData, asBase64: boolean 
     );
   }
 
+  if (failedEvidenceCount > 0) {
+    options?.onEvidenceLoadError?.(failedEvidenceCount);
+    console.warn(`PDF generated with ${failedEvidenceCount} unavailable evidence image(s).`);
+  }
+
   if (asBase64) {
+    options?.onProgress?.(100);
     return doc.output("datauristring");
   }
 
   doc.save(`reporte_mantenimiento_${data.fecha || "sin_fecha"}.pdf`);
+  options?.onProgress?.(100);
 }
 
 export function generateTablePDF(data: PDFTableData): void {

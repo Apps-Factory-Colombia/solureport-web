@@ -910,6 +910,8 @@ export default function InformesPage() {
   const [reportToDelete, setReportToDelete] = useState<ActivityReport | null>(null);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [sendingReportId, setSendingReportId] = useState<string | null>(null);
+  const [generatingPdfReportId, setGeneratingPdfReportId] = useState<string | null>(null);
+  const [pdfGenerationProgress, setPdfGenerationProgress] = useState(0);
   const [editableTechnicalCost, setEditableTechnicalCost] = useState("");
   const [savingTechnicalCost, setSavingTechnicalCost] = useState(false);
   const [editableClientCost, setEditableClientCost] = useState("");
@@ -1560,7 +1562,7 @@ export default function InformesPage() {
     });
   };
 
-  const getReportContext = (report: ActivityReport) => {
+  const getReportContext = (report: ActivityReport, relatedReports?: ActivityReport[]) => {
     const tech = usersById.get(report.tecnicoId);
     const client = report.clienteId ? clientsById.get(report.clienteId) : null;
     const reportYear = report.fecha ? new Date(`${report.fecha}T00:00:00`).getFullYear() : new Date().getFullYear();
@@ -1574,6 +1576,31 @@ export default function InformesPage() {
     const edificio = client?.edificio || group?.nombre || tipoLabel;
     const visitCategoryLabel = report.tipo === "visita_tecnica" ? getVisitCategoryLabel(report.tipoVisita) : undefined;
     const maintenanceDetail = getReportServiceDetail(report);
+    const maintenanceReports = report.tipo === "mantenimiento_preventivo"
+      ? dedupeReportsByTechnician([report, ...(relatedReports || [])])
+      : [report];
+    const isConsolidatedMaintenance = report.tipo === "mantenimiento_preventivo" && maintenanceReports.length > 1;
+    const maintenancePhotoSections = report.tipo === "mantenimiento_preventivo"
+      ? maintenanceReports.flatMap((participantReport) => {
+        const participantName = getParticipantName(participantReport.tecnicoId);
+        const usedUrls = new Set<string>();
+        const createSection = (label: string, values: Array<string | undefined>) => {
+          const urls = values.filter((url): url is string => url !== undefined && url !== "" && !usedUrls.has(url));
+          urls.forEach((url) => usedUrls.add(url));
+          return urls.length ? [{ titulo: `${participantName} · ${label} (${urls.length})`, urls }] : [];
+        };
+
+        return [
+          ...createSection("Antes", participantReport.fotosAntes || []),
+          ...createSection("Después", participantReport.fotosDespues || []),
+          ...createSection("Bitácora", [participantReport.fotoBitacora]),
+          ...createSection("Evidencia", [participantReport.fotoEvidencia, participantReport.fotoHerramienta]),
+          ...(isConsolidatedMaintenance
+            ? createSection("Firma del receptor", [participantReport.firmaReceptor])
+            : []),
+        ];
+      })
+      : undefined;
     const puertasDetalle = report.tipo === "mantenimiento_preventivo" || report.tipo === "visita_tecnica"
       ? formatClientDoorBreakdown(contract || client)
       : undefined;
@@ -1646,7 +1673,9 @@ export default function InformesPage() {
         empresa: companyName,
         fecha: report.fecha,
         categoria: visitCategoryLabel,
-        tecnico: tecnicoNombre,
+        tecnico: isConsolidatedMaintenance
+          ? maintenanceReports.map((item) => getParticipantName(item.tecnicoId)).join(", ")
+          : tecnicoNombre,
         cliente: client?.nombre || "—",
         edificio,
         puertasDetalle,
@@ -1656,17 +1685,18 @@ export default function InformesPage() {
           ? undefined
           : getExportTechnicalValue(report),
         observaciones: observaciones || maintenanceDetail || report.descripcion || "Sin detalle registrado.",
-        fotosAntes: report.fotosAntes,
-        fotosDespues: report.fotosDespues,
-        fotoBitacora: report.fotoBitacora,
-        firmaUrl: report.firmaReceptor,
-        receptor: report.datosReceptor,
+        fotosAntes: report.tipo === "mantenimiento_preventivo" ? undefined : report.fotosAntes,
+        fotosDespues: report.tipo === "mantenimiento_preventivo" ? undefined : report.fotosDespues,
+        fotoBitacora: report.tipo === "mantenimiento_preventivo" ? undefined : report.fotoBitacora,
+        evidenciasFotograficas: maintenancePhotoSections,
+        firmaUrl: isConsolidatedMaintenance ? undefined : report.firmaReceptor,
+        receptor: isConsolidatedMaintenance ? undefined : report.datosReceptor,
       },
     };
   };
 
-  const getReportEmailContext = (report: ActivityReport) => {
-    const { client, group, pdfData, tipoLabel, companyName, tecnicoNombre, edificio } = getReportContext(report);
+  const getReportEmailContext = (report: ActivityReport, relatedReports?: ActivityReport[]) => {
+    const { client, group, pdfData, tipoLabel, companyName, tecnicoNombre, edificio } = getReportContext(report, relatedReports);
     const operationalEmail = companySettings?.correoEmpresa || DEFAULT_NOTIFICATION_BCC;
     const clienteNombre = client?.contacto || client?.nombre || "Cliente";
     const fileBaseName = getSafeFileSegment(client?.edificio || group?.nombre || tipoLabel);
@@ -1765,24 +1795,40 @@ export default function InformesPage() {
     };
   };
 
-  const handleDownloadPDF = async (report: ActivityReport) => {
-    const { pdfData } = getReportContext(report);
+  const handleDownloadPDF = async (report: ActivityReport, relatedReports?: ActivityReport[]) => {
+    if (generatingPdfReportId) return;
+
+    setGeneratingPdfReportId(report.id);
+    setPdfGenerationProgress(0);
+    let failedEvidenceCount = 0;
 
     try {
-      await generateReportePDF(pdfData);
+      // Yield once so the loading state paints before PDF work starts.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      const { pdfData } = getReportContext(report, relatedReports);
+      await generateReportePDF(pdfData, false, {
+        onEvidenceLoadError: (count) => { failedEvidenceCount = count; },
+        onProgress: setPdfGenerationProgress,
+      });
+      if (failedEvidenceCount > 0) {
+        alert(`El PDF se descargó, pero ${failedEvidenceCount} foto(s) no pudieron cargarse. En el documento aparecen marcadas como evidencia no disponible; verifica el acceso al archivo y vuelve a descargarlo.`);
+      }
     } catch (err) {
       console.error("Error generando PDF del informe técnico:", err);
       alert("Hubo un error al generar el PDF del informe.");
+    } finally {
+      setGeneratingPdfReportId(null);
+      setPdfGenerationProgress(0);
     }
   };
 
-  const handleSendEmail = async (report: ActivityReport) => {
+  const handleSendEmail = async (report: ActivityReport, relatedReports?: ActivityReport[]) => {
     if (!canSendReportEmail(report)) {
       alert("Las garantías no se exportan en el PDF enviado al cliente. Solo se envían correos para mantenimientos preventivos y visitas técnicas habilitadas.");
       return;
     }
 
-    const context = getReportEmailContext(report);
+    const context = getReportEmailContext(report, relatedReports);
 
     if (!context.client?.correo) {
       alert("Este informe no tiene correo del cliente registrado.");
@@ -1790,9 +1836,12 @@ export default function InformesPage() {
     }
 
     setSendingReportId(report.id);
+    let failedEvidenceCount = 0;
 
     try {
-      const pdfBase64 = await generateReportePDF(context.pdfData, true) as string;
+      const pdfBase64 = await generateReportePDF(context.pdfData, true, {
+        onEvidenceLoadError: (count) => { failedEvidenceCount = count; },
+      }) as string;
       const base64Content = pdfBase64.split(",")[1];
 
       const response = await fetch("/api/send-email", {
@@ -1830,7 +1879,9 @@ export default function InformesPage() {
       await markReporteActividadEmailSent(report.id, sentAt);
       applySentState(report, sentAt);
 
-      alert("Correo enviado correctamente.");
+      alert(failedEvidenceCount > 0
+        ? `Correo enviado, pero ${failedEvidenceCount} foto(s) no pudieron cargarse en el PDF adjunto.`
+        : "Correo enviado correctamente.");
     } catch (err) {
       console.error("Error enviando correo del informe:", err);
       alert(err instanceof Error ? err.message : "Hubo un error al enviar el correo del informe.");
@@ -1861,7 +1912,7 @@ export default function InformesPage() {
           className="h-8 w-8 text-muted-foreground hover:text-cyan-neon"
           onClick={(event) => {
             event.stopPropagation();
-            handleSendEmail(report);
+            handleSendEmail(report, detailReports);
           }}
           disabled={sendingReportId === report.id}
         >
@@ -1876,14 +1927,27 @@ export default function InformesPage() {
         type="button"
         variant="ghost"
         size="icon"
-        className="h-8 w-8 text-muted-foreground hover:text-gold"
+        className="relative h-8 w-8 text-muted-foreground hover:text-gold disabled:opacity-80"
+        aria-label={generatingPdfReportId === report.id ? `Generando PDF, ${pdfGenerationProgress}%` : "Descargar PDF"}
+        aria-busy={generatingPdfReportId === report.id}
+        title={generatingPdfReportId === report.id ? `Generando PDF · ${pdfGenerationProgress}%` : "Descargar PDF"}
+        disabled={Boolean(generatingPdfReportId)}
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          void handleDownloadPDF(report);
+          void handleDownloadPDF(report, detailReports);
         }}
       >
-        <Download className="h-4 w-4" />
+        {generatingPdfReportId === report.id ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span className="absolute -right-2 -top-1 rounded bg-card px-1 text-[9px] leading-4 text-gold shadow">
+              {pdfGenerationProgress}%
+            </span>
+          </>
+        ) : (
+          <Download className="h-4 w-4" />
+        )}
       </Button>
       <Button
         type="button"
@@ -4605,9 +4669,20 @@ export default function InformesPage() {
                       variant="outline"
                       className="gap-2 border-border/50 text-foreground/80"
                       onClick={() => handleDownloadPDF(activeDetailReport)}
+                      disabled={Boolean(generatingPdfReportId)}
+                      aria-busy={generatingPdfReportId === activeDetailReport.id}
                     >
-                    <Download className="h-4 w-4" />
-                    Descargar PDF
+                    {generatingPdfReportId === activeDetailReport.id ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Generando PDF · {pdfGenerationProgress}%
+                      </>
+                    ) : (
+                      <>
+                        <Download className="h-4 w-4" />
+                        Descargar PDF
+                      </>
+                    )}
                   </Button>
                 </div>
               </div>

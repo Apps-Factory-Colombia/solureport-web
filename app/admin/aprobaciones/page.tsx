@@ -660,6 +660,7 @@ export default function AprobacionesPage() {
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [processingLabel, setProcessingLabel] = useState<string | null>(null);
+  const [approvingReportId, setApprovingReportId] = useState<string | null>(null);
   const [editableCost, setEditableCost] = useState("");
   const [sharedParticipantDrafts, setSharedParticipantDrafts] = useState<SharedParticipantDraft[]>([]);
   const [savingCost, setSavingCost] = useState(false);
@@ -1649,6 +1650,7 @@ export default function AprobacionesPage() {
 
   const handleApprove = useCallback(async (report: ActivityReport) => {
     setProcessing(true);
+    setApprovingReportId(report.id);
     setProcessingLabel("Aprobando actividad..." );
     try {
       if (usesSharedBasePricing(report) && selectedReport?.id === report.id && !sharedParticipantsDraftSummary.canSave) {
@@ -1676,28 +1678,36 @@ export default function AprobacionesPage() {
       const notificationTargets = usesSharedBasePricing(report) ? getSharedReportsForReport(report) : [report];
       const approvalTargets = report.tipo === "mantenimiento_preventivo" ? [report] : notificationTargets;
       await Promise.all(approvalTargets.map((item) => updateEstadoAprobacion(item.id, "aprobado")));
-      await Promise.all(notificationTargets.map(async (item) => {
-        try {
-          await sendApprovalEmail(item);
-        } catch (emailErr) {
-          console.error("Error enviando correo de aprobación:", emailErr);
-        }
-        const tipo = getTipoConfig(String(item.tipo));
-        await createNotificacion({
-          usuarioId: item.tecnicoId,
-          titulo: "Actividad Aprobada",
-          mensaje: `Tu informe de ${tipo.label} del ${item.fecha} ha sido aprobado. Valor: $${item.costoActividad.toLocaleString()}.`,
-          tipo: "aprobacion",
-          datos: { reporteId: item.id, estado: "aprobado" },
-        });
-      }));
       notificationTargets.forEach((item) => updateReportStatusInState(item.id, "aprobado"));
       setDetailOpen(false);
       setSelectedReport(null);
+
+      // Email generation/delivery and notifications are follow-up work. They
+      // must not hold the approval UI open after the approval itself is saved.
+      void Promise.allSettled(notificationTargets.map(async (item) => {
+        const tipo = getTipoConfig(String(item.tipo));
+        const [emailResult, notificationResult] = await Promise.allSettled([
+          sendApprovalEmail(item),
+          createNotificacion({
+            usuarioId: item.tecnicoId,
+            titulo: "Actividad Aprobada",
+            mensaje: `Tu informe de ${tipo.label} del ${item.fecha} ha sido aprobado. Valor: $${item.costoActividad.toLocaleString()}.`,
+            tipo: "aprobacion",
+            datos: { reporteId: item.id, estado: "aprobado" },
+          }),
+        ]);
+        if (emailResult.status === "rejected") {
+          console.error("Error enviando correo de aprobación:", emailResult.reason);
+        }
+        if (notificationResult.status === "rejected") {
+          console.error("Error creando notificación de aprobación:", notificationResult.reason);
+        }
+      }));
     } catch (err) {
       console.error("Error aprobando:", err);
     } finally {
       setProcessing(false);
+      setApprovingReportId(null);
       setProcessingLabel(null);
     }
   }, [applySharedGroupBaseToReport, costDraft, getEditableValueForReport, getSharedReportsForReport, persistCost, selectedReport, sendApprovalEmail, sharedParticipantsDraftSummary, updateReportStatusInState]);
@@ -2144,7 +2154,9 @@ export default function AprobacionesPage() {
                             onClick={() => handleApprove(report)}
                             disabled={processing || isDeleting}
                           >
-                            <CheckCircle2 className="h-4 w-4" />
+                            {approvingReportId === report.id
+                              ? <Loader2 className="h-4 w-4 animate-spin" />
+                              : <CheckCircle2 className="h-4 w-4" />}
                           </Button>
                           <Button
                             variant="ghost"
