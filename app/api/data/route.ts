@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUser, hashPassword, renewSession } from "@/lib/db/auth";
 import { dbQuery, isDatabaseCapacityError, withTransaction } from "@/lib/db/postgres";
+import { calculateLiquidationAmount, isLegacyAppliedValueCalculation } from "@/lib/utils/liquidation-math";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -307,7 +308,7 @@ async function writeAudit(
   );
 }
 
-function mapUser(row: any): any {
+function mapUser(row: any, includeSensitiveFields = false): any {
   const schedules = jsonArray(row.horarios).map((item) => ({
     id: item.id,
     usuarioId: item.usuarioId || item.usuario_id,
@@ -321,6 +322,7 @@ function mapUser(row: any): any {
     username: row.username,
     nombre: row.nombre,
     apellido: row.apellido,
+    ...(includeSensitiveFields ? { cedula: row.cedula || "" } : {}),
     email: row.email,
     telefono: row.telefono || "",
     rol: row.rol,
@@ -822,6 +824,18 @@ function mapReport(row: any, participant: any, index: number): any {
   const approvals = jsonArray(row.aprobaciones);
   const approval = approvals.find((item) => item.participanteId === participant?.id)
     || (participant?.id ? approvals.find((item) => !item.participanteId) : approvals[0]);
+  const participantBase = number(participant?.valorBase, number(row.valor_base));
+  const participantPercentage = number(participant?.porcentaje, 100);
+  const legacyAppliedAmount = number(row.valor_aplicado) * participantPercentage / 100;
+  const storedParticipantAmount = number(participant?.valorGanado, legacyAppliedAmount);
+  const normalizedParticipantAmount = !row.liquidacion_congelada && row.tipo !== "recorrido" && isLegacyAppliedValueCalculation({
+    storedAmount: storedParticipantAmount,
+    baseValue: participantBase,
+    appliedValue: number(row.valor_aplicado),
+    percentage: participantPercentage,
+  })
+    ? calculateLiquidationAmount(participantBase, participantPercentage)
+    : storedParticipantAmount;
   // Older approved reports can exist without a corresponding liquidation row.
   // Keep them visible in the same approved-only source used by the mobile app;
   // the fallback is deterministic and does not create a duplicate database row.
@@ -829,9 +843,9 @@ function mapReport(row: any, participant: any, index: number): any {
     ? {
         id: `fallback:${row.id}:${participant?.id || "activity"}:${row.periodo_id || "period"}`,
         estado: "aprobado",
-        valorBase: number(participant?.valorBase, number(row.valor_base)),
-        valorGanado: number(participant?.valorGanado, number(row.valor_aplicado) * number(participant?.porcentaje, 100) / 100),
-        valorGanadoOriginal: number(participant?.valorGanado, number(row.valor_aplicado) * number(participant?.porcentaje, 100) / 100),
+        valorBase: participantBase,
+        valorGanado: normalizedParticipantAmount,
+        valorGanadoOriginal: normalizedParticipantAmount,
         descuentoTardanza: 0,
         porcentajeDescuentoTardanza: 0,
       }
@@ -903,10 +917,11 @@ function mapReport(row: any, participant: any, index: number): any {
     valorModificado: (row.tipo === "recorrido" && Math.abs(number(row.valor_aplicado) - number(row.valor_base)) > 0.01)
       || (row.valor_sugerido != null && number(row.valor_sugerido) !== number(row.valor_base)),
     motivoModificacionValor: row.motivo_modificacion_valor || undefined,
-    costoActividad: number(participant?.valorGanado, number(row.valor_aplicado)),
+    costoActividad: normalizedParticipantAmount,
     participantes: jsonArray(row.participantes),
     liquidacionId: effectiveLiquidation?.id,
     liquidacionEstado: effectiveLiquidation?.estado,
+    liquidacionCongelada: Boolean(row.liquidacion_congelada),
     liquidacionValorBase: effectiveLiquidation ? number(effectiveLiquidation.valorBase) : undefined,
     liquidacionValorGanado: effectiveLiquidation ? number(effectiveLiquidation.valorGanado) : undefined,
     liquidacionValorGanadoOriginal: effectiveLiquidation ? number(effectiveLiquidation.valorGanadoOriginal) : undefined,
@@ -1244,6 +1259,17 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
          WHERE snapshot_period.periodo_id = pl.id
            AND snapshot_period.actividad_id = a.id
       )` : ""}`;
+  const liveBaseValueSql = "COALESCE(li.valor_base, p.valor_base, a.valor_base, 0)";
+  const livePercentageSql = "COALESCE(li.porcentaje, p.porcentaje, 0)";
+  const liveStoredGrossSql = `COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * ${livePercentageSql} / 100)`;
+  const liveGrossSql = `CASE
+    WHEN a.tipo <> 'recorrido'
+      AND ${liveBaseValueSql} > 0
+      AND ABS(${liveBaseValueSql} - COALESCE(a.valor_aplicado, 0)) > 0.01
+      AND ABS(${liveStoredGrossSql} - (COALESCE(a.valor_aplicado, 0) * ${livePercentageSql} / 100)) <= 0.01
+    THEN ROUND(${liveBaseValueSql} * ${livePercentageSql} / 100, 2)
+    ELSE ${liveStoredGrossSql}
+  END`;
   const values: unknown[] = [periodId];
   const scope = technicianIds && technicianIds.length > 0
     ? (() => {
@@ -1274,23 +1300,24 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
         u.apellido,
         u.email,
         u.rol,
-        COALESCE(li.porcentaje, p.porcentaje) AS porcentaje,
-        COALESCE(li.valor_base, p.valor_base) AS valor_base,
+        ${livePercentageSql} AS porcentaje,
+        ${liveBaseValueSql} AS valor_base,
         CASE
           WHEN a.tipo <> 'recorrido' AND GREATEST(
             COALESCE(li.porcentaje_descuento_tardanza, 0),
             COALESCE(attendance_discount.porcentaje, 0)
           ) > 0 THEN ROUND(
-            COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100)
+            ${liveGrossSql}
             * (1 - GREATEST(
               COALESCE(li.porcentaje_descuento_tardanza, 0),
               COALESCE(attendance_discount.porcentaje, 0)
             ) / 100), 2)
-          ELSE COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100)
+          WHEN ${liveGrossSql} <> ${liveStoredGrossSql} THEN ${liveGrossSql}
+          ELSE COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * ${livePercentageSql} / 100)
         END AS valor_ganado,
-        COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100) AS valor_ganado_original,
+        ${liveGrossSql} AS valor_ganado_original,
         CASE WHEN a.tipo <> 'recorrido' THEN ROUND(
-          COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100)
+          ${liveGrossSql}
           * GREATEST(COALESCE(li.porcentaje_descuento_tardanza, 0), COALESCE(attendance_discount.porcentaje, 0)) / 100, 2)
           ELSE 0 END AS descuento_tardanza,
         CASE WHEN a.tipo <> 'recorrido' THEN GREATEST(
@@ -1465,7 +1492,6 @@ async function getLiquidationSnapshotRows(periodId: string, technicianIds?: stri
         return "AND s.tecnico_id = ANY($2::uuid[])";
       })()
     : "";
-
   try {
     const { rows } = await dbQuery(
       `SELECT
@@ -1548,6 +1574,30 @@ async function freezeLiquidationPeriod(periodId: string) {
     );
     const extraPercentage = Math.max(0, Math.min(100, number(configRows[0]?.porcentaje_extra_lider)));
     const extraActive = Boolean(configRows[0]?.extra_lider_activo);
+    const freezePercentageSql = "COALESCE(li.porcentaje, p.porcentaje, 0)";
+    const freezeBaseSql = "COALESCE(li.valor_base, p.valor_base, a.valor_base, 0)";
+    const freezeStoredGrossSql = `COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * ${freezePercentageSql} / 100, 0)`;
+    const freezeGrossSql = `CASE
+      WHEN a.tipo <> 'recorrido'
+        AND ${freezeBaseSql} > 0
+        AND ABS(${freezeBaseSql} - COALESCE(a.valor_aplicado, 0)) > 0.01
+        AND ABS(${freezeStoredGrossSql} - (COALESCE(a.valor_aplicado, 0) * ${freezePercentageSql} / 100)) <= 0.01
+      THEN ROUND(${freezeBaseSql} * ${freezePercentageSql} / 100, 2)
+      ELSE ${freezeStoredGrossSql}
+    END`;
+    const freezeDiscountPercentageSql = "COALESCE(li.porcentaje_descuento_tardanza, 0)";
+    const freezeNetSql = `CASE
+      WHEN a.tipo <> 'recorrido' AND ${freezeDiscountPercentageSql} > 0
+        THEN ROUND(${freezeGrossSql} * (1 - ${freezeDiscountPercentageSql} / 100), 2)
+      WHEN ${freezeGrossSql} <> ${freezeStoredGrossSql} THEN ${freezeGrossSql}
+      ELSE COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * ${freezePercentageSql} / 100, 0)
+    END`;
+    const freezeDiscountSql = `CASE
+      WHEN a.tipo <> 'recorrido' AND ${freezeDiscountPercentageSql} > 0
+        THEN ROUND(${freezeGrossSql} * ${freezeDiscountPercentageSql} / 100, 2)
+      WHEN ${freezeGrossSql} <> ${freezeStoredGrossSql} THEN 0
+      ELSE COALESCE(li.descuento_tardanza, 0)
+    END`;
 
     const { rows: snapshotRows } = await client.query(
       `INSERT INTO public.liquidacion_periodo_items (
@@ -1562,11 +1612,11 @@ async function freezeLiquidationPeriod(periodId: string) {
           $1, li.id, a.id, p.id, p.tecnico_id,
           a.cliente_id, a.sede_id, a.grupo_id, g.lider_id, a.codigo,
           a.fecha_operacion, a.tipo, a.descripcion, s.nombre,
-          COALESCE(li.porcentaje, p.porcentaje, 0),
-          COALESCE(li.valor_base, p.valor_base, a.valor_base, 0),
-          COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100, 0),
-          COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * COALESCE(p.porcentaje, 0) / 100, 0),
-          COALESCE(li.descuento_tardanza, 0), COALESCE(li.porcentaje_descuento_tardanza, 0),
+          ${freezePercentageSql},
+          ${freezeBaseSql},
+          ${freezeNetSql},
+          ${freezeGrossSql},
+          ${freezeDiscountSql}, ${freezeDiscountPercentageSql},
           CASE
             WHEN li.estado IN ('anulado', 'rechazado') THEN 'anulado'
             WHEN li.estado IN ('aprobado', 'pagado')
@@ -3066,7 +3116,7 @@ async function attendanceDay(payload: Payload, user: UserContext) {
     const settings = await getConfig();
     const { noReportCutoffMinutes } = attendanceThresholds(settings);
     if (noReportCutoffMinutes != null && bogotaClock().minutes >= noReportCutoffMinutes) {
-      const users = (await userRows()).map(mapUser);
+      const users = (await userRows()).map((row) => mapUser(row));
       await ensureArrivals({ users, fecha, porcentajeNoReportado: settings.porcentajeDescuentoNoReportado, automaticDays: settings.diasDescuentoAutomatico }, settings);
     }
   }
@@ -3352,11 +3402,12 @@ async function updateAttendanceMemo(payload: Payload, user: UserContext) {
 async function execute(action: string, payload: Payload, user: UserContext): Promise<unknown> {
   switch (action) {
     case "users.list": {
-      return (await userRows()).map(mapUser);
+      const includeSensitiveFields = user.rol === "admin";
+      return (await userRows()).map((row) => mapUser(row, includeSensitiveFields));
     }
     case "users.get": {
       const rows = await userRows("WHERE u.id = $1", [payload.id]);
-      return rows[0] ? mapUser(rows[0]) : null;
+      return rows[0] ? mapUser(rows[0], user.rol === "admin") : null;
     }
     case "users.create": {
       await requireAdmin(user);
@@ -3366,15 +3417,15 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       const role = requestedUserRole(payload) || "tecnico";
       const result = await withTransaction(async (client) => {
         const { rows } = await client.query(
-          `INSERT INTO public.usuarios (username, nombre, apellido, email, telefono, rol, estado, password_hash, avatar_url, tiene_recorrido, tiene_moto, routes_enabled)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-          [payload.username || String(payload.email || "").split("@")[0], payload.nombre, payload.apellido, String(payload.email).toLowerCase(), payload.telefono || null, role, payload.estado || "activo", passwordHash, payload.avatar || null, Boolean(payload.tieneRecorrido), Boolean(payload.tieneMoto), Boolean(payload.tieneRecorrido)],
+          `INSERT INTO public.usuarios (username, nombre, apellido, cedula, email, telefono, rol, estado, password_hash, avatar_url, tiene_recorrido, tiene_moto, routes_enabled)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+          [payload.username || String(payload.email || "").split("@")[0], payload.nombre, payload.apellido, String(payload.cedula || "").trim() || null, String(payload.email).toLowerCase(), payload.telefono || null, role, payload.estado || "activo", passwordHash, payload.avatar || null, Boolean(payload.tieneRecorrido), Boolean(payload.tieneMoto), Boolean(payload.tieneRecorrido)],
         );
         await applyUserSchedules(client, rows[0].id, payload.horarios || []);
         return rows[0].id;
       });
       const rows = await userRows("WHERE u.id = $1", [result]);
-      return mapUser(rows[0]);
+      return mapUser(rows[0], true);
     }
     case "users.update": {
       await requireAdmin(user);
@@ -3389,8 +3440,15 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       // conservamos el rol de líder para que pueda ser asignado desde Grupos.
       if (payload.esLider === true && role === "tecnico") role = "lider";
       if (payload.esLider === false && role === "lider") role = payload.esSupervisor === true ? "supervisor" : "tecnico";
-      for (const [key, column] of [["nombre", "nombre"], ["apellido", "apellido"], ["email", "email"], ["telefono", "telefono"], ["estado", "estado"], ["avatar", "avatar_url"], ["tieneRecorrido", "tiene_recorrido"], ["tieneMoto", "tiene_moto"]] as const) {
-        if (payload[key] !== undefined) set(column, key === "email" ? String(payload[key]).toLowerCase() : payload[key]);
+      for (const [key, column] of [["nombre", "nombre"], ["apellido", "apellido"], ["cedula", "cedula"], ["email", "email"], ["telefono", "telefono"], ["estado", "estado"], ["avatar", "avatar_url"], ["tieneRecorrido", "tiene_recorrido"], ["tieneMoto", "tiene_moto"]] as const) {
+        if (payload[key] !== undefined) {
+          const value = key === "email"
+            ? String(payload[key]).toLowerCase()
+            : key === "cedula"
+              ? String(payload[key] || "").trim() || null
+              : payload[key];
+          set(column, value);
+        }
       }
       if (role !== undefined) set("rol", role);
       if (payload.password) {
@@ -3438,7 +3496,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
       });
       const rows = await userRows("WHERE u.id = $1", [id]);
       if (!rows[0]) throw new Error("No se encontró el usuario después de actualizarlo.");
-      return mapUser(rows[0]);
+      return mapUser(rows[0], true);
     }
     case "users.delete": {
       await requireAdmin(user);
@@ -4277,6 +4335,23 @@ async function recalculateOpenAttendanceRules(client: any) {
            COALESCE(SUM(porcentaje) FILTER (WHERE descuento_aplicado), 0) AS porcentaje_bruto,
            LEAST(100, COALESCE(SUM(porcentaje) FILTER (WHERE descuento_aplicado), 0)) AS porcentaje_aplicado
       FROM attendance_rules_recalc GROUP BY tecnico_id, periodo_id
+  `);
+  await client.query(`
+    UPDATE public.liquidacion_items li
+       SET valor_ganado_original = ROUND(COALESCE(li.valor_base, ap.valor_base, a.valor_base) * COALESCE(li.porcentaje, ap.porcentaje, 0) / 100, 2),
+           valor_ganado = ROUND(COALESCE(li.valor_base, ap.valor_base, a.valor_base) * COALESCE(li.porcentaje, ap.porcentaje, 0) / 100, 2),
+           descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp()
+      FROM public.actividades_operativas a
+      JOIN public.actividades_operativas_participantes ap ON ap.actividad_id = a.id
+      JOIN attendance_rules_people people ON people.tecnico_id = ap.tecnico_id
+      JOIN public.periodos_liquidacion pl ON pl.id = people.periodo_id AND pl.estado = 'abierto'
+     WHERE li.actividad_id = a.id AND li.participante_id = ap.id
+       AND li.tecnico_id = people.tecnico_id AND li.periodo_id = people.periodo_id
+       AND li.tipo <> 'recorrido' AND li.estado <> 'anulado'
+       AND COALESCE(li.valor_base, ap.valor_base, a.valor_base) > 0
+       AND ABS(COALESCE(li.valor_base, ap.valor_base, a.valor_base) - COALESCE(a.valor_aplicado, 0)) > 0.01
+       AND ABS(COALESCE(li.valor_ganado_original, ap.valor_ganado, li.valor_ganado)
+         - (COALESCE(a.valor_aplicado, 0) * COALESCE(li.porcentaje, ap.porcentaje, 0) / 100)) <= 0.01
   `);
   await client.query(`
     UPDATE public.liquidacion_items li
@@ -5635,7 +5710,9 @@ async function createOperationalActivity(payload: Payload, user: UserContext) {
       const item = participants[index];
       const percentage = number(item.porcentaje);
       const valueBase = Math.max(0, number(item.valorBase ?? valorBase));
-      const valueEarned = Math.max(0, number(item.valorGanado ?? (valorAplicado * percentage / 100)));
+      const valueEarned = type === "recorrido"
+        ? Math.max(0, number(item.valorGanado ?? (valorAplicado * percentage / 100)))
+        : calculateLiquidationAmount(valueBase, percentage);
       const { rows: participantRowsResult } = await client.query(
         `INSERT INTO public.actividades_operativas_participantes (actividad_id, tecnico_id, rol_participacion, porcentaje, valor_base, valor_ganado)
          VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
@@ -5710,15 +5787,20 @@ async function addOperationalParticipant(payload: Payload, user: UserContext) {
   const activityId = canonicalActivityId(payload.actividadOperativaId || payload.activityId || payload.id);
   if (!activityId || !payload.tecnicoId) throw new Error("Actividad y técnico son obligatorios.");
   const result = await withTransaction(async (client) => {
-    const { rows: activityRowsResult } = await client.query("SELECT id, grupo_id, fecha_operacion, valor_base, valor_aplicado, descripcion, sede_id FROM public.actividades_operativas WHERE id = $1", [activityId]);
+    const { rows: activityRowsResult } = await client.query("SELECT id, grupo_id, fecha_operacion, tipo, valor_base, valor_aplicado, descripcion, sede_id FROM public.actividades_operativas WHERE id = $1", [activityId]);
     const activity = activityRowsResult[0];
     if (!activity) throw new Error("No se encontró la actividad.");
     const { rows: existsRows } = await client.query("SELECT id FROM public.actividades_operativas_participantes WHERE actividad_id = $1 AND tecnico_id = $2", [activityId, payload.tecnicoId]);
     if (existsRows[0]) return { activityId, participantId: existsRows[0].id };
     const { rows: leaderRows } = await client.query("SELECT lider_id FROM public.grupos_trabajo WHERE id = $1", [activity.grupo_id]);
-    const { rows: participantRows } = await client.query("INSERT INTO public.actividades_operativas_participantes (actividad_id, tecnico_id, rol_participacion, porcentaje, valor_base, valor_ganado) VALUES ($1,$2,'acompanante',$3,$4,$5) RETURNING id", [activityId, payload.tecnicoId, number(payload.porcentaje), number(payload.valorBase ?? activity.valor_base), number(payload.valorGanado ?? (number(activity.valor_aplicado) * number(payload.porcentaje) / 100))]);
+    const participantPercentage = number(payload.porcentaje);
+    const participantBase = Math.max(0, number(payload.valorBase ?? activity.valor_base));
+    const participantEarned = activity.tipo === "recorrido"
+      ? Math.max(0, number(payload.valorGanado ?? (number(activity.valor_aplicado) * participantPercentage / 100)))
+      : calculateLiquidationAmount(participantBase, participantPercentage);
+    const { rows: participantRows } = await client.query("INSERT INTO public.actividades_operativas_participantes (actividad_id, tecnico_id, rol_participacion, porcentaje, valor_base, valor_ganado) VALUES ($1,$2,'acompanante',$3,$4,$5) RETURNING id", [activityId, payload.tecnicoId, participantPercentage, participantBase, participantEarned]);
     await client.query("INSERT INTO public.actividades_operativas_aprobaciones (actividad_id, participante_id, revisor_id, estado) VALUES ($1,$2,$3,'pendiente')", [activityId, participantRows[0].id, leaderRows[0]?.lider_id || user.id]);
-    if (payload.periodoId) await client.query("INSERT INTO public.liquidacion_items (periodo_id, actividad_id, participante_id, tecnico_id, fecha_operacion, tipo, porcentaje, valor_base, valor_ganado, valor_ganado_original, estado, descripcion_snapshot) VALUES ($1,$2,$3,$4,$5,(SELECT tipo FROM public.actividades_operativas WHERE id = $2),$6,$7,$8,$8,'pendiente',$9) ON CONFLICT DO NOTHING", [payload.periodoId, activityId, participantRows[0].id, payload.tecnicoId, activity.fecha_operacion, number(payload.porcentaje), number(payload.valorBase ?? activity.valor_base), number(payload.valorGanado ?? (number(activity.valor_aplicado) * number(payload.porcentaje) / 100)), activity.descripcion]);
+    if (payload.periodoId) await client.query("INSERT INTO public.liquidacion_items (periodo_id, actividad_id, participante_id, tecnico_id, fecha_operacion, tipo, porcentaje, valor_base, valor_ganado, valor_ganado_original, estado, descripcion_snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,'pendiente',$10) ON CONFLICT DO NOTHING", [payload.periodoId, activityId, participantRows[0].id, payload.tecnicoId, activity.fecha_operacion, activity.tipo, participantPercentage, participantBase, participantEarned, activity.descripcion]);
     return { activityId, participantId: participantRows[0].id };
   });
   await syncActivityAttendanceDiscounts(result.activityId);
@@ -5863,6 +5945,23 @@ async function syncAttendanceDiscount(attendanceId: string, technicianId: string
     (max, row) => Math.max(max, percentage(row.porcentaje_descuento)),
     0,
   )));
+  await dbQuery(
+    `UPDATE public.liquidacion_items li
+        SET valor_ganado_original = ROUND(COALESCE(li.valor_base, p.valor_base, a.valor_base) * COALESCE(li.porcentaje, p.porcentaje, 0) / 100, 2),
+            valor_ganado = ROUND(COALESCE(li.valor_base, p.valor_base, a.valor_base) * COALESCE(li.porcentaje, p.porcentaje, 0) / 100, 2),
+            descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp()
+       FROM public.actividades_operativas a
+       JOIN public.actividades_operativas_participantes p ON p.actividad_id = a.id
+       JOIN public.periodos_liquidacion pl ON pl.estado = 'abierto'
+      WHERE li.actividad_id = a.id AND li.participante_id = p.id
+        AND li.periodo_id = pl.id AND li.tecnico_id = $1 AND li.periodo_id = $2
+        AND li.tipo <> 'recorrido' AND li.estado <> 'anulado'
+        AND COALESCE(li.valor_base, p.valor_base, a.valor_base) > 0
+        AND ABS(COALESCE(li.valor_base, p.valor_base, a.valor_base) - COALESCE(a.valor_aplicado, 0)) > 0.01
+        AND ABS(COALESCE(li.valor_ganado_original, p.valor_ganado, li.valor_ganado)
+          - (COALESCE(a.valor_aplicado, 0) * COALESCE(li.porcentaje, p.porcentaje, 0) / 100)) <= 0.01`,
+    [technicianId, periodId],
+  );
   if (normalizedPercentage <= 0) {
     await dbQuery("DELETE FROM public.asistencia_descuentos WHERE periodo_id = $1 AND tecnico_id = $2", [periodId, technicianId]);
     await dbQuery(

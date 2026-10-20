@@ -19,6 +19,7 @@ export interface User {
   id: string;
   nombre: string;
   apellido: string;
+  cedula?: string;
   email: string;
   telefono: string;
   rol: UserRole;
@@ -429,6 +430,7 @@ export interface ActivityReport {
   valorActividadAplicadoGlobal?: number;
   liquidacionId?: string;
   liquidacionEstado?: "pendiente" | "aprobado" | "pagado" | "anulado";
+  liquidacionCongelada?: boolean;
   liquidacionValorBase?: number;
   liquidacionValorGanado?: number;
   liquidacionValorGanadoOriginal?: number;

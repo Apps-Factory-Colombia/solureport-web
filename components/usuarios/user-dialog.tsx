@@ -48,6 +48,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
   const [formData, setFormData] = useState({
     nombre: "",
     apellido: "",
+    cedula: "",
     email: "",
     telefono: "",
     rol: "tecnico" as UserRole,
@@ -68,6 +69,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
       setFormData({
         nombre: user.nombre,
         apellido: user.apellido,
+        cedula: user.cedula || "",
         email: user.email,
         telefono: user.telefono,
         rol: user.rol,
@@ -83,6 +85,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
       setFormData({
         nombre: "",
         apellido: "",
+        cedula: "",
         email: "",
         telefono: "",
         rol: "tecnico",
@@ -130,6 +133,7 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
       id: user?.id || `u${Date.now()}`,
       nombre: formData.nombre,
       apellido: formData.apellido,
+      cedula: formData.cedula.trim(),
       email: formData.email,
       telefono: formData.telefono,
       rol: formData.rol,
@@ -201,6 +205,20 @@ export function UserDialog({ open, onOpenChange, user, onSave }: UserDialogProps
                 required
               />
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label className="text-foreground/80">C.C. / Documento de identidad</Label>
+            <Input
+              value={formData.cedula}
+              onChange={(e) => setFormData({ ...formData, cedula: e.target.value })}
+              className="bg-secondary/50 border-border/50"
+              autoComplete="off"
+              placeholder="Número de documento"
+            />
+            <p className="text-xs text-muted-foreground">
+              Se requiere completar este dato para generar el comprobante de liquidación.
+            </p>
           </div>
 
           <div className="space-y-2">

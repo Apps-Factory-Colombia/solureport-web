@@ -1,6 +1,10 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
+function getLastTableBottom(doc: jsPDF) {
+  return (doc as jsPDF & { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? 0;
+}
+
 interface PDFReportData {
   titulo: string;
   subtitulo?: string;
@@ -803,7 +807,7 @@ export function generateComprobantePDF(data: {
   empresa: string;
   periodo: string;
   tecnico: string;
-  cedula?: string;
+  cedula: string;
   items: { actividad: string; fecha: string; valorBase: number; porcentaje: number; valorLiquidado: number }[];
   desplazamientos?: { descripcion: string; fecha: string; valor: number; descuento?: number }[];
   totalAuxilio: number;
@@ -813,61 +817,85 @@ export function generateComprobantePDF(data: {
   totalExtraLider?: number;
   grandTotal: number;
 }): void {
+  const company = "SOLUCIONES & AUTOMATIZACIONES S.A.S.";
+  const nit = "900.758.272-5";
+  const legalDeclaration = "DECLARACIÓN DE CONFORMIDAD (CLÁUSULA TERCERA Y OTROSÍ - ART. 128 C.S.T.): Este pago se realiza bajo los términos de la Cláusula Tercera del contrato de trabajo y su Otrosí vigente (Pagos No Constitutivos de Salario - Art. 128 C.S.T. y Ley 1393 de 2010). Los valores aquí descritos corresponden al Auxilio Extralegal por Productividad y Respaldo Digital (condicionado al reporte y trazabilidad en la aplicación corporativa) y al Auxilio de Rodamiento y Movilización Operativa (otorgado como medio de transporte y herramienta de trabajo indispensable para el desempeño de las funciones, sin enriquecer el patrimonio del trabajador), por lo cual no constituyen salario, factor prestacional ni base de aportes (IBC).";
+  const employeeName = formatReceiptName(data.tecnico);
+  const employeeDocument = data.cedula.trim();
+  if (!employeeDocument) {
+    throw new Error("Completa la cédula del trabajador antes de generar el comprobante.");
+  }
+
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  let y = 15;
-  const tableMargin = { left: 14, right: 14, bottom: 20 };
+  const tableMargin = { left: 14, right: 14, top: 18, bottom: 22 };
   const tableContentWidth = pageWidth - tableMargin.left - tableMargin.right;
-  const contentBottomY = pageHeight - 20;
-  const resetPageY = 20;
+  const contentBottomY = pageHeight - 21;
+  const resetPageY = 18;
+  let y = 17;
   const ensurePageSpace = (requiredHeight: number) => {
     if (y + requiredHeight <= contentBottomY) return;
     doc.addPage();
     y = resetPageY;
   };
-  const legalLines = doc.splitTextToSize(
-    "Este pago se realiza bajo los términos de la Cláusula Tercera del contrato de trabajo (Pagos No Prestacionales - Art. 128 CST). Los valores aquí descritos corresponden a auxilios extralegales y compensaciones que no constituyen salario ni factor prestacional.",
-    pageWidth - 28
-  );
-  const legalBlockHeight = legalLines.length * 3.5;
 
-  // Header
-  doc.setFontSize(10);
-  doc.setTextColor(100);
-  doc.text(data.empresa, pageWidth / 2, y, { align: "center" });
-  y += 8;
-  doc.setFontSize(14);
-  doc.setTextColor(30);
-  doc.text("COMPROBANTE DE LIQUIDACIÓN", pageWidth / 2, y, { align: "center" });
+  // Encabezado del comprobante y datos identificatorios del trabajador.
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(13);
+  doc.setTextColor(31, 41, 55);
+  doc.text(company, 14, y);
   y += 6;
   doc.setFontSize(9);
-  doc.setTextColor(100);
-  doc.text(`Período: ${data.periodo}`, pageWidth / 2, y, { align: "center" });
-  y += 10;
-
-  // Technician info
-  doc.setFontSize(10);
-  doc.setTextColor(30);
-  doc.text(`Técnico: ${data.tecnico}`, 14, y);
-  if (data.cedula) {
-    doc.text(`C.C.: ${data.cedula}`, pageWidth - 60, y);
-  }
-  y += 8;
-
-  doc.setDrawColor(200);
+  doc.text(`NIT: ${nit}`, 14, y);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(71, 85, 105);
+  doc.text("COMPROBANTE DE LIQUIDACIÓN DE AUXILIOS EXTRALEGALES Y RODAMIENTO (ART. 128 C.S.T.)", 14, y + 6, { maxWidth: 120 });
+  doc.setFont("helvetica", "bold");
+  doc.text("Período:", pageWidth - 67, 18);
+  doc.setFont("helvetica", "normal");
+  doc.text(data.periodo, pageWidth - 67, 23, { maxWidth: 53 });
+  doc.setFont("helvetica", "bold");
+  doc.text("Fecha de generación:", pageWidth - 67, 31);
+  doc.setFont("helvetica", "normal");
+  doc.text(new Date().toLocaleDateString("es-CO", { timeZone: "America/Bogota" }), pageWidth - 67, 36);
+  y += 23;
+  doc.setDrawColor(13, 138, 188);
+  doc.setLineWidth(1.1);
   doc.line(14, y, pageWidth - 14, y);
-  y += 5;
-
-  // Items table
+  y += 7;
+  doc.setFillColor(245, 247, 250);
+  doc.setDrawColor(220, 226, 234);
+  doc.roundedRect(14, y, tableContentWidth, 19, 1.5, 1.5, "FD");
+  doc.setFont("helvetica", "bold");
   doc.setFontSize(9);
-  doc.setTextColor(60);
-  doc.text("CONCEPTO: AUXILIO EXTRALEGAL POR PRODUCTIVIDAD Y RESPALDO DIGITAL", 14, y);
-  y += 6;
+  doc.setTextColor(31, 41, 55);
+  doc.text("Técnico / Colaborador(a):", 19, y + 7);
+  doc.setFont("helvetica", "normal");
+  doc.text(employeeName, 58, y + 7, { maxWidth: tableContentWidth - 49 });
+  doc.setFont("helvetica", "bold");
+  doc.text("C.C. No:", 19, y + 14);
+  doc.setFont("helvetica", "normal");
+  doc.text(employeeDocument, 38, y + 14);
+  y += 25;
 
+  const addSectionTitle = (title: string) => {
+    ensurePageSpace(14);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(255, 255, 255);
+    const lines = doc.splitTextToSize(title, tableContentWidth - 10);
+    const height = Math.max(10, lines.length * 4.5 + 4);
+    doc.setFillColor(31, 41, 55);
+    doc.rect(14, y, tableContentWidth, height, "F");
+    doc.text(lines, 19, y + 6, { maxWidth: tableContentWidth - 10 });
+    y += height + 3;
+  };
+
+  addSectionTitle("1. CONCEPTO: AUXILIO EXTRALEGAL POR PRODUCTIVIDAD Y RESPALDO DIGITAL (CLÁUSULA TERCERA - ART. 128 C.S.T.)");
   autoTable(doc, {
     startY: y,
-    head: [["Actividad", "Fecha", "Valor Base", "%", "Valor Liquidado"]],
+    head: [["Actividad (Registro de Respaldo Digital en App)", "Fecha", "Valor Base", "%", "Valor Liquidado"]],
     body: data.items.map((item) => [
       item.actividad,
       item.fecha,
@@ -875,166 +903,164 @@ export function generateComprobantePDF(data: {
       `${item.porcentaje}%`,
       formatCurrencyPDF(item.valorLiquidado),
     ]),
-    styles: { fontSize: 8, cellPadding: 2.5, overflow: "linebreak", valign: "middle" },
-    headStyles: { fillColor: [13, 138, 188], textColor: [255, 255, 255] },
+    styles: { fontSize: 8, cellPadding: 2.3, overflow: "linebreak", valign: "middle", textColor: [31, 41, 55], lineColor: [210, 219, 229], lineWidth: 0.25 },
+    headStyles: { fillColor: [51, 65, 85], textColor: [255, 255, 255], fontStyle: "bold" },
+    alternateRowStyles: { fillColor: [247, 249, 252] },
     columnStyles: {
-      0: { cellWidth: tableContentWidth - 82 },
-      1: { cellWidth: 24 },
-      2: { cellWidth: 28, halign: "right" },
-      3: { cellWidth: 10, halign: "center" },
-      4: { cellWidth: 20, halign: "right" },
+      0: { cellWidth: 94 },
+      1: { cellWidth: 24, halign: "center" },
+      2: { cellWidth: 25, halign: "right" },
+      3: { cellWidth: 13, halign: "center" },
+      4: { cellWidth: tableContentWidth - 156, halign: "right" },
     },
     theme: "grid",
     margin: tableMargin,
     rowPageBreak: "avoid",
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  y = (doc as any).lastAutoTable.finalY + 8;
+  y = getLastTableBottom(doc) + 8;
 
-  if ((data.desplazamientos || []).length > 0) {
-    ensurePageSpace(18);
-    doc.setFontSize(9);
-    doc.setTextColor(60);
-    doc.text("CONCEPTO: BONO POR RECORRIDO", 14, y);
-    y += 6;
-
-    autoTable(doc, {
-      startY: y,
-      head: [["Subtipo / descripción", "Fecha", "Valor base", "Descuento", "Valor liquidado"]],
-      body: (data.desplazamientos || []).map((item) => [
-        item.descripcion || "Recorrido",
-        item.fecha,
-        formatCurrencyPDF(item.valor),
-        item.descuento ? `-${formatCurrencyPDF(item.descuento)}` : formatCurrencyPDF(0),
-        formatCurrencyPDF(Math.max(0, item.valor - (item.descuento || 0))),
-      ]),
-      styles: { fontSize: 8, cellPadding: 2.5, overflow: "linebreak", valign: "middle" },
-      headStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255] },
-      columnStyles: {
-        0: { cellWidth: 66 },
-        1: { cellWidth: 22 },
-        2: { cellWidth: 30, halign: "right" },
-        3: { cellWidth: 30, halign: "right" },
-        4: { cellWidth: tableContentWidth - 148, halign: "right" },
-      },
-      theme: "grid",
-      margin: tableMargin,
-      rowPageBreak: "avoid",
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    y = (doc as any).lastAutoTable.finalY + 6;
-    doc.setFontSize(8);
-    doc.setTextColor(100);
-    doc.text(`Actividades en bono por recorrido: ${(data.desplazamientos || []).length}`, 14, y);
-    y += 8;
-  }
-
-  // Totals
-  let totalsBlockHeight = 11;
-  if ((data.totalDescuentoTardanza || 0) > 0) totalsBlockHeight += 12;
-  if (data.totalRodamiento > 0) totalsBlockHeight += 6;
-  if ((data.totalDescuentoRecorridos || 0) > 0) totalsBlockHeight += 12;
-  if ((data.totalExtraLider || 0) > 0) totalsBlockHeight += 6;
-  totalsBlockHeight += 40 + legalBlockHeight;
-  ensurePageSpace(totalsBlockHeight);
-
-  const totalsX = pageWidth - 80;
-  doc.setFontSize(9);
-
-  doc.setTextColor(60);
-  doc.text("Subtotal Auxilio:", totalsX, y);
-  doc.setTextColor(30);
-  doc.text(formatCurrencyPDF(data.totalAuxilio), pageWidth - 14, y, { align: "right" });
-  y += 6;
-
-  if ((data.totalDescuentoTardanza || 0) > 0) {
-    doc.setTextColor(180, 50, 50);
-    doc.text("Descuento Tardanza · Auxilio:", totalsX - 5, y);
-    doc.text(`-${formatCurrencyPDF(data.totalDescuentoTardanza || 0)}`, pageWidth - 14, y, { align: "right" });
-    y += 6;
-
-    doc.setTextColor(60);
-    doc.text("Auxilio Neto:", totalsX, y);
-    doc.setTextColor(30);
-    doc.text(formatCurrencyPDF(data.totalAuxilio - (data.totalDescuentoTardanza || 0)), pageWidth - 14, y, { align: "right" });
-    y += 6;
-  }
-
-  if (data.totalRodamiento > 0) {
-    doc.setTextColor(60);
-    doc.text("Bono por Recorrido:", totalsX - 10, y);
-    doc.setTextColor(30);
-    doc.text(formatCurrencyPDF(data.totalRodamiento), pageWidth - 14, y, { align: "right" });
-    y += 6;
-  }
-
-  if ((data.totalDescuentoRecorridos || 0) > 0) {
-    doc.setTextColor(180, 50, 50);
-    doc.text("Descuento Tardanza · Visitas:", totalsX - 5, y);
-    doc.text(`-${formatCurrencyPDF(data.totalDescuentoRecorridos || 0)}`, pageWidth - 14, y, { align: "right" });
-    y += 6;
-
-    doc.setTextColor(60);
-    doc.text("Bono por Recorrido Neto:", totalsX - 10, y);
-    doc.setTextColor(30);
-    doc.text(formatCurrencyPDF(data.totalRodamiento - (data.totalDescuentoRecorridos || 0)), pageWidth - 14, y, { align: "right" });
-    y += 6;
-  }
-
-  if ((data.totalExtraLider || 0) > 0) {
-    doc.setTextColor(60);
-    doc.text("Extra Líder:", totalsX, y);
-    doc.setTextColor(30);
-    doc.text(formatCurrencyPDF(data.totalExtraLider || 0), pageWidth - 14, y, { align: "right" });
-    y += 6;
-  }
-
-  doc.setDrawColor(13, 138, 188);
-  doc.line(totalsX, y, pageWidth - 14, y);
-  y += 5;
-  doc.setFontSize(11);
-  doc.setTextColor(30);
-  doc.text("TOTAL A PAGAR:", totalsX, y);
-  doc.text(formatCurrencyPDF(data.grandTotal), pageWidth - 14, y, { align: "right" });
-
-  // Signatures
-  y += 25;
-  doc.setDrawColor(150);
-  doc.line(14, y, 80, y);
-  doc.line(pageWidth - 80, y, pageWidth - 14, y);
-  y += 5;
+  const movements = data.desplazamientos || [];
+  addSectionTitle("2. CONCEPTO: AUXILIO DE RODAMIENTO Y MOVILIZACIÓN OPERATIVA (HERRAMIENTA DE TRABAJO - ART. 128 C.S.T.)");
+  autoTable(doc, {
+    startY: y,
+    head: [["Subtipo / Descripción", "Fecha", "Valor base", "Descuento", "Valor liquidado"]],
+    body: movements.length > 0
+      ? movements.map((item) => [
+          formatReceiptRouteDescription(item.descripcion),
+          item.fecha,
+          formatCurrencyPDF(item.valor),
+          item.descuento ? `-${formatCurrencyPDF(item.descuento)}` : formatCurrencyPDF(0),
+          formatCurrencyPDF(Math.max(0, item.valor - (item.descuento || 0))),
+        ])
+      : [[{ content: "Sin recorridos registrados en el período.", colSpan: 5, styles: { halign: "center", textColor: [100, 116, 139] } }]],
+    styles: { fontSize: 8, cellPadding: 2.3, overflow: "linebreak", valign: "middle", textColor: [31, 41, 55], lineColor: [210, 219, 229], lineWidth: 0.25 },
+    headStyles: { fillColor: [51, 65, 85], textColor: [255, 255, 255], fontStyle: "bold" },
+    alternateRowStyles: { fillColor: [247, 249, 252] },
+    columnStyles: {
+      0: { cellWidth: 78 },
+      1: { cellWidth: 24, halign: "center" },
+      2: { cellWidth: 25, halign: "right" },
+      3: { cellWidth: 27, halign: "right" },
+      4: { cellWidth: tableContentWidth - 154, halign: "right" },
+    },
+    theme: "grid",
+    margin: tableMargin,
+    rowPageBreak: "avoid",
+  });
+  y = getLastTableBottom(doc) + 5;
+  doc.setFont("helvetica", "bold");
   doc.setFontSize(8);
-  doc.setTextColor(100);
-  doc.text("Firma del Técnico", 14, y);
-  doc.text("Firma Supervisor/Gerente", pageWidth - 80, y);
-  y += 4;
-  doc.text(data.tecnico, 14, y);
-  doc.text(data.empresa, pageWidth - 80, y);
+  doc.setTextColor(51, 65, 85);
+  doc.text(`Total actividades en Auxilio de Rodamiento y Movilización: ${movements.length}`, 14, y);
+  y += 8;
 
-  // Legal
-  y += 12;
-  doc.setFontSize(7);
-  doc.setTextColor(150);
-  doc.text(legalLines, 14, y);
+  const totalRows: Array<[string, string, boolean]> = [
+    ["Subtotal Auxilio Extralegal por Productividad y Respaldo Digital:", formatCurrencyPDF(data.totalAuxilio), false],
+  ];
+  if ((data.totalDescuentoTardanza || 0) > 0) {
+    totalRows.push(["Descuento por tardanza en Auxilio Extralegal:", `-${formatCurrencyPDF(data.totalDescuentoTardanza || 0)}`, false]);
+    totalRows.push(["Auxilio Extralegal Neto:", formatCurrencyPDF(data.totalAuxilio - (data.totalDescuentoTardanza || 0)), false]);
+  }
+  totalRows.push(["Subtotal Auxilio de Rodamiento y Movilización Operativa:", formatCurrencyPDF(data.totalRodamiento), false]);
+  if ((data.totalDescuentoRecorridos || 0) > 0) {
+    totalRows.push(["Descuento por tardanza en Auxilio de Rodamiento:", `-${formatCurrencyPDF(data.totalDescuentoRecorridos || 0)}`, false]);
+    totalRows.push(["Auxilio de Rodamiento Neto:", formatCurrencyPDF(data.totalRodamiento - (data.totalDescuentoRecorridos || 0)), false]);
+  }
+  if ((data.totalExtraLider || 0) > 0) totalRows.push(["Extra Líder:", formatCurrencyPDF(data.totalExtraLider || 0), false]);
+  totalRows.push(["TOTAL A PAGAR:", formatCurrencyPDF(data.grandTotal), true]);
 
-  // Footer
+  const legalLines = doc.splitTextToSize(legalDeclaration, tableContentWidth - 10);
+  const legalBlockHeight = legalLines.length * 4 + 10;
+  const estimatedTotalsHeight = totalRows.length * 7 + 4;
+  const signatureBlockHeight = 31;
+  ensurePageSpace(estimatedTotalsHeight + legalBlockHeight + signatureBlockHeight + 15);
+
+  autoTable(doc, {
+    startY: y,
+    body: totalRows.map(([label, amount, grand]) => [
+      { content: label, styles: { fontStyle: "bold", textColor: grand ? [255, 255, 255] : [31, 41, 55] } },
+      { content: amount, styles: { halign: "right", fontStyle: "bold", textColor: grand ? [255, 255, 255] : [31, 41, 55] } },
+    ]),
+    styles: { fontSize: 8, cellPadding: 2.2, lineColor: [210, 219, 229], lineWidth: 0.25 },
+    columnStyles: { 0: { cellWidth: 124 }, 1: { cellWidth: 38, halign: "right" } },
+    margin: { left: pageWidth - 14 - 162, right: 14, top: 18, bottom: 22 },
+    theme: "grid",
+    didParseCell: (hookData) => {
+      const isGrandTotal = hookData.row.index === totalRows.length - 1;
+      if (isGrandTotal) {
+        hookData.cell.styles.fillColor = [17, 24, 39];
+        hookData.cell.styles.fontSize = 10;
+      } else if (hookData.row.index % 2 === 0) {
+        hookData.cell.styles.fillColor = [247, 249, 252];
+      }
+    },
+    rowPageBreak: "avoid",
+  });
+  y = getLastTableBottom(doc) + 7;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7.5);
+  doc.setTextColor(31, 41, 55);
+  doc.setDrawColor(210, 219, 229);
+  doc.setFillColor(247, 249, 252);
+  doc.roundedRect(14, y, tableContentWidth, legalBlockHeight, 1.5, 1.5, "FD");
+  doc.text(legalLines, 19, y + 5, { maxWidth: tableContentWidth - 10, lineHeightFactor: 1.25 });
+  y += legalBlockHeight + 12;
+
+  ensurePageSpace(signatureBlockHeight);
+  const signatureWidth = (tableContentWidth - 26) / 2;
+  const rightSignatureX = 14 + signatureWidth + 26;
+  doc.setDrawColor(100, 116, 139);
+  doc.line(14, y, 14 + signatureWidth, y);
+  doc.line(rightSignatureX, y, pageWidth - 14, y);
+  y += 5;
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8);
+  doc.setTextColor(31, 41, 55);
+  doc.text("Firma del trabajador", 14, y);
+  doc.text("Firma Supervisor / Gerente", rightSignatureX, y);
+  y += 5;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.text(employeeName, 14, y, { maxWidth: signatureWidth });
+  doc.text(company, rightSignatureX, y, { maxWidth: signatureWidth });
+  y += 5;
+  doc.text("C.C. No: ___________________________", 14, y);
+  doc.text(`NIT: ${nit}`, rightSignatureX, y);
+
+  // Pie contractual fijo; fecha y paginación se mantienen como dato separado.
   const pageCount = doc.getNumberOfPages();
   for (let i = 1; i <= pageCount; i++) {
     doc.setPage(i);
+    doc.setDrawColor(210, 219, 229);
+    doc.line(14, pageHeight - 15, pageWidth - 14, pageHeight - 15);
+    doc.setFont("helvetica", "normal");
     doc.setFontSize(7);
-    doc.setTextColor(150);
-    doc.text(
-      `${data.empresa} - Generado: ${new Date().toLocaleDateString("es-CO")} - Página ${i}/${pageCount}`,
-      pageWidth / 2,
-      doc.internal.pageSize.getHeight() - 8,
-      { align: "center" }
-    );
+    doc.setTextColor(100, 116, 139);
+    doc.text(`${company} - NIT: ${nit}`, 14, pageHeight - 8);
+    doc.text(`Generado: ${new Date().toLocaleDateString("es-CO", { timeZone: "America/Bogota" })} · Página ${i}/${pageCount}`, pageWidth - 14, pageHeight - 8, { align: "right" });
   }
 
-  const safeName = data.tecnico.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 30);
+  const safeName = employeeName.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 30);
   doc.save(`comprobante_${safeName}_${new Date().toISOString().split("T")[0]}.pdf`);
+}
+
+export function formatReceiptName(value: string): string {
+  return value
+    .trim()
+    .toLocaleLowerCase("es-CO")
+    .replace(/(^|[\s'’-])([a-záéíóúüñ])/gu, (_match, boundary: string, letter: string) => `${boundary}${letter.toLocaleUpperCase("es-CO")}`);
+}
+
+function formatReceiptRouteDescription(value: string): string {
+  const [rawSubtype, ...detailParts] = value.split("·");
+  const detail = detailParts.join("·").trim();
+  const subtype = rawSubtype.trim().toLowerCase();
+  if (subtype === "recorrido-normal") return `Recorrido normal:${detail ? ` ${detail}` : ""}`;
+  if (subtype === "recorrido-con-herramienta") return `Recorrido con herramienta:${detail ? ` ${detail}` : ""}`;
+  if (subtype === "recorrido-visita-tecnica") return `Visita técnica:${detail ? ` ${detail}` : ""}`;
+  return value.trim() || "Recorrido normal:";
 }
 
 function formatCurrencyPDF(value: number): string {

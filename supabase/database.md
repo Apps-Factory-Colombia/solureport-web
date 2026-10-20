@@ -425,6 +425,7 @@ CREATE TABLE public.usuarios (
   password_hash text NOT NULL,
   nombre character varying NOT NULL,
   apellido character varying NOT NULL,
+  cedula text,
   email character varying NOT NULL UNIQUE,
   telefono character varying,
   rol character varying NOT NULL CHECK (rol::text = ANY (ARRAY['admin'::character varying, 'tecnico'::character varying, 'lider'::character varying]::text[])),

@@ -59,7 +59,8 @@ import { getGrupos } from "@/lib/data/services/grupos";
 import { deleteReporteActividadAdmin, getReportesActividad } from "@/lib/data/services/reportes-actividad";
 import { getLlegadas } from "@/lib/data/services/llegadas";
 import { cn } from "@/lib/utils";
-import { generateTablePDF, generateComprobantePDF } from "@/lib/utils/pdf-generator";
+import { formatReceiptName, generateTablePDF, generateComprobantePDF } from "@/lib/utils/pdf-generator";
+import { calculateLiquidationAmount, isLegacyAppliedValueCalculation } from "@/lib/utils/liquidation-math";
 import {
   Pagination,
   PaginationContent,
@@ -101,21 +102,14 @@ function getTipoLabel(tipo: ActivityReport["tipo"]) {
 }
 
 function isRouteBonusReport(report: ActivityReport) {
-  return report.tipo === "recorrido" || report.tipo === "visita_tecnica";
-}
-
-function getRouteBonusSubtype(report: ActivityReport) {
-  if (report.tipo === "visita_tecnica") return "recorrido-visita-tecnica";
-  if (report.tipo === "recorrido" && report.tipoRecorrido === "con_herramienta") return "recorrido-con-herramienta";
-  return "recorrido-normal";
+  return report.tipo === "recorrido";
 }
 
 function getRouteBonusDescription(report: ActivityReport) {
   const route = [report.puntoPartida, report.puntoLlegada].filter(Boolean).join(" - ");
-  const detail = report.tipo === "recorrido"
-    ? route || report.descripcion || "Recorrido"
-    : report.descripcion || "Visita técnica";
-  return `${getRouteBonusSubtype(report)} · ${detail}`;
+  const label = report.tipoRecorrido === "con_herramienta" ? "Recorrido con herramienta:" : "Recorrido normal:";
+  const detail = route || report.descripcion || "Recorrido";
+  return `${label} ${detail}`;
 }
 
 function distributeAttendanceDiscount(reports: ActivityReport[], totalDiscount: number) {
@@ -204,28 +198,13 @@ function buildStableOrderKey(periodId: string, entityId: string) {
   return `${periodId}:${entityId}`;
 }
 
-function waitForNextPaint() {
-  return new Promise<void>((resolve) => {
-    if (typeof window === "undefined") {
-      resolve();
-      return;
-    }
-
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => resolve());
-    });
-  });
-}
-
 function getReportLiquidationBaseValue(report: ActivityReport) {
   if (report.liquidacionValorBase != null) {
     return Number(report.liquidacionValorBase) || 0;
   }
 
-  if (report.tipo === "visita_tecnica" || report.tipo === "mantenimiento_preventivo") {
-    const sharedBaseValue = Number(report.valorActividadAplicadoGlobal ?? report.valorActividadBaseGlobal ?? 0) || 0;
-    if (sharedBaseValue > 0) return sharedBaseValue;
-  }
+  const activityBaseValue = Number(report.valorActividadBaseGlobal ?? report.costoActividadDefault ?? 0) || 0;
+  if (activityBaseValue > 0) return activityBaseValue;
 
   if (report.tipo === "recorrido") {
     return Number(report.costoActividad ?? 0) || 0;
@@ -245,7 +224,24 @@ function getReportLiquidationPercentage(report: ActivityReport) {
 
 function getReportLiquidationEarnedValue(report: ActivityReport) {
   if (report.liquidacionValorGanado != null) {
-    return Number(report.liquidacionValorGanado) || 0;
+    const storedNet = Number(report.liquidacionValorGanado) || 0;
+    const storedGross = Number(report.liquidacionValorGanadoOriginal ?? 0) || 0;
+    const baseValue = getReportLiquidationBaseValue(report);
+    const appliedValue = Number(report.valorActividadAplicadoGlobal ?? 0) || 0;
+    const percentage = getReportLiquidationPercentage(report);
+
+    if (!report.liquidacionCongelada && report.tipo !== "recorrido" && isLegacyAppliedValueCalculation({
+      storedAmount: storedGross,
+      baseValue,
+      appliedValue,
+      percentage,
+    })) {
+      const correctedGross = calculateLiquidationAmount(baseValue, percentage);
+      const attendancePercentage = Number(report.liquidacionPorcentajeDescuentoTardanza ?? 0) || 0;
+      return Math.max(0, correctedGross - calculateLiquidationAmount(correctedGross, attendancePercentage));
+    }
+
+    return storedNet;
   }
 
   if (report.tipo === "visita_tecnica") {
@@ -274,17 +270,45 @@ function getReportLiquidationEarnedValue(report: ActivityReport) {
 }
 
 function getReportLiquidationGrossValue(report: ActivityReport) {
-  if (report.liquidacionValorGanadoOriginal != null) {
-    return Number(report.liquidacionValorGanadoOriginal) || 0;
+  const storedAmount = report.liquidacionValorGanadoOriginal != null
+    ? Number(report.liquidacionValorGanadoOriginal) || 0
+    : getReportLiquidationEarnedValue(report);
+  const baseValue = getReportLiquidationBaseValue(report);
+  const appliedValue = Number(report.valorActividadAplicadoGlobal ?? 0) || 0;
+  const percentage = getReportLiquidationPercentage(report);
+
+  if (!report.liquidacionCongelada && report.tipo !== "recorrido" && isLegacyAppliedValueCalculation({
+    storedAmount,
+    baseValue,
+    appliedValue,
+    percentage,
+  })) {
+    return calculateLiquidationAmount(baseValue, percentage);
   }
 
-  return getReportLiquidationEarnedValue(report);
+  return storedAmount;
 }
 
 function getReportLiquidationDiscount(report: ActivityReport) {
-  return report.liquidacionDescuentoTardanza == null
-    ? null
-    : Number(report.liquidacionDescuentoTardanza) || 0;
+  if (report.liquidacionDescuentoTardanza == null) return null;
+  if (report.liquidacionCongelada) return Number(report.liquidacionDescuentoTardanza) || 0;
+
+  const baseValue = getReportLiquidationBaseValue(report);
+  const appliedValue = Number(report.valorActividadAplicadoGlobal ?? 0) || 0;
+  const percentage = getReportLiquidationPercentage(report);
+  const attendancePercentage = Number(report.liquidacionPorcentajeDescuentoTardanza ?? 0) || 0;
+  const storedGross = Number(report.liquidacionValorGanadoOriginal ?? 0) || 0;
+
+  if (report.tipo !== "recorrido" && attendancePercentage > 0 && isLegacyAppliedValueCalculation({
+    storedAmount: storedGross,
+    baseValue,
+    appliedValue,
+    percentage,
+  })) {
+    return calculateLiquidationAmount(getReportLiquidationGrossValue(report), attendancePercentage);
+  }
+
+  return Number(report.liquidacionDescuentoTardanza) || 0;
 }
 
 export default function LiquidacionPage() {
@@ -1051,19 +1075,23 @@ export default function LiquidacionPage() {
     }
   };
 
-  const handleDownloadComprobante = async () => {
+  const handleDownloadComprobante = () => {
     if (!selectedTechId) return;
 
     const tech = users.find((u) => u.id === selectedTechId);
     const techData = filteredComprobanteSummary.get(selectedTechId) || techSummary.get(selectedTechId);
 
     if (!tech || !techData) return;
+    const employeeDocument = tech.cedula?.trim();
+    if (!employeeDocument) {
+      alert(`Completa el número de cédula de ${tech.nombre} ${tech.apellido} en Usuarios antes de generar su comprobante.`);
+      return;
+    }
 
     setExportingComprobante(true);
 
     try {
-      await waitForNextPaint();
-
+      // Keep generation synchronous with the click so jsPDF.save retains browser user activation.
       const pdfReports = liquidablePeriodReports.filter(
         (r) => r.tecnicoId === selectedTechId && (comprobanteGroupId === "todos" || r.grupoId === comprobanteGroupId)
       );
@@ -1080,6 +1108,7 @@ export default function LiquidacionPage() {
         empresa: "SOLUCIONES & AUTOMATIZACIONES S.A.S.",
         periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} al ${selectedPeriod.fechaFin}` : "",
         tecnico: `${tech.nombre} ${tech.apellido}`,
+        cedula: employeeDocument,
         items: pdfAuxilioReports.map((report) => ({
           actividad: report.descripcion || getTipoLabel(report.tipo),
           fecha: report.fecha,
@@ -1252,7 +1281,7 @@ export default function LiquidacionPage() {
                     <p className="text-xl font-bold text-foreground">{periodRouteCount}</p>
                     <p className="text-xs text-muted-foreground">Recorridos normales</p>
                     {periodTechnicalVisitCount > 0 && (
-                      <p className="text-[10px] text-emerald-400">+ {periodTechnicalVisitCount} visitas en bono por recorrido</p>
+                      <p className="text-[10px] text-muted-foreground">{periodTechnicalVisitCount} visitas en productividad</p>
                     )}
                   </div>
                 </CardContent>
@@ -2109,8 +2138,8 @@ export default function LiquidacionPage() {
                 <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-4">
                   <div className="text-center border-b border-border/50 pb-3">
                     <p className="text-sm font-bold text-gold">SOLUCIONES & AUTOMATIZACIONES S.A.S.</p>
-                    <p className="text-xs text-muted-foreground">NIT: 900.XXX.XXX-X</p>
-                    <p className="text-xs font-semibold text-foreground mt-2">COMPROBANTE DE LIQUIDACIÓN QUINCENAL</p>
+                    <p className="text-xs text-muted-foreground">NIT: 900.758.272-5</p>
+                    <p className="text-xs font-semibold text-foreground mt-2">COMPROBANTE DE LIQUIDACIÓN DE AUXILIOS EXTRALEGALES Y RODAMIENTO (ART. 128 C.S.T.)</p>
                     <p className="text-xs text-muted-foreground">
                       Período: {selectedPeriod?.fechaInicio} → {selectedPeriod?.fechaFin}
                     </p>
@@ -2119,50 +2148,49 @@ export default function LiquidacionPage() {
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div>
                       <p className="text-xs text-muted-foreground">Nombre del Técnico</p>
-                      <p className="font-medium text-foreground">{tech.nombre} {tech.apellido}</p>
+                      <p className="font-medium text-foreground">{formatReceiptName(`${tech.nombre} ${tech.apellido}`)}</p>
                     </div>
                     <div>
-                      <p className="text-xs text-muted-foreground">Correo</p>
-                      <p className="font-medium text-foreground">{tech.email}</p>
+                      <p className="text-xs text-muted-foreground">C.C. No.</p>
+                      <p className="font-medium text-foreground">{tech.cedula?.trim() || "Pendiente de completar en Usuarios"}</p>
                     </div>
                   </div>
+                  {!tech.cedula?.trim() && (
+                    <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
+                      Completa la cédula en Usuarios para habilitar la descarga del comprobante.
+                    </p>
+                  )}
 
                   <div className="max-h-[48vh] overflow-y-auto overflow-x-hidden rounded-lg border border-border/30 pr-1">
                   <div className="space-y-2">
                     <p className="text-xs font-semibold text-cyan-neon uppercase tracking-wide">
-                      AUXILIO EXTRALEGAL POR PRODUCTIVIDAD Y RESPALDO DIGITAL
+                      1. CONCEPTO: AUXILIO EXTRALEGAL POR PRODUCTIVIDAD Y RESPALDO DIGITAL (CLÁUSULA TERCERA - ART. 128 C.S.T.)
                     </p>
                       <Table className="w-full table-fixed">
                       <TableHeader>
                         <TableRow className="border-border/30 hover:bg-transparent">
-                            <TableHead className="w-[16%] text-muted-foreground text-xs">Tipo</TableHead>
-                            <TableHead className="w-[22%] text-muted-foreground text-xs">Código</TableHead>
-                            <TableHead className="w-[30%] text-muted-foreground text-xs">Descripción</TableHead>
+                            <TableHead className="w-[39%] text-muted-foreground text-xs">Actividad (Registro de Respaldo Digital en App)</TableHead>
                             <TableHead className="w-[14%] text-muted-foreground text-xs">Fecha</TableHead>
-                            <TableHead className="w-[9%] text-muted-foreground text-xs">Estado</TableHead>
-                            <TableHead className="w-[14%] text-muted-foreground text-xs text-right">Valor</TableHead>
+                            <TableHead className="w-[17%] text-muted-foreground text-xs text-right">Valor base</TableHead>
+                            <TableHead className="w-[10%] text-muted-foreground text-xs text-right">%</TableHead>
+                            <TableHead className="w-[20%] text-muted-foreground text-xs text-right">Valor liquidado</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {auxilioReports.map((r) => (
                           <TableRow key={r.id} className="border-border/30 hover:bg-secondary/20">
-                            <TableCell className="text-xs text-foreground/80">
-                              {r.tipo === "mantenimiento_preventivo" ? "Mant." : r.tipo === "visita_tecnica" ? "Visita" : r.tipo}
-                            </TableCell>
-                            <TableCell className="break-all text-xs font-mono text-cyan-neon">{r.codigoRegistro || "Histórico sin código"}</TableCell>
-                            <TableCell className="break-words whitespace-normal text-xs text-foreground/80">{r.descripcion || "—"}</TableCell>
+                            <TableCell className="break-words whitespace-normal text-xs text-foreground/80">{r.descripcion || getTipoLabel(r.tipo)}</TableCell>
                             <TableCell className="whitespace-normal text-xs text-foreground/80">{r.fecha}</TableCell>
-                            <TableCell className="text-xs text-foreground/80">
-                              {r.estadoAprobacionLider === "aprobado" ? "✓" : "Pend."}
-                            </TableCell>
+                            <TableCell className="text-xs text-right text-foreground/80">{formatCurrency(getReportLiquidationBaseValue(r))}</TableCell>
+                            <TableCell className="text-xs text-right text-foreground/80">{getReportLiquidationPercentage(r)}%</TableCell>
                             <TableCell className="text-xs text-right font-medium text-gold">
                               {formatCurrency(getReportLiquidationGrossValue(r))}
                             </TableCell>
                           </TableRow>
                         ))}
                         <TableRow className="border-border/30 bg-gold/5">
-                          <TableCell colSpan={5} className="text-xs font-bold text-foreground">
-                            Subtotal Auxilio Extralegal
+                          <TableCell colSpan={4} className="text-xs font-bold text-foreground">
+                            Subtotal Auxilio Extralegal por Productividad y Respaldo Digital
                           </TableCell>
                           <TableCell className="text-right font-bold text-gold">
                             {formatCurrency(auxilioTotal)}
@@ -2170,7 +2198,7 @@ export default function LiquidacionPage() {
                         </TableRow>
                         {descuentoAuxilio > 0 && (
                           <TableRow className="border-border/30 bg-red-500/5">
-                            <TableCell colSpan={5} className="text-xs font-bold text-red-400">
+                            <TableCell colSpan={4} className="text-xs font-bold text-red-400">
                               Descuento por Tardanza en Auxilio ({techData.descuentoPorcentaje}%)
                             </TableCell>
                             <TableCell className="text-right font-bold text-red-400">
@@ -2179,7 +2207,7 @@ export default function LiquidacionPage() {
                           </TableRow>
                         )}
                         <TableRow className="border-border/30 bg-cyan-neon/5">
-                          <TableCell colSpan={5} className="text-xs font-bold text-foreground">
+                          <TableCell colSpan={4} className="text-xs font-bold text-foreground">
                             Auxilio Extralegal Neto
                           </TableCell>
                           <TableCell className="text-right font-bold text-gold">
@@ -2190,10 +2218,10 @@ export default function LiquidacionPage() {
                     </Table>
                   </div>
 
-                  {routeBonusReports.length > 0 && (
+                  {(
                     <div className="space-y-2">
                       <p className="text-xs font-semibold text-emerald-400 uppercase tracking-wide">
-                        BONO POR RECORRIDO
+                        2. CONCEPTO: AUXILIO DE RODAMIENTO Y MOVILIZACIÓN OPERATIVA (HERRAMIENTA DE TRABAJO - ART. 128 C.S.T.)
                       </p>
                       <div className="rounded-lg border border-border/30 bg-secondary/20 p-3">
                         <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-3">
@@ -2202,55 +2230,51 @@ export default function LiquidacionPage() {
                             <p className="text-foreground">{tech.tieneMoto ? "Motocicleta" : "Otro"}</p>
                           </div>
                           <div>
-                            <p className="text-muted-foreground">Recorridos normales</p>
-                            <p className="text-foreground">{techReportsForComprobante.filter((report) => report.tipo === "recorrido").length}</p>
-                            <p className="mt-1 text-muted-foreground">Visitas técnicas</p>
-                            <p className="text-foreground">{techReportsForComprobante.filter((report) => report.tipo === "visita_tecnica").length}</p>
+                            <p className="text-muted-foreground">Recorridos realizados</p>
+                            <p className="text-foreground">{routeBonusReports.length}</p>
                           </div>
                           <div className="text-right">
-                            <p className="text-muted-foreground">Bono por recorrido</p>
+                            <p className="text-muted-foreground">Auxilio de rodamiento</p>
                             <p className="font-bold text-emerald-400">{formatCurrency(routeBonusTotal)}</p>
                           </div>
                         </div>
                         <div className="mt-4 overflow-x-auto">
-                          <Table className="w-full min-w-[900px] table-fixed">
+                          <Table className="w-full table-fixed">
                             <TableHeader>
                               <TableRow className="border-border/30 hover:bg-transparent">
-                                <TableHead className="w-[25%] text-muted-foreground text-xs">Subtipo</TableHead>
-                                <TableHead className="w-[22%] text-muted-foreground text-xs">Código</TableHead>
-                                <TableHead className="w-[27%] text-muted-foreground text-xs">Detalle</TableHead>
-                                <TableHead className="w-[12%] text-muted-foreground text-xs">Fecha</TableHead>
-                                <TableHead className="w-[6%] text-muted-foreground text-xs">Estado</TableHead>
-                                <TableHead className="w-[8%] text-right text-muted-foreground text-xs">Valor</TableHead>
+                                <TableHead className="w-[36%] text-muted-foreground text-xs">Subtipo / Descripción</TableHead>
+                                <TableHead className="w-[14%] text-muted-foreground text-xs">Fecha</TableHead>
+                                <TableHead className="w-[17%] text-right text-muted-foreground text-xs">Valor base</TableHead>
+                                <TableHead className="w-[15%] text-right text-muted-foreground text-xs">Descuento</TableHead>
+                                <TableHead className="w-[18%] text-right text-muted-foreground text-xs">Valor liquidado</TableHead>
                               </TableRow>
                             </TableHeader>
                             <TableBody>
-                              {routeBonusReports.map((report) => (
+                              {routeBonusReports.length > 0 ? routeBonusReports.map((report) => (
                                 <TableRow key={`bono-recorrido-${report.id}`} className="border-border/30 hover:bg-secondary/20">
-                                  <TableCell className="break-words align-top text-xs font-mono text-emerald-300">{getRouteBonusSubtype(report)}</TableCell>
-                                  <TableCell className="whitespace-nowrap align-top text-[10px] font-mono text-cyan-neon">{report.codigoRegistro || "Sin código"}</TableCell>
-                                  <TableCell className="break-words whitespace-normal align-top text-xs leading-5 text-foreground/80">{report.tipo === "recorrido"
-                                    ? [report.puntoPartida, report.puntoLlegada].filter(Boolean).join(" → ") || report.descripcion || "Recorrido"
-                                    : report.descripcion || "Visita técnica"}</TableCell>
+                                  <TableCell className="break-words whitespace-normal align-top text-xs leading-5 text-foreground/80">{getRouteBonusDescription(report)}</TableCell>
                                   <TableCell className="whitespace-nowrap align-top text-xs text-foreground/80">{report.fecha}</TableCell>
-                                  <TableCell className="align-top text-xs text-foreground/80">{report.estadoAprobacionLider === "aprobado" ? "✓" : "Pend."}</TableCell>
+                                  <TableCell className="whitespace-nowrap text-right align-top text-xs text-foreground/80">{formatCurrency(getReportLiquidationBaseValue(report))}</TableCell>
+                                  <TableCell className="whitespace-nowrap text-right align-top text-xs text-red-400">{formatCurrency(discountByReport.get(report.id) || 0)}</TableCell>
                                   <TableCell className="whitespace-nowrap text-right align-top text-xs font-medium text-emerald-400">
                                     {formatCurrency(getReportLiquidationGrossValue(report) - (discountByReport.get(report.id) || 0))}
                                   </TableCell>
                                 </TableRow>
-                              ))}
+                              )) : (
+                                <TableRow><TableCell colSpan={5} className="py-5 text-center text-xs text-muted-foreground">Sin recorridos registrados en el período.</TableCell></TableRow>
+                              )}
                               <TableRow className="border-border/30 bg-emerald-500/5">
-                                <TableCell colSpan={5} className="text-xs font-bold text-foreground">Subtotal Bono por Recorrido</TableCell>
+                                <TableCell colSpan={4} className="text-xs font-bold text-foreground">Subtotal Auxilio de Rodamiento y Movilización Operativa</TableCell>
                                 <TableCell className="text-right font-bold text-emerald-400">{formatCurrency(routeBonusTotal)}</TableCell>
                               </TableRow>
                               {descuentoVisitas > 0 && (
                                 <TableRow className="border-border/30 bg-red-500/5">
-                                  <TableCell colSpan={5} className="text-xs font-bold text-red-400">Descuento por tardanza en visitas técnicas ({techData.descuentoPorcentaje}%)</TableCell>
+                                  <TableCell colSpan={4} className="text-xs font-bold text-red-400">Descuento por tardanza en recorridos ({techData.descuentoPorcentaje}%)</TableCell>
                                   <TableCell className="text-right font-bold text-red-400">-{formatCurrency(descuentoVisitas)}</TableCell>
                                 </TableRow>
                               )}
                               <TableRow className="border-border/30 bg-emerald-500/10">
-                                <TableCell colSpan={5} className="text-xs font-bold text-foreground">Bono por Recorrido Neto</TableCell>
+                                <TableCell colSpan={4} className="text-xs font-bold text-foreground">Auxilio de Rodamiento Neto</TableCell>
                                 <TableCell className="text-right font-bold text-emerald-400">{formatCurrency(routeBonusNet)}</TableCell>
                               </TableRow>
                             </TableBody>
@@ -2278,7 +2302,7 @@ export default function LiquidacionPage() {
                     </div>
                     {routeBonusReports.length > 0 && (
                       <div className="flex justify-between text-sm">
-                        <span className="text-muted-foreground">Bono por Recorrido Neto</span>
+                        <span className="text-muted-foreground">Auxilio de Rodamiento Neto</span>
                         <span className="font-medium text-emerald-400">{formatCurrency(routeBonusNet)}</span>
                       </div>
                     )}
@@ -2294,13 +2318,18 @@ export default function LiquidacionPage() {
                     </div>
                   </div>
 
+                  <div className="mt-4 p-2 rounded border border-border/30 bg-secondary/10">
+                    <p className="text-[9px] text-muted-foreground leading-relaxed">
+                      <strong>DECLARACIÓN DE CONFORMIDAD (CLÁUSULA TERCERA Y OTROSÍ - ART. 128 C.S.T.):</strong> Este pago se realiza bajo los términos de la Cláusula Tercera del contrato de trabajo y su Otrosí vigente (Pagos No Constitutivos de Salario - Art. 128 C.S.T. y Ley 1393 de 2010). Los valores aquí descritos corresponden al Auxilio Extralegal por Productividad y Respaldo Digital (condicionado al reporte y trazabilidad en la aplicación corporativa) y al Auxilio de Rodamiento y Movilización Operativa (otorgado como medio de transporte y herramienta de trabajo indispensable para el desempeño de las funciones, sin enriquecer el patrimonio del trabajador), por lo cual no constituyen salario, factor prestacional ni base de aportes (IBC).
+                    </p>
+                  </div>
                   <div className="grid grid-cols-2 gap-8 pt-8 mt-4 border-t border-border/50">
                     <div className="text-center space-y-2">
                       <div className="border-t border-foreground/30 pt-2 mx-4">
                         <p className="text-xs font-medium text-foreground flex items-center justify-center gap-1">
                           <PenLine className="h-3 w-3" /> Firma del Técnico
                         </p>
-                        <p className="text-[10px] text-muted-foreground">{tech.nombre} {tech.apellido}</p>
+                        <p className="text-[10px] text-muted-foreground">{formatReceiptName(`${tech.nombre} ${tech.apellido}`)}</p>
                         <p className="text-[10px] text-muted-foreground">C.C. _______________</p>
                       </div>
                     </div>
@@ -2309,20 +2338,12 @@ export default function LiquidacionPage() {
                         <p className="text-xs font-medium text-foreground flex items-center justify-center gap-1">
                           <PenLine className="h-3 w-3" /> Firma Supervisor/Gerente
                         </p>
-                        <p className="text-[10px] text-muted-foreground">SOLUCIONES & AUTOMATIZACIONES S.A.S.</p>
+                        <p className="text-[10px] text-muted-foreground">SOLUCIONES &amp; AUTOMATIZACIONES S.A.S.</p>
                         <p className="text-[10px] text-muted-foreground">Representante Legal</p>
                       </div>
                     </div>
                   </div>
-
-                  <div className="mt-4 p-2 rounded border border-border/30 bg-secondary/10">
-                    <p className="text-[9px] text-muted-foreground leading-relaxed">
-                      <strong>Nota:</strong> Este pago se realiza bajo los términos de la Cláusula Tercera del contrato de trabajo
-                      (Pagos No Prestacionales - Art. 128 CST). Los valores aquí descritos corresponden a auxilios extralegales y
-                      compensaciones que no constituyen salario ni factor prestacional. Este documento no reemplaza el comprobante
-                      de nómina del salario básico.
-                    </p>
-                  </div>
+                  <p className="text-center text-[9px] text-muted-foreground">SOLUCIONES &amp; AUTOMATIZACIONES S.A.S. - NIT: 900.758.272-5</p>
                 </div>
 
                 <div className="flex justify-end gap-2">
@@ -2338,7 +2359,7 @@ export default function LiquidacionPage() {
                     className="gap-2 bg-gold hover:bg-gold-dark text-background font-semibold"
                     data-testid="liquidation-download-comprobante"
                     onClick={handleDownloadComprobante}
-                    disabled={exportingComprobante}
+                    disabled={exportingComprobante || !users.find((user) => user.id === selectedTechId)?.cedula?.trim()}
                   >
                     {exportingComprobante ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
