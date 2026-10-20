@@ -54,7 +54,7 @@ import {
 import { LiquidationPeriod, User, WorkGroup, ActivityReport, ArrivalRecord } from "@/lib/types";
 import { getPeriodos, closePeriodo, getCanonicalLiquidationSummary, CanonicalLiquidationSummary } from "@/lib/data/services/liquidacion";
 import { getConfiguracion } from "@/lib/data/services/configuracion";
-import { getUsuarios } from "@/lib/data/services/usuarios";
+import { getUsuarios, updateUsuario } from "@/lib/data/services/usuarios";
 import { getGrupos } from "@/lib/data/services/grupos";
 import { deleteReporteActividadAdmin, getReportesActividad } from "@/lib/data/services/reportes-actividad";
 import { getLlegadas } from "@/lib/data/services/llegadas";
@@ -340,6 +340,10 @@ export default function LiquidacionPage() {
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
   const [exportingComprobante, setExportingComprobante] = useState(false);
+  const [comprobanteCedulaDraft, setComprobanteCedulaDraft] = useState("");
+  const [savingComprobanteCedula, setSavingComprobanteCedula] = useState(false);
+  const [comprobanteCedulaError, setComprobanteCedulaError] = useState<string | null>(null);
+  const [comprobanteCedulaSaved, setComprobanteCedulaSaved] = useState(false);
   const [openTechCards, setOpenTechCards] = useState<Record<string, boolean>>({});
   const [openGroupCards, setOpenGroupCards] = useState<Record<string, boolean>>({});
   const scrollRestorePositionRef = useRef<number | null>(null);
@@ -1084,7 +1088,7 @@ export default function LiquidacionPage() {
     if (!tech || !techData) return;
     const employeeDocument = tech.cedula?.trim();
     if (!employeeDocument) {
-      alert(`Completa el número de cédula de ${tech.nombre} ${tech.apellido} en Usuarios antes de generar su comprobante.`);
+      setComprobanteCedulaError("La cédula es obligatoria. Regístrala en este comprobante para habilitar la descarga.");
       return;
     }
 
@@ -1134,6 +1138,43 @@ export default function LiquidacionPage() {
       alert("No se pudo generar el comprobante PDF. Intenta nuevamente.");
     } finally {
       setExportingComprobante(false);
+    }
+  };
+
+  const handleOpenComprobante = (techId: string) => {
+    const tech = users.find((user) => user.id === techId);
+    setSelectedTechId(techId);
+    setComprobanteCedulaDraft(tech?.cedula?.trim() || "");
+    setComprobanteCedulaError(null);
+    setComprobanteCedulaSaved(false);
+    setComprobanteOpen(true);
+  };
+
+  const handleSaveComprobanteCedula = async () => {
+    if (!selectedTechId) return;
+
+    const cedula = comprobanteCedulaDraft.trim();
+    if (!cedula) {
+      setComprobanteCedulaError("Escribe el número de cédula para continuar.");
+      return;
+    }
+
+    setSavingComprobanteCedula(true);
+    setComprobanteCedulaError(null);
+    setComprobanteCedulaSaved(false);
+    try {
+      const updatedUser = await updateUsuario(selectedTechId, { cedula });
+      const savedCedula = updatedUser.cedula?.trim() || cedula;
+      setUsers((currentUsers) => currentUsers.map((user) => (
+        user.id === selectedTechId ? { ...user, cedula: savedCedula } : user
+      )));
+      setComprobanteCedulaDraft(savedCedula);
+      setComprobanteCedulaSaved(true);
+    } catch (error) {
+      console.error("Error guardando la cédula desde el comprobante:", error);
+      setComprobanteCedulaError("No se pudo guardar la cédula. Verifica la conexión e inténtalo de nuevo.");
+    } finally {
+      setSavingComprobanteCedula(false);
     }
   };
 
@@ -1882,10 +1923,7 @@ export default function LiquidacionPage() {
                       key={techId}
                       data-testid={`liquidation-comprobante-card-${techId}`}
                       className="border-border/50 bg-card/80 hover:border-gold/20 transition-all cursor-pointer"
-                      onClick={() => {
-                        setSelectedTechId(techId);
-                        setComprobanteOpen(true);
-                      }}
+                      onClick={() => handleOpenComprobante(techId)}
                     >
                       <CardContent className="p-4 space-y-3">
                         <div className="flex items-center justify-between">
@@ -2106,7 +2144,16 @@ export default function LiquidacionPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={comprobanteOpen} onOpenChange={setComprobanteOpen}>
+      <Dialog
+        open={comprobanteOpen}
+        onOpenChange={(open) => {
+          setComprobanteOpen(open);
+          if (!open) {
+            setComprobanteCedulaError(null);
+            setComprobanteCedulaSaved(false);
+          }
+        }}
+      >
         <DialogContent data-testid="liquidation-comprobante-dialog" className="flex max-h-[92vh] w-[calc(100%-1rem)] flex-col overflow-hidden bg-card border-border sm:max-w-6xl">
           <DialogHeader className="shrink-0">
             <DialogTitle className="text-foreground">Comprobante de Liquidación</DialogTitle>
@@ -2156,8 +2203,72 @@ export default function LiquidacionPage() {
                     </div>
                   </div>
                   {!tech.cedula?.trim() && (
-                    <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
-                      Completa la cédula en Usuarios para habilitar la descarga del comprobante.
+                    <form
+                      className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void handleSaveComprobanteCedula();
+                      }}
+                    >
+                      <div>
+                        <p className="text-sm font-semibold text-amber-200">Descarga bloqueada: falta la cédula</p>
+                        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                          El comprobante oficial exige el número de cédula de este trabajador. Regístralo aquí; se guardará en su ficha sin salir de Liquidación.
+                        </p>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label htmlFor="comprobante-cedula" className="text-xs font-medium text-foreground">
+                          Cédula del trabajador <span className="text-red-400">*</span>
+                        </label>
+                        <Input
+                          id="comprobante-cedula"
+                          name="cedula"
+                          value={comprobanteCedulaDraft}
+                          onChange={(event) => {
+                            setComprobanteCedulaDraft(event.target.value);
+                            setComprobanteCedulaError(null);
+                            setComprobanteCedulaSaved(false);
+                          }}
+                          inputMode="numeric"
+                          autoComplete="off"
+                          maxLength={30}
+                          placeholder="Escribe el número de cédula"
+                          aria-invalid={Boolean(comprobanteCedulaError)}
+                          aria-describedby={comprobanteCedulaError ? "comprobante-cedula-error" : "comprobante-cedula-help"}
+                          disabled={savingComprobanteCedula}
+                          required
+                        />
+                        {comprobanteCedulaError ? (
+                          <p id="comprobante-cedula-error" role="alert" className="text-xs text-red-400">
+                            {comprobanteCedulaError}
+                          </p>
+                        ) : (
+                          <p id="comprobante-cedula-help" className="text-[11px] text-muted-foreground">
+                            Es obligatoria para generar el PDF y quedará registrada para próximos comprobantes.
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <p className="text-[11px] text-muted-foreground">Verifica el dato con el documento del trabajador.</p>
+                        <Button
+                          type="submit"
+                          size="sm"
+                          className="gap-2 bg-amber-400 text-background hover:bg-amber-300"
+                          disabled={savingComprobanteCedula || !comprobanteCedulaDraft.trim()}
+                        >
+                          {savingComprobanteCedula ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <CheckCircle2 className="h-4 w-4" />
+                          )}
+                          {savingComprobanteCedula ? "Guardando..." : "Guardar cédula"}
+                        </Button>
+                      </div>
+                    </form>
+                  )}
+                  {comprobanteCedulaSaved && tech.cedula?.trim() && (
+                    <p role="status" className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-300">
+                      Cédula guardada. Ya puedes descargar el comprobante PDF.
                     </p>
                   )}
 
