@@ -973,8 +973,15 @@ export function generateComprobantePDF(data: {
   const legalLines = doc.splitTextToSize(legalDeclaration, tableContentWidth - 10);
   const legalBlockHeight = legalLines.length * 4 + 10;
   const estimatedTotalsHeight = totalRows.length * 7 + 4;
-  const signatureBlockHeight = 31;
-  ensurePageSpace(estimatedTotalsHeight + legalBlockHeight + signatureBlockHeight + 15);
+  // Reserve the actual vertical footprint of the complete closing section.
+  // The previous 31 mm signature estimate forced short receipts onto a second
+  // page even when totals, declaration, and signatures fit below the tables.
+  const totalsToLegalGap = 7;
+  const legalToSignatureGap = 8;
+  const signatureBlockHeight = 17;
+  ensurePageSpace(
+    estimatedTotalsHeight + totalsToLegalGap + legalBlockHeight + legalToSignatureGap + signatureBlockHeight
+  );
 
   autoTable(doc, {
     startY: y,
@@ -997,7 +1004,7 @@ export function generateComprobantePDF(data: {
     },
     rowPageBreak: "avoid",
   });
-  y = getLastTableBottom(doc) + 7;
+  y = getLastTableBottom(doc) + totalsToLegalGap;
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(7.5);
@@ -1006,7 +1013,7 @@ export function generateComprobantePDF(data: {
   doc.setFillColor(247, 249, 252);
   doc.roundedRect(14, y, tableContentWidth, legalBlockHeight, 1.5, 1.5, "FD");
   doc.text(legalLines, 19, y + 5, { maxWidth: tableContentWidth - 10, lineHeightFactor: 1.25 });
-  y += legalBlockHeight + 12;
+  y += legalBlockHeight + legalToSignatureGap;
 
   ensurePageSpace(signatureBlockHeight);
   const signatureWidth = (tableContentWidth - 26) / 2;
