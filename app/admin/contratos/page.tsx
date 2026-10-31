@@ -35,10 +35,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, ChevronDown, ArrowLeft, X, Loader2 } from "lucide-react";
-import { MaintenanceContract, MantenimientoContrato, Client, User } from "@/lib/types";
+import { MaintenanceContract, MantenimientoContrato, Client, User, WorkGroup } from "@/lib/types";
 import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
+import { getGrupos } from "@/lib/data/services/grupos";
 import { cn } from "@/lib/utils";
 import { isAssignableMaintenanceUser } from "@/lib/utils/maintenance-assignment";
 import { generateTablePDF } from "@/lib/utils/pdf-generator";
@@ -194,6 +195,7 @@ export default function ContratosPage() {
   const [contracts, setContracts] = useState<MaintenanceContract[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [groups, setGroups] = useState<WorkGroup[]>([]);
   const [search, setSearch] = useState("");
   const [selectedContract, setSelectedContract] = useState<MaintenanceContract | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -233,6 +235,9 @@ export default function ContratosPage() {
   const [editValorPuertaPeatonal, setEditValorPuertaPeatonal] = useState("0");
   const [editValorPuertaVehicular, setEditValorPuertaVehicular] = useState("0");
   const [editRegenerarMants, setEditRegenerarMants] = useState(false);
+  const [editGrupoId, setEditGrupoId] = useState("");
+  const [editTecnicoId, setEditTecnicoId] = useState("");
+  const [editAplicarAsignacionFutura, setEditAplicarAsignacionFutura] = useState(true);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "info" | "success" | "error"; message: string } | null>(null);
 
@@ -250,10 +255,11 @@ export default function ContratosPage() {
 
   const loadData = async () => {
     try {
-      const [ct, cl, us] = await Promise.all([getContratos(), getClientes(), getUsuarios()]);
+      const [ct, cl, us, gs] = await Promise.all([getContratos(), getClientes(), getUsuarios(), getGrupos()]);
       setContracts(ct);
       setClients(cl);
       setUsers(us);
+      setGroups(gs);
     } catch (err) {
       console.error("Error cargando contratos:", err);
     }
@@ -654,6 +660,9 @@ export default function ContratosPage() {
     setEditValorPuertaPeatonal(String(ct.valorPuertaPeatonal || 0));
     setEditValorPuertaVehicular(String(ct.valorPuertaVehicular || 0));
     setEditRegenerarMants(false);
+    setEditGrupoId(ct.grupoId || "");
+    setEditTecnicoId(ct.tecnicoId || "");
+    setEditAplicarAsignacionFutura(true);
     setDetailOpen(true);
   };
 
@@ -691,6 +700,9 @@ export default function ContratosPage() {
         costoPorMantenimiento: Math.round(costoTotal / cantidad),
         estado: editEstado,
         regenerarMantenimientos: editRegenerarMants,
+        grupoId: editGrupoId || undefined,
+        tecnicoId: editTecnicoId || undefined,
+        aplicarAsignacionFutura: editAplicarAsignacionFutura,
       });
       setSelectedContract(updated);
       setContracts((current) => current.map((contract) => contract.id === updated.id ? updated : contract));
@@ -1770,6 +1782,37 @@ export default function ContratosPage() {
                         />
                       </div>
                     </div>
+
+                    <div className="grid grid-cols-2 gap-4 rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-3">
+                      <div className="space-y-2">
+                        <Label className="text-foreground/80">Grupo para mantenimientos futuros</Label>
+                        <Select value={editGrupoId || "sin-grupo"} onValueChange={(value) => setEditGrupoId(value === "sin-grupo" ? "" : value)}>
+                          <SelectTrigger className="bg-secondary/50 border-border/50">
+                            <SelectValue placeholder="Seleccionar grupo" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-card border-border">
+                            <SelectItem value="sin-grupo">Sin grupo</SelectItem>
+                            {groups.filter((group) => group.estado === "activo").map((group) => (
+                              <SelectItem key={group.id} value={group.id}>{group.nombre}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-foreground/80">Técnico principal futuro</Label>
+                        <Select value={editTecnicoId || "sin-tecnico"} onValueChange={(value) => setEditTecnicoId(value === "sin-tecnico" ? "" : value)}>
+                          <SelectTrigger className="bg-secondary/50 border-border/50">
+                            <SelectValue placeholder="Seleccionar técnico" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-card border-border">
+                            <SelectItem value="sin-tecnico">Sin técnico</SelectItem>
+                            {assignableUsers.map((person) => (
+                              <SelectItem key={person.id} value={person.id}>{`${person.nombre} ${person.apellido}`.trim()}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-2">
                         <Label className="text-foreground/80">Mes de inicio</Label>
@@ -1885,6 +1928,24 @@ export default function ContratosPage() {
                         </label>
                         <p className="text-xs text-muted-foreground mt-0.5">
                           Recalculará las fechas de los mantenimientos en estado &quot;pendiente&quot; según la nueva configuración.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-start gap-3 rounded-lg border border-cyan-neon/20 bg-cyan-neon/5 p-3">
+                      <input
+                        type="checkbox"
+                        id="aplicar-asignacion-futura"
+                        checked={editAplicarAsignacionFutura}
+                        onChange={(event) => setEditAplicarAsignacionFutura(event.target.checked)}
+                        className="mt-0.5 h-4 w-4 accent-cyan-neon"
+                      />
+                      <div>
+                        <label htmlFor="aplicar-asignacion-futura" className="text-sm font-medium text-foreground cursor-pointer">
+                          Aplicar grupo y técnico a mantenimientos futuros
+                        </label>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          Solo actualiza filas pendientes sin reporte, aprobación o liquidación. El historial ejecutado se conserva.
                         </p>
                       </div>
                     </div>

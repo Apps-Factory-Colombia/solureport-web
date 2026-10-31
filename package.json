@@ -32,7 +32,9 @@
     "react-dom": "19.2.3",
     "react-email": "^5.2.9",
     "resend": "^6.9.2",
-    "tailwind-merge": "^3.5.0"
+    "tailwind-merge": "^3.5.0",
+    "xlsx": "^0.18.5",
+    "xlsx-js-style": "^1.2.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",

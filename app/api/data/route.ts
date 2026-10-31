@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedUser, hashPassword, renewSession } from "@/lib/db/auth";
 import { dbQuery, isDatabaseCapacityError, withTransaction } from "@/lib/db/postgres";
-import { calculateLiquidationAmount, isLegacyAppliedValueCalculation } from "@/lib/utils/liquidation-math";
+import { calculateLiquidationAmount } from "@/lib/utils/liquidation-math";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -455,6 +455,12 @@ function mapContract(row: any, maintenanceRows: any[] = []): any {
     costoTotalAnual: number(row.costo_total_anual),
     cantidadMantenimientos: number(row.cantidad_mantenimientos),
     costoPorMantenimiento: number(row.costo_por_mantenimiento),
+    grupoId: maintenanceRows.find((item) => !["ejecutado", "completado", "cancelado"].includes(String(item.estado)))?.grupo_id
+      || maintenanceRows[0]?.grupo_id
+      || undefined,
+    tecnicoId: maintenanceRows.find((item) => !["ejecutado", "completado", "cancelado"].includes(String(item.estado)))?.tecnico_principal_id
+      || maintenanceRows[0]?.tecnico_principal_id
+      || undefined,
     mantenimientosRealizados: maintenanceRows.map((item) => {
       const scheduledDate = dateOnly(item.fecha_programada)
         || contractSchedule.find((expected) => expected.numero === number(item.numero))?.fechaProgramada
@@ -649,6 +655,7 @@ async function activityRows(payload: Payload = {}) {
           'participanteId', effective_liquidation.participante_id,
           'tecnicoId', effective_liquidation.tecnico_id,
           'estado', effective_liquidation.estado,
+          'porcentaje', effective_liquidation.porcentaje,
           'valorBase', effective_liquidation.valor_base,
           'valorGanado', effective_liquidation.valor_ganado,
           'valorGanadoOriginal', effective_liquidation.valor_ganado_original,
@@ -656,13 +663,13 @@ async function activityRows(payload: Payload = {}) {
           'porcentajeDescuentoTardanza', effective_liquidation.porcentaje_descuento_tardanza
         ) ORDER BY effective_liquidation.created_at)
         FROM (
-          SELECT s.id, s.participante_id, s.tecnico_id, s.estado, s.valor_base,
+           SELECT s.id, s.participante_id, s.tecnico_id, s.estado, s.porcentaje, s.valor_base,
                  s.valor_ganado, s.valor_ganado_original, s.descuento_tardanza,
                  s.porcentaje_descuento_tardanza, s.fecha_snapshot AS created_at
             FROM public.liquidacion_periodo_items s
            WHERE s.periodo_id = $${selectedPeriodParam} AND s.actividad_id = a.id
           UNION ALL
-          SELECT li.id, li.participante_id, li.tecnico_id, li.estado, li.valor_base,
+           SELECT li.id, li.participante_id, li.tecnico_id, li.estado, li.porcentaje, li.valor_base,
                  li.valor_ganado, li.valor_ganado_original, li.descuento_tardanza,
                  li.porcentaje_descuento_tardanza, li.created_at
             FROM public.liquidacion_items li
@@ -671,7 +678,7 @@ async function activityRows(payload: Payload = {}) {
         ) effective_liquidation), '[]'::json)`
       : `COALESCE((SELECT json_agg(json_build_object(
           'id', li.id, 'participanteId', li.participante_id, 'tecnicoId', li.tecnico_id,
-          'estado', li.estado, 'valorBase', li.valor_base, 'valorGanado', li.valor_ganado,
+           'estado', li.estado, 'porcentaje', li.porcentaje, 'valorBase', li.valor_base, 'valorGanado', li.valor_ganado,
           'valorGanadoOriginal', li.valor_ganado_original, 'descuentoTardanza', li.descuento_tardanza,
           'porcentajeDescuentoTardanza', li.porcentaje_descuento_tardanza
         ) ORDER BY li.created_at)
@@ -679,7 +686,7 @@ async function activityRows(payload: Payload = {}) {
        WHERE li.periodo_id = $${selectedPeriodParam} AND li.actividad_id = a.id), '[]'::json)`
     : `COALESCE((SELECT json_agg(json_build_object(
           'id', li.id, 'participanteId', li.participante_id, 'tecnicoId', li.tecnico_id,
-          'estado', li.estado, 'valorBase', li.valor_base, 'valorGanado', li.valor_ganado,
+           'estado', li.estado, 'porcentaje', li.porcentaje, 'valorBase', li.valor_base, 'valorGanado', li.valor_ganado,
           'valorGanadoOriginal', li.valor_ganado_original, 'descuentoTardanza', li.descuento_tardanza,
           'porcentajeDescuentoTardanza', li.porcentaje_descuento_tardanza
         ) ORDER BY li.created_at) FROM public.liquidacion_items li WHERE li.actividad_id = a.id), '[]'::json)`;
@@ -826,25 +833,34 @@ function mapReport(row: any, participant: any, index: number): any {
     || (participant?.id ? approvals.find((item) => !item.participanteId) : approvals[0]);
   const participantBase = number(participant?.valorBase, number(row.valor_base));
   const participantPercentage = number(participant?.porcentaje, 100);
-  const legacyAppliedAmount = number(row.valor_aplicado) * participantPercentage / 100;
-  const storedParticipantAmount = number(participant?.valorGanado, legacyAppliedAmount);
-  const normalizedParticipantAmount = !row.liquidacion_congelada && row.tipo !== "recorrido" && isLegacyAppliedValueCalculation({
-    storedAmount: storedParticipantAmount,
-    baseValue: participantBase,
-    appliedValue: number(row.valor_aplicado),
-    percentage: participantPercentage,
-  })
-    ? calculateLiquidationAmount(participantBase, participantPercentage)
-    : storedParticipantAmount;
+  const canonicalAppliedAmount = roundCurrency(number(row.valor_aplicado) * participantPercentage / 100);
+  const storedParticipantAmount = number(participant?.valorGanado, canonicalAppliedAmount);
+  const normalizedParticipantAmount = row.liquidacion_congelada
+    ? storedParticipantAmount
+    : canonicalAppliedAmount;
   // Older approved reports can exist without a corresponding liquidation row.
   // Keep them visible in the same approved-only source used by the mobile app;
   // the fallback is deterministic and does not create a duplicate database row.
-  const effectiveLiquidation = liquidation || (!row.liquidacion_congelada && approval?.estado === "aprobada"
+  const liquidationDiscountPercentage = number(liquidation?.porcentajeDescuentoTardanza);
+  const normalizedLiquidationNet = Math.max(
+    0,
+    normalizedParticipantAmount - calculateLiquidationAmount(normalizedParticipantAmount, liquidationDiscountPercentage),
+  );
+  const effectiveLiquidation = liquidation
+    ? {
+        ...liquidation,
+        porcentaje: participantPercentage,
+        valorBase: participantBase,
+        valorGanado: row.liquidacion_congelada ? number(liquidation.valorGanado) : normalizedLiquidationNet,
+        valorGanadoOriginal: row.liquidacion_congelada ? number(liquidation.valorGanadoOriginal) : normalizedParticipantAmount,
+      }
+    : (!row.liquidacion_congelada && approval?.estado === "aprobada"
     ? {
         id: `fallback:${row.id}:${participant?.id || "activity"}:${row.periodo_id || "period"}`,
         estado: "aprobado",
+        porcentaje: participantPercentage,
         valorBase: participantBase,
-        valorGanado: normalizedParticipantAmount,
+        valorGanado: normalizedLiquidationNet,
         valorGanadoOriginal: normalizedParticipantAmount,
         descuentoTardanza: 0,
         porcentajeDescuentoTardanza: 0,
@@ -914,7 +930,7 @@ function mapReport(row: any, participant: any, index: number): any {
     // A recorrido can have a real administrative value different from the
     // configured snapshot. Keep that fact in the API response so the web
     // does not replace it with the current default after a reload.
-    valorModificado: (row.tipo === "recorrido" && Math.abs(number(row.valor_aplicado) - number(row.valor_base)) > 0.01)
+    valorModificado: Math.abs(number(row.valor_aplicado) - number(row.valor_base)) > 0.01
       || (row.valor_sugerido != null && number(row.valor_sugerido) !== number(row.valor_base)),
     motivoModificacionValor: row.motivo_modificacion_valor || undefined,
     costoActividad: normalizedParticipantAmount,
@@ -1259,17 +1275,11 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
          WHERE snapshot_period.periodo_id = pl.id
            AND snapshot_period.actividad_id = a.id
       )` : ""}`;
-  const liveBaseValueSql = "COALESCE(li.valor_base, p.valor_base, a.valor_base, 0)";
-  const livePercentageSql = "COALESCE(li.porcentaje, p.porcentaje, 0)";
-  const liveStoredGrossSql = `COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * ${livePercentageSql} / 100)`;
-  const liveGrossSql = `CASE
-    WHEN a.tipo <> 'recorrido'
-      AND ${liveBaseValueSql} > 0
-      AND ABS(${liveBaseValueSql} - COALESCE(a.valor_aplicado, 0)) > 0.01
-      AND ABS(${liveStoredGrossSql} - (COALESCE(a.valor_aplicado, 0) * ${livePercentageSql} / 100)) <= 0.01
-    THEN ROUND(${liveBaseValueSql} * ${livePercentageSql} / 100, 2)
-    ELSE ${liveStoredGrossSql}
-  END`;
+  const liveBaseValueSql = "COALESCE(p.valor_base, li.valor_base, a.valor_base, 0)";
+  const livePercentageSql = "COALESCE(p.porcentaje, li.porcentaje, 0)";
+  // For an open period the applied activity value is canonical. Reading an old
+  // liquidation base here was the reason a saved 20,000 value returned to 15,000.
+  const liveGrossSql = `ROUND(COALESCE(a.valor_aplicado, 0) * ${livePercentageSql} / 100, 2)`;
   const values: unknown[] = [periodId];
   const scope = technicianIds && technicianIds.length > 0
     ? (() => {
@@ -1298,6 +1308,7 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
         p.tecnico_id,
         u.nombre,
         u.apellido,
+        u.cedula,
         u.email,
         u.rol,
         ${livePercentageSql} AS porcentaje,
@@ -1312,8 +1323,7 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
               COALESCE(li.porcentaje_descuento_tardanza, 0),
               COALESCE(attendance_discount.porcentaje, 0)
             ) / 100), 2)
-          WHEN ${liveGrossSql} <> ${liveStoredGrossSql} THEN ${liveGrossSql}
-          ELSE COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * ${livePercentageSql} / 100)
+          ELSE ${liveGrossSql}
         END AS valor_ganado,
         ${liveGrossSql} AS valor_ganado_original,
         CASE WHEN a.tipo <> 'recorrido' THEN ROUND(
@@ -1513,6 +1523,7 @@ async function getLiquidationSnapshotRows(periodId: string, technicianIds?: stri
           s.tecnico_id,
           u.nombre,
           u.apellido,
+          u.cedula,
           u.email,
           u.rol,
           s.porcentaje,
@@ -1574,28 +1585,18 @@ async function freezeLiquidationPeriod(periodId: string) {
     );
     const extraPercentage = Math.max(0, Math.min(100, number(configRows[0]?.porcentaje_extra_lider)));
     const extraActive = Boolean(configRows[0]?.extra_lider_activo);
-    const freezePercentageSql = "COALESCE(li.porcentaje, p.porcentaje, 0)";
-    const freezeBaseSql = "COALESCE(li.valor_base, p.valor_base, a.valor_base, 0)";
-    const freezeStoredGrossSql = `COALESCE(li.valor_ganado_original, p.valor_ganado, a.valor_aplicado * ${freezePercentageSql} / 100, 0)`;
-    const freezeGrossSql = `CASE
-      WHEN a.tipo <> 'recorrido'
-        AND ${freezeBaseSql} > 0
-        AND ABS(${freezeBaseSql} - COALESCE(a.valor_aplicado, 0)) > 0.01
-        AND ABS(${freezeStoredGrossSql} - (COALESCE(a.valor_aplicado, 0) * ${freezePercentageSql} / 100)) <= 0.01
-      THEN ROUND(${freezeBaseSql} * ${freezePercentageSql} / 100, 2)
-      ELSE ${freezeStoredGrossSql}
-    END`;
+    const freezePercentageSql = "COALESCE(p.porcentaje, li.porcentaje, 0)";
+    const freezeBaseSql = "COALESCE(p.valor_base, li.valor_base, a.valor_base, 0)";
+    const freezeGrossSql = `ROUND(COALESCE(a.valor_aplicado, 0) * ${freezePercentageSql} / 100, 2)`;
     const freezeDiscountPercentageSql = "COALESCE(li.porcentaje_descuento_tardanza, 0)";
     const freezeNetSql = `CASE
       WHEN a.tipo <> 'recorrido' AND ${freezeDiscountPercentageSql} > 0
         THEN ROUND(${freezeGrossSql} * (1 - ${freezeDiscountPercentageSql} / 100), 2)
-      WHEN ${freezeGrossSql} <> ${freezeStoredGrossSql} THEN ${freezeGrossSql}
-      ELSE COALESCE(li.valor_ganado, p.valor_ganado, a.valor_aplicado * ${freezePercentageSql} / 100, 0)
+      ELSE ${freezeGrossSql}
     END`;
     const freezeDiscountSql = `CASE
       WHEN a.tipo <> 'recorrido' AND ${freezeDiscountPercentageSql} > 0
         THEN ROUND(${freezeGrossSql} * ${freezeDiscountPercentageSql} / 100, 2)
-      WHEN ${freezeGrossSql} <> ${freezeStoredGrossSql} THEN 0
       ELSE COALESCE(li.descuento_tardanza, 0)
     END`;
 
@@ -1723,6 +1724,7 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     const current = grouped.get(row.tecnico_id) || {
       tecnicoId: row.tecnico_id,
       nombre: `${row.nombre || ""} ${row.apellido || ""}`.trim(),
+      cedula: row.cedula || "",
       email: row.email || "",
       rol: row.rol,
       esLider: false,
@@ -1799,13 +1801,14 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     const missingLeaderIds = extraLeaderIds.filter((leaderId) => !grouped.has(leaderId));
     if (missingLeaderIds.length > 0) {
       const { rows: leaderRows } = await dbQuery(
-        "SELECT id, nombre, apellido, email, rol FROM public.usuarios WHERE id = ANY($1::uuid[])",
+        "SELECT id, nombre, apellido, cedula, email, rol FROM public.usuarios WHERE id = ANY($1::uuid[])",
         [missingLeaderIds],
       );
       for (const leader of leaderRows) {
         grouped.set(leader.id, {
           tecnicoId: leader.id,
           nombre: `${leader.nombre || ""} ${leader.apellido || ""}`.trim(),
+          cedula: leader.cedula || "",
           email: leader.email || "",
           rol: leader.rol,
           esLider: true,
@@ -1856,6 +1859,7 @@ async function canonicalLiquidationSummary(payload: Payload, user: UserContext, 
     return {
       tecnicoId: row.tecnicoId,
       nombre: row.nombre,
+      cedula: row.cedula || "",
       email: row.email,
       rol: row.rol,
       esLider: Boolean(row.esLider),
@@ -2559,6 +2563,14 @@ function maintenanceVisibleToUserPredicate(userParam: string, maintenanceAlias =
   return `(
     ${maintenanceAlias}.tecnico_principal_id = ${userParam}
     OR ${groupAlias}.lider_id = ${userParam}
+    OR EXISTS (
+      SELECT 1
+        FROM public.grupo_miembros gm_visibility
+       WHERE gm_visibility.grupo_id = ${maintenanceAlias}.grupo_id
+         AND gm_visibility.usuario_id = ${userParam}
+         AND gm_visibility.fecha_inicio <= ${BOGOTA_DATE_SQL}
+         AND (gm_visibility.fecha_fin IS NULL OR gm_visibility.fecha_fin >= ${BOGOTA_DATE_SQL})
+    )
     OR EXISTS (
       SELECT 1
         FROM public.mantenimientos_programados_participantes mp_visibility
@@ -4216,14 +4228,48 @@ function uniqueIds(values: string[]): string[] {
 }
 
 async function replaceGroupMembers(client: any, groupId: string, memberIds: string[], reporterIds: string[]) {
-  await client.query("DELETE FROM public.grupo_miembros WHERE grupo_id = $1", [groupId]);
-  await client.query("DELETE FROM public.grupo_reportadores_actividad WHERE grupo_id = $1", [groupId]);
-  for (const id of uniqueIds(memberIds)) {
-    await client.query(`INSERT INTO public.grupo_miembros (grupo_id, usuario_id, fecha_inicio) VALUES ($1,$2,${BOGOTA_DATE_SQL})`, [groupId, id]);
-  }
-  for (const id of uniqueIds(reporterIds)) {
-    await client.query(`INSERT INTO public.grupo_reportadores_actividad (grupo_id, usuario_id, fecha_inicio) VALUES ($1,$2,${BOGOTA_DATE_SQL})`, [groupId, id]);
-  }
+  // Close only memberships that are no longer selected. Deleting and
+  // recreating every row made historical assignment dates disappear and
+  // caused mobile visibility to change for already scheduled work.
+  const syncMemberships = async (table: string, ids: string[]) => {
+    const desired = uniqueIds(ids);
+    const { rows: activeRows } = await client.query(
+      `SELECT usuario_id FROM public.${table}
+        WHERE grupo_id = $1
+          AND fecha_inicio <= ${BOGOTA_DATE_SQL}
+          AND (fecha_fin IS NULL OR fecha_fin >= ${BOGOTA_DATE_SQL})`,
+      [groupId],
+    );
+    const desiredSet = new Set(desired);
+    for (const row of activeRows) {
+      if (!desiredSet.has(String(row.usuario_id))) {
+        await client.query(
+          `UPDATE public.${table}
+              SET fecha_fin = (${BOGOTA_DATE_SQL} - INTERVAL '1 day')::date
+            WHERE grupo_id = $1 AND usuario_id = $2
+              AND fecha_inicio <= ${BOGOTA_DATE_SQL}
+              AND (fecha_fin IS NULL OR fecha_fin >= ${BOGOTA_DATE_SQL})`,
+          [groupId, row.usuario_id],
+        );
+      }
+    }
+    for (const id of desired) {
+      await client.query(
+        `INSERT INTO public.${table} (grupo_id, usuario_id, fecha_inicio)
+         SELECT $1, $2, ${BOGOTA_DATE_SQL}
+          WHERE NOT EXISTS (
+            SELECT 1 FROM public.${table}
+             WHERE grupo_id = $1 AND usuario_id = $2
+               AND fecha_inicio <= ${BOGOTA_DATE_SQL}
+               AND (fecha_fin IS NULL OR fecha_fin >= ${BOGOTA_DATE_SQL})
+          )`,
+        [groupId, id],
+      );
+    }
+  };
+
+  await syncMemberships("grupo_miembros", memberIds);
+  await syncMemberships("grupo_reportadores_actividad", reporterIds);
 }
 
 function configDefaults(): any {
@@ -4484,6 +4530,8 @@ async function upsertContractMaintenance(client: any, contractId: string, contra
   const fechaProgramada = dateOnly(item.fechaProgramada);
   if (!fechaProgramada) throw new Error(`El mantenimiento ${index + 1} requiere una fecha programada válida.`);
   const desiredState = item.estado === "realizado" ? "ejecutado" : item.estado || "pendiente";
+  const assignmentGroupId = item.grupoId ?? contract.grupoId ?? null;
+  const assignmentTechnicianId = item.tecnicoId ?? contract.tecnicoId ?? null;
   const result = await client.query(
     `INSERT INTO public.mantenimientos_programados
       (contrato_id, cliente_id, sede_id, numero, fecha_programada, hora_programada,
@@ -4518,8 +4566,8 @@ async function upsertContractMaintenance(client: any, contractId: string, contra
       numero,
       fechaProgramada,
       item.horaProgramada || null,
-      item.grupoId || null,
-      item.tecnicoId || null,
+      assignmentGroupId,
+      assignmentTechnicianId,
       nonNegativeMoney(item.costoTecnicoTotal ?? contract.costoPorMantenimiento, "El costo técnico"),
       desiredState,
       item.observaciones || null,
@@ -4543,12 +4591,12 @@ async function insertContractMaintenances(client: any, contractId: string, paylo
     if (numbers.has(numero)) throw new Error("El cronograma contiene dos mantenimientos con el mismo número.");
     numbers.add(numero);
     const maintenance = await upsertContractMaintenance(client, contractId, payload, item, index);
-    if (item.participantes !== undefined || item.tecnicoId) {
+    if (item.participantes !== undefined || item.tecnicoId || payload.participantes !== undefined || payload.tecnicoId) {
       await replaceMaintenanceParticipants(client, maintenance.id, {
         ...item,
-        tecnicoId: item.tecnicoId || undefined,
+        tecnicoId: item.tecnicoId || payload.tecnicoId || undefined,
         costoTecnicoTotal: number(item.costoTecnicoTotal || payload.costoPorMantenimiento),
-        participantes: item.participantes,
+        participantes: item.participantes ?? payload.participantes,
       }, undefined);
     }
   }
@@ -4632,8 +4680,12 @@ async function reconcileContractSchedule(client: any, contractId: string, contra
     );
     if (!existing) {
       const inserted = await upsertContractMaintenance(client, contractId, contract, item, index);
-      if (item.participantes !== undefined || item.tecnicoId) {
-        await replaceMaintenanceParticipants(client, inserted.id, { ...item, participantes: item.participantes }, undefined);
+      if (item.participantes !== undefined || item.tecnicoId || contract.participantes !== undefined || contract.tecnicoId) {
+        await replaceMaintenanceParticipants(client, inserted.id, {
+          ...item,
+          tecnicoId: item.tecnicoId || contract.tecnicoId || undefined,
+          participantes: item.participantes ?? contract.participantes,
+        }, undefined);
       }
       created += 1;
       continue;
@@ -4650,8 +4702,12 @@ async function reconcileContractSchedule(client: any, contractId: string, contra
         WHERE id = $1`,
       [existing.id, dateOnly(item.fechaProgramada), item.horaProgramada || null],
     );
-    if (item.participantes !== undefined || item.tecnicoId) {
-      await replaceMaintenanceParticipants(client, existing.id, { ...item, participantes: item.participantes }, undefined);
+    if (item.participantes !== undefined || item.tecnicoId || contract.participantes !== undefined || contract.tecnicoId) {
+      await replaceMaintenanceParticipants(client, existing.id, {
+        ...item,
+        tecnicoId: item.tecnicoId || contract.tecnicoId || undefined,
+        participantes: item.participantes ?? contract.participantes,
+      }, undefined);
     }
     updated += 1;
   }
@@ -4671,6 +4727,56 @@ async function reconcileContractSchedule(client: any, contractId: string, contra
   }
 
   return { created, updated, preserved, cancelled };
+}
+
+async function applyFutureContractAssignment(client: any, contractId: string, payload: Payload) {
+  const hasGroup = payload.grupoId !== undefined;
+  const hasTechnician = payload.tecnicoId !== undefined;
+  const hasParticipants = payload.participantes !== undefined;
+  if (!hasGroup && !hasTechnician && !hasParticipants) return { updated: 0, preserved: 0 };
+
+  const { rows } = await client.query(
+    `SELECT m.*
+       FROM public.mantenimientos_programados m
+      WHERE m.contrato_id = $1
+        AND m.estado NOT IN ('ejecutado', 'completado', 'cancelado')
+        AND m.fecha_realizado IS NULL
+        AND COALESCE(m.valor_recaudado, 0) = 0
+        AND NOT EXISTS (
+          SELECT 1 FROM public.actividades_operativas_mantenimientos am
+           WHERE am.mantenimiento_programado_id = m.id
+        )
+      ORDER BY m.numero
+      FOR UPDATE`,
+    [contractId],
+  );
+
+  for (const maintenance of rows) {
+    await client.query(
+      `UPDATE public.mantenimientos_programados
+          SET grupo_id = CASE WHEN $2::boolean THEN $3 ELSE grupo_id END,
+              tecnico_principal_id = CASE WHEN $4::boolean THEN $5 ELSE tecnico_principal_id END,
+              updated_at = clock_timestamp()
+        WHERE id = $1`,
+      [
+        maintenance.id,
+        hasGroup,
+        normalizeOptionalId(payload.grupoId),
+        hasTechnician,
+        normalizeOptionalId(payload.tecnicoId),
+      ],
+    );
+
+    if (hasParticipants || hasTechnician) {
+      await replaceMaintenanceParticipants(client, maintenance.id, {
+        tecnicoId: hasTechnician ? payload.tecnicoId : maintenance.tecnico_principal_id,
+        participantes: hasParticipants ? payload.participantes : undefined,
+        costoTecnicoTotal: number(maintenance.costo_tecnico_presupuestado),
+      }, undefined);
+    }
+  }
+
+  return { updated: rows.length, preserved: 0 };
 }
 
 async function updateContract(payload: Payload, user: UserContext) {
@@ -4698,6 +4804,11 @@ async function updateContract(payload: Payload, user: UserContext) {
       ["diaInicio", current.dia_inicio, merged.diaInicio],
       ["cantidadMantenimientos", current.cantidad_mantenimientos, merged.cantidadMantenimientos],
     ].some(([, previous, next]) => Number(previous) !== Number(next));
+    const hasFutureAssignment = payload.aplicarAsignacionFutura !== false && (
+      payload.grupoId !== undefined
+      || payload.tecnicoId !== undefined
+      || payload.participantes !== undefined
+    );
     const updateResult = await client.query(
       `UPDATE public.contratos_mantenimiento
           SET cliente_id=$2, anio=$3, mes_inicio=$4, dia_inicio=$5,
@@ -4713,8 +4824,24 @@ async function updateContract(payload: Payload, user: UserContext) {
     const updatedContract = updateResult.rows[0];
     let scheduleResult = { created: 0, updated: 0, preserved: 0, cancelled: 0 };
     if (payload.regenerarMantenimientos || scheduleChanged) {
-      scheduleResult = await reconcileContractSchedule(client, payload.id, { ...merged, ...totals, costoPorMantenimiento: totals.perMaintenance }, payload);
+      const assignmentPayload = payload.aplicarAsignacionFutura === false
+        ? {}
+        : {
+            grupoId: payload.grupoId,
+            tecnicoId: payload.tecnicoId,
+            participantes: payload.participantes,
+          };
+      scheduleResult = await reconcileContractSchedule(client, payload.id, {
+        ...merged,
+        ...totals,
+        costoPorMantenimiento: totals.perMaintenance,
+        ...assignmentPayload,
+      }, payload);
       await client.query("UPDATE public.contratos_mantenimiento SET cronograma_version = cronograma_version + 1, updated_at = clock_timestamp() WHERE id = $1", [payload.id]);
+    }
+    if (hasFutureAssignment) {
+      const assignmentResult = await applyFutureContractAssignment(client, payload.id, payload);
+      scheduleResult = { ...scheduleResult, updated: scheduleResult.updated + assignmentResult.updated };
     }
     await writeAudit(client, user.id, "contrato_mantenimiento", payload.id, "actualizar", current, { ...updatedContract, cronograma: scheduleResult });
     return { scheduleResult };
@@ -5236,7 +5363,7 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
 
 async function syncActivityParticipantValue(client: any, activityId: string, participantId: string, amount: number, percentage?: number) {
   const { rows: participantRows } = await client.query(
-    `SELECT id, porcentaje
+      `SELECT id, porcentaje, valor_base
        FROM public.actividades_operativas_participantes
       WHERE actividad_id = $1 AND id = $2
       FOR UPDATE`,
@@ -5248,6 +5375,7 @@ async function syncActivityParticipantValue(client: any, activityId: string, par
   const normalizedPercentage = percentage == null
     ? number(participantRows[0].porcentaje)
     : Math.max(0, Math.min(100, number(percentage)));
+  const normalizedBase = Math.max(0, number(participantRows[0].valor_base));
 
   await client.query(
     `UPDATE public.actividades_operativas_participantes
@@ -5259,7 +5387,7 @@ async function syncActivityParticipantValue(client: any, activityId: string, par
   );
 
   const { rows: liquidationRows } = await client.query(
-    `SELECT id, tipo, porcentaje_descuento_tardanza
+      `SELECT id, tipo, porcentaje, valor_base, porcentaje_descuento_tardanza
        FROM public.liquidacion_items
       WHERE actividad_id = $1 AND participante_id = $2
         AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')
@@ -5276,12 +5404,14 @@ async function syncActivityParticipantValue(client: any, activityId: string, par
 
     await client.query(
       `UPDATE public.liquidacion_items
-          SET valor_ganado_original = $2,
-              valor_ganado = $3,
-              descuento_tardanza = $4,
+          SET porcentaje = $2,
+              valor_base = $3,
+              valor_ganado_original = $4,
+              valor_ganado = $5,
+              descuento_tardanza = $6,
               updated_at = clock_timestamp()
         WHERE id = $1`,
-      [liquidation.id, normalizedAmount, earnedValue, discountValue],
+      [liquidation.id, normalizedPercentage, normalizedBase, normalizedAmount, earnedValue, discountValue],
     );
   }
 
@@ -5359,21 +5489,36 @@ async function updateActivityValues(payload: Payload) {
     if (!hasTechnicalValue || technicalValue == null) return true;
 
     const normalizedTechnicalValue = Math.max(0, roundCurrency(technicalValue));
+    const { rows: participants } = await client.query(
+      `SELECT id, porcentaje
+         FROM public.actividades_operativas_participantes
+        WHERE actividad_id = $1
+        ORDER BY created_at, id
+        FOR UPDATE`,
+      [id],
+    );
+
     if (sharedParticipants.length > 0) {
+      const participantIds = new Set(participants.map((participant: any) => String(participant.id)));
+      const overrideIds = new Set(sharedParticipants.map((participant) => String(participant.participantId)));
+      const totalPercentage = sharedParticipants.reduce((sum, participant) => sum + number(participant.percentage), 0);
+      const totalAmount = sharedParticipants.reduce((sum, participant) => sum + Math.max(0, roundCurrency(number(participant.amount))), 0);
+
+      if (overrideIds.size !== participants.length || participants.some((participant: any) => !overrideIds.has(String(participant.id)) || !participantIds.has(String(participant.id)))) {
+        throw new Error("El reparto recibido no contiene exactamente todos los participantes de la actividad.");
+      }
+      if (Math.abs(totalPercentage - 100) > 0.01 || Math.abs(totalAmount - normalizedTechnicalValue) > 0.01) {
+        throw new Error("El reparto recibido no coincide con el 100% y el valor aplicado de la actividad.");
+      }
+
       for (const participant of sharedParticipants) {
         await syncActivityParticipantValue(client, id, participant.participantId!, participant.amount, participant.percentage);
       }
     } else {
-      const { rows: participants } = await client.query(
-        `SELECT id, porcentaje
-           FROM public.actividades_operativas_participantes
-          WHERE actividad_id = $1
-          ORDER BY created_at, id
-          FOR UPDATE`,
-        [id],
-      );
-
       if (directParticipantId) {
+        if (!participants.some((participant: any) => String(participant.id) === directParticipantId)) {
+          throw new Error("El participante indicado no pertenece a la actividad.");
+        }
         await syncActivityParticipantValue(client, id, directParticipantId, normalizedTechnicalValue);
       } else if (participants.length === 1) {
         await syncActivityParticipantValue(client, id, participants[0].id, normalizedTechnicalValue);
@@ -5388,6 +5533,27 @@ async function updateActivityValues(payload: Payload) {
           await syncActivityParticipantValue(client, id, participants[index].id, amount, participantPercentage);
         }
       }
+    }
+
+    // Keep every live liquidation row for this activity aligned with the
+    // participant values just persisted. This also repairs an existing row
+    // that was left behind by an earlier partial save.
+    const { rows: participantsToSync } = await client.query(
+      `SELECT id, porcentaje, valor_ganado
+         FROM public.actividades_operativas_participantes
+        WHERE actividad_id = $1
+        ORDER BY created_at, id
+        FOR UPDATE`,
+      [id],
+    );
+    for (const participant of participantsToSync) {
+      await syncActivityParticipantValue(
+        client,
+        id,
+        participant.id,
+        number(participant.valor_ganado),
+        number(participant.porcentaje),
+      );
     }
 
     return true;

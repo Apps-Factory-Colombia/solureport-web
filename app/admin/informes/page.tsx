@@ -366,6 +366,16 @@ function isSharedVisit(report: ActivityReport) {
     && participationPercentage < 100;
 }
 
+function isVisualRecorrido(report: ActivityReport) {
+  return report.tipo === "recorrido" || report.tipo === "visita_tecnica";
+}
+
+function getVisualReportDescription(report: ActivityReport) {
+  return report.tipo === "visita_tecnica"
+    ? `Recorrido vista: ${report.descripcion}`
+    : report.descripcion;
+}
+
 function getSharedVisitUiIdentity(report: ActivityReport) {
   return [
     report.fecha,
@@ -585,6 +595,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   }
 
   if (isSharedVisit(report)) {
+    if (report.visitaTecnicaId) {
+      return `shared-visit-visual:${report.visitaTecnicaId}`;
+    }
+
     if (report.codigoRegistro) {
       return `shared-visit-visual:${report.codigoRegistro}`;
     }
@@ -640,6 +654,10 @@ function getSharedVisitIdentity(report: ActivityReport) {
   }
 
   if (!isSharedVisit(report)) return report.id;
+
+  if (report.visitaTecnicaId) {
+    return `shared-visit:${report.visitaTecnicaId}`;
+  }
 
   if (report.codigoRegistro) {
     return `shared-visit:${report.codigoRegistro}`;
@@ -1195,11 +1213,11 @@ export default function InformesPage() {
     [viewScopedReports]
   );
   const visitas = useMemo(
-    () => viewScopedReports.filter((r) => r.tipo === "visita_tecnica"),
+    () => viewScopedReports.filter((r) => r.tipo === "visita_tecnica" && !isVisualRecorrido(r)),
     [viewScopedReports]
   );
   const recorridos = useMemo(
-    () => viewScopedReports.filter((r) => r.tipo === "recorrido"),
+    () => viewScopedReports.filter((r) => isVisualRecorrido(r)),
     [viewScopedReports]
   );
   const grupales = useMemo(
@@ -1337,7 +1355,25 @@ export default function InformesPage() {
   );
 
   const persistTechnicalCost = useCallback(async (report: ActivityReport, nextCost: number) => {
-    await updateCostoActividadAdmin(report.id, nextCost, { visitId: report.visitaTecnicaId });
+    const sharedParticipants = isSharedVisit(report)
+      ? getSharedReportsForReport(report).map((participant) => {
+        const percentage = getVisitParticipationPercentage(participant);
+        return {
+          reportId: participant.id,
+          tecnicoId: participant.tecnicoId,
+          percentage,
+          amount: Math.round((nextCost * percentage) / 100),
+          periodoId: participant.periodoId,
+          visitId: participant.visitaTecnicaId,
+          defaultCost: getSharedVisitBaseValue(participant),
+        };
+      })
+      : undefined;
+
+    await updateCostoActividadAdmin(report.id, nextCost, {
+      visitId: report.visitaTecnicaId,
+      sharedVisitParticipants: sharedParticipants,
+    });
 
     if (isSharedVisit(report)) {
       const sharedKey = getSharedVisitIdentity(report);
@@ -1376,12 +1412,20 @@ export default function InformesPage() {
       setReports((current) => current.map((item) => item.id === report.id ? {
         ...item,
         costoActividad: nextCost,
-        valorModificado: item.tipo === "recorrido" ? nextCost !== getConfiguredRecorridoCost(item) : item.valorModificado,
+        valorModificado: item.tipo === "recorrido"
+          ? nextCost !== getConfiguredRecorridoCost(item)
+          : item.tipo === "visita_tecnica"
+            ? nextCost !== (item.valorActividadBaseGlobal ?? getEffectiveTechnicalCost(item))
+            : item.valorModificado,
       } : item));
       setSelectedReport((current) => current && current.id === report.id ? {
         ...current,
         costoActividad: nextCost,
-        valorModificado: current.tipo === "recorrido" ? nextCost !== getConfiguredRecorridoCost(current) : current.valorModificado,
+        valorModificado: current.tipo === "recorrido"
+          ? nextCost !== getConfiguredRecorridoCost(current)
+          : current.tipo === "visita_tecnica"
+            ? nextCost !== (current.valorActividadBaseGlobal ?? getEffectiveTechnicalCost(current))
+            : current.valorModificado,
       } : current);
     }
 
@@ -1392,13 +1436,22 @@ export default function InformesPage() {
       delete next[draftKey];
       return next;
     });
-  }, [getConfiguredRecorridoCost, getSharedVisitBaseValue, getTechnicalCostDraftKey, getVisitParticipationPercentage]);
+  }, [getConfiguredRecorridoCost, getSharedReportsForReport, getSharedVisitBaseValue, getTechnicalCostDraftKey, getVisitParticipationPercentage]);
 
   const persistVisitClientCost = useCallback(async (report: ActivityReport, nextCost: number | null) => {
     await updateCostoClienteVisitaAdmin(report.id, nextCost, report.visitaTecnicaId);
     const persistedCost = nextCost ?? 0;
-    setReports((current) => current.map((item) => item.id === report.id ? { ...item, costoCliente: persistedCost } : item));
-    setSelectedReport((current) => current && current.id === report.id ? { ...current, costoCliente: persistedCost } : current);
+    setReports((current) => current.map((item) => {
+      const isSameVisit = item.id === report.id
+        || (!!report.visitaTecnicaId && item.visitaTecnicaId === report.visitaTecnicaId);
+      return isSameVisit ? { ...item, costoCliente: persistedCost } : item;
+    }));
+    setSelectedReport((current) => {
+      if (!current) return current;
+      const isSameVisit = current.id === report.id
+        || (!!report.visitaTecnicaId && current.visitaTecnicaId === report.visitaTecnicaId);
+      return isSameVisit ? { ...current, costoCliente: persistedCost } : current;
+    });
     setInlineClientCostDrafts((current) => {
       if (!(report.id in current)) return current;
       const next = { ...current };
@@ -3408,11 +3461,13 @@ export default function InformesPage() {
                 Mant. Preventivo
                 <Badge className="ml-1.5 bg-blue-500/20 text-blue-400 text-[10px] border-0 px-1.5">{groupedPreventivosCount}</Badge>
               </TabsTrigger>
-              <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-                <ClipboardCheck className="h-4 w-4 mr-2" />
-                Visitas Técnicas
-                <Badge className="ml-1.5 bg-cyan-neon/20 text-cyan-neon text-[10px] border-0 px-1.5">{groupedVisitasCount}</Badge>
-              </TabsTrigger>
+              {groupedVisitasCount > 0 && (
+                <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                  <ClipboardCheck className="h-4 w-4 mr-2" />
+                  Visitas Técnicas
+                  <Badge className="ml-1.5 bg-cyan-neon/20 text-cyan-neon text-[10px] border-0 px-1.5">{groupedVisitasCount}</Badge>
+                </TabsTrigger>
+              )}
               <TabsTrigger value="recorridos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
                 <Route className="h-4 w-4 mr-2" />
                 Recorridos
@@ -3577,8 +3632,9 @@ export default function InformesPage() {
               </Card>
             </TabsContent>
 
-            <TabsContent value="visitas">
-              <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
+            {groupedVisitasCount > 0 && (
+              <TabsContent value="visitas">
+                <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
                 <CardHeader>
                   <CardTitle className="text-lg text-foreground flex items-center gap-2">
                     <ClipboardCheck className="h-5 w-5 text-cyan-neon" />
@@ -3780,8 +3836,9 @@ export default function InformesPage() {
                   </Table>
                   {renderTablePagination("visitas", paginatedVisitas.currentPage, paginatedVisitas.totalPages)}
                 </CardContent>
-              </Card>
-            </TabsContent>
+                </Card>
+              </TabsContent>
+            )}
 
             <TabsContent value="recorridos">
               <Card className="border-border/50 bg-card/80 backdrop-blur-sm">
@@ -3791,7 +3848,7 @@ export default function InformesPage() {
                     Informes de Recorridos
                   </CardTitle>
                   <p className="text-sm text-muted-foreground">
-                    Recorridos reportados desde el aplicativo. Incluyen punto de partida, punto de llegada, modalidad (normal o con herramienta) y foto obligatoria de herramienta cuando aplica.
+                    Recorridos y visitas técnicas reportados desde el aplicativo. Las visitas conservan su tipo original y se muestran aquí como recorridos vista.
                   </p>
                 </CardHeader>
                 <CardContent className="p-0">
@@ -3801,8 +3858,8 @@ export default function InformesPage() {
                         <TableHead className="text-muted-foreground">Técnico</TableHead>
                         <TableHead className="text-muted-foreground">Fecha</TableHead>
                         <TableHead className="text-muted-foreground">Registro</TableHead>
-                        <TableHead className="text-muted-foreground">Partida</TableHead>
-                        <TableHead className="text-muted-foreground">Llegada</TableHead>
+                         <TableHead className="text-muted-foreground">Partida / Descripción</TableHead>
+                         <TableHead className="text-muted-foreground">Llegada</TableHead>
                         <TableHead className="text-muted-foreground">Modalidad</TableHead>
                         <TableHead className="text-muted-foreground">Herramienta</TableHead>
                         <TableHead className="text-muted-foreground">Aprobación</TableHead>
@@ -3813,7 +3870,8 @@ export default function InformesPage() {
                     </TableHeader>
                     <TableBody>
                       {paginatedRecorridos.items.map((r) => {
-                        const tech = usersById.get(r.tecnicoId);
+                         const tech = usersById.get(r.tecnicoId);
+                         const isTechnicalVisit = r.tipo === "visita_tecnica";
                         const inlineTechnicalCostValue = getInlineTechnicalCostValue(r);
                         const normalizedCurrentTechnicalCost = getEffectiveTechnicalCost(r);
                         const normalizedDraftTechnicalCost = inlineTechnicalCostValue.trim() ? Number(inlineTechnicalCostValue) : 0;
@@ -3828,14 +3886,19 @@ export default function InformesPage() {
                             <TableCell className="max-w-44 text-xs text-foreground/80 break-all">{getReportRegistrationCode(r)}</TableCell>
                             <TableCell>
                               <div className="flex items-center gap-1.5 max-w-40">
-                                <MapPin className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-                                <span className="text-xs text-foreground/80 truncate">{r.puntoPartida}</span>
+                                 <MapPin className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                                 <span className="text-xs text-foreground/80 truncate">{isTechnicalVisit ? getVisualReportDescription(r) : r.puntoPartida}</span>
                               </div>
+                              {isTechnicalVisit && (
+                                <Badge variant="outline" className="mt-1 text-[10px] border-cyan-400/40 bg-cyan-400/10 text-cyan-300">
+                                  Recorrido vista
+                                </Badge>
+                              )}
                             </TableCell>
                             <TableCell>
                               <div className="flex items-center gap-1.5 max-w-40">
-                                <MapPin className="h-3.5 w-3.5 text-gold shrink-0" />
-                                <span className="text-xs text-foreground/80 truncate">{r.puntoLlegada}</span>
+                                 <MapPin className="h-3.5 w-3.5 text-gold shrink-0" />
+                                 <span className="text-xs text-foreground/80 truncate">{isTechnicalVisit ? "Visita técnica" : r.puntoLlegada}</span>
                               </div>
                             </TableCell>
                             <TableCell>
@@ -3843,12 +3906,14 @@ export default function InformesPage() {
                                 variant="outline"
                                 className={cn(
                                   "text-[10px]",
-                                  r.tipoRecorrido === "con_herramienta"
+                                   r.tipoRecorrido === "con_herramienta"
                                     ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
                                     : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
                                 )}
                               >
-                                {r.tipoRecorrido === "con_herramienta" ? (
+                                {isTechnicalVisit ? (
+                                  <><Route className="h-3 w-3 mr-0.5" />Visita técnica</>
+                                ) : r.tipoRecorrido === "con_herramienta" ? (
                                   <><Package className="h-3 w-3 mr-0.5" />Con Herram.</>
                                 ) : (
                                   <><Route className="h-3 w-3 mr-0.5" />Normal</>
@@ -4117,7 +4182,7 @@ export default function InformesPage() {
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                       <div className="rounded-lg border border-border/50 bg-background/40 p-3">
                         <p className="text-xs text-muted-foreground">Actividad</p>
-                        <p className="text-sm font-medium text-foreground">{selectedReport.descripcion}</p>
+                        <p className="text-sm font-medium text-foreground">{getVisualReportDescription(selectedReport)}</p>
                       </div>
                       <div className="rounded-lg border border-border/50 bg-background/40 p-3">
                         <p className="text-xs text-muted-foreground">Participantes</p>
@@ -4354,7 +4419,7 @@ export default function InformesPage() {
 
                 {!isConsolidatedMaintenance && <div className="rounded-lg border border-border/50 bg-secondary/20 p-4 space-y-2">
                   <p className="text-xs text-muted-foreground">Descripción</p>
-                  <p className="text-sm text-foreground">{activeDetailReport.descripcion || "—"}</p>
+                  <p className="text-sm text-foreground">{getVisualReportDescription(activeDetailReport) || "—"}</p>
                 </div>}
 
                 {!isConsolidatedMaintenance && getReportServiceDetail(activeDetailReport) && (

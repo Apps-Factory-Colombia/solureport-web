@@ -4,6 +4,7 @@ import { dataRequest } from "../client";
 export type CanonicalLiquidationTechnician = {
   tecnicoId: string;
   nombre: string;
+  cedula: string;
   email: string;
   rol: string;
   esLider: boolean;
@@ -36,7 +37,7 @@ export type CanonicalLiquidationSummary = {
   congelado: boolean;
   congeladoEn?: string | null;
   generatedAt: string;
-  totals: Omit<CanonicalLiquidationTechnician, "tecnicoId" | "nombre" | "email" | "rol" | "esLider" | "tecnicosExcluidosExtraIds">;
+  totals: Omit<CanonicalLiquidationTechnician, "tecnicoId" | "nombre" | "cedula" | "email" | "rol" | "esLider" | "tecnicosExcluidosExtraIds">;
   technicians: CanonicalLiquidationTechnician[];
 };
 

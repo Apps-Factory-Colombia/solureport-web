@@ -202,6 +202,9 @@ export interface MaintenanceContract {
   costoTotalAnual: number;
   cantidadMantenimientos: number;
   costoPorMantenimiento: number;
+  /** Asignación predeterminada para las filas futuras del cronograma. */
+  grupoId?: string;
+  tecnicoId?: string;
   mantenimientosRealizados: MantenimientoContrato[];
   estado: "activo" | "cerrado";
   fechaCreacion: string;

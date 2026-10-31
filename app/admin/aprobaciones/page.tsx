@@ -219,8 +219,24 @@ function isSharedVisit(report: ActivityReport) {
     && participationPercentage < 100;
 }
 
+function isVisualRecorrido(report: ActivityReport) {
+  return report.tipo === "recorrido" || report.tipo === "visita_tecnica";
+}
+
+function getVisualReportDescription(report: ActivityReport) {
+  return report.tipo === "visita_tecnica"
+    ? `Recorrido vista: ${report.descripcion}`
+    : report.descripcion;
+}
+
 function getSharedVisitUiIdentity(report: ActivityReport) {
+  // Participant rows from the same technical visit share this identifier.
+  // Keep it in the grouping key so two different visits with similar text on
+  // the same day are never normalized as one shared activity.
+  const stableVisitIdentity = report.visitaTecnicaId || report.codigoRegistro || report.id;
+
   return [
+    stableVisitIdentity,
     report.fecha,
     report.grupoId || "sin-grupo",
     report.clienteId || "sin-cliente",
@@ -351,6 +367,10 @@ function getVisualActivityIdentity(report: ActivityReport) {
   }
 
   if (isSharedVisit(report)) {
+    if (report.visitaTecnicaId) {
+      return `shared-visit-visual:${report.visitaTecnicaId}`;
+    }
+
     if (report.codigoRegistro) {
       return `shared-visit-visual:${report.codigoRegistro}`;
     }
@@ -394,6 +414,10 @@ function getSharedPricingIdentity(report: ActivityReport) {
   }
 
   if (isSharedVisit(report)) {
+    if (report.visitaTecnicaId) {
+      return `shared-visit:${report.visitaTecnicaId}`;
+    }
+
     if (report.codigoRegistro) {
       return `shared-visit:${report.codigoRegistro}`;
     }
@@ -704,7 +728,11 @@ export default function AprobacionesPage() {
 
   const handlePeriodChange = useCallback((periodId: string) => {
     setSelectedPeriodId(periodId);
-    if (reportsScopeRef.current !== periodId) void loadReportsForPeriod(periodId);
+    setReports([]);
+    setSelectedReport(null);
+    setDetailOpen(false);
+    reportsScopeRef.current = null;
+    void loadReportsForPeriod(periodId);
   }, [loadReportsForPeriod]);
 
   const loadData = useCallback(async () => {
@@ -754,8 +782,10 @@ export default function AprobacionesPage() {
   }, []);
 
   const refreshReports = useCallback(async (reportId?: string | null) => {
+    const requestId = ++reportsRequestRef.current;
     const filters = selectedPeriodId && selectedPeriodId !== ALL_PERIODS_VALUE ? { periodoId: selectedPeriodId } : {};
     const refreshedReports = normalizeSharedVisitRowsForUi(await getReportesActividad(filters));
+    if (requestId !== reportsRequestRef.current) return;
     reportsScopeRef.current = selectedPeriodId;
     setReports(refreshedReports);
 
@@ -1906,11 +1936,11 @@ export default function AprobacionesPage() {
     [groupedReports]
   );
   const visitas = useMemo(
-    () => groupedReports.filter((row) => row.tipo === "visita_tecnica"),
+    () => groupedReports.filter((row) => row.tipo === "visita_tecnica" && !isVisualRecorrido(row.report)),
     [groupedReports]
   );
   const recorridos = useMemo(
-    () => groupedReports.filter((row) => row.tipo === "recorrido"),
+    () => groupedReports.filter((row) => isVisualRecorrido(row.report)),
     [groupedReports]
   );
   const grupales = useMemo(
@@ -1961,11 +1991,11 @@ export default function AprobacionesPage() {
     [filteredRows]
   );
   const filteredVisitas = useMemo(
-    () => filteredRows.filter((row) => row.tipo === "visita_tecnica"),
+    () => filteredRows.filter((row) => row.tipo === "visita_tecnica" && !isVisualRecorrido(row.report)),
     [filteredRows]
   );
   const filteredRecorridos = useMemo(
-    () => filteredRows.filter((row) => row.tipo === "recorrido"),
+    () => filteredRows.filter((row) => isVisualRecorrido(row.report)),
     [filteredRows]
   );
   const filteredGrupales = useMemo(
@@ -2037,7 +2067,7 @@ export default function AprobacionesPage() {
               const client = report.clienteId ? clientsById.get(report.clienteId) : null;
               const group = groupsById.get(report.grupoId);
               const leader = group ? usersById.get(group.liderId) : null;
-              const tipo = getTipoConfig(String(row.tipo));
+               const tipo = getTipoConfig(isVisualRecorrido(report) ? "recorrido" : String(row.tipo));
               const estado = estadoAprobacionConfig[row.estadoAprobacionLider];
               const TipoIcon = tipo.icon;
               const isDeleting = deletingReportId === report.id;
@@ -2068,9 +2098,14 @@ export default function AprobacionesPage() {
                         {tipo.label}
                       </Badge>
                       {report.tipo === "visita_tecnica" && (
-                        <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
-                          {getVisitCategoryLabel(report.tipoVisita)}
-                        </Badge>
+                        <div className="flex flex-wrap items-center gap-1">
+                          <Badge variant="outline" className="text-[10px] border-cyan-400/40 bg-cyan-400/10 text-cyan-300">
+                            Recorrido vista
+                          </Badge>
+                          <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
+                            {getVisitCategoryLabel(report.tipoVisita)}
+                          </Badge>
+                        </div>
                       )}
                       {getEvidenceCountForReport(report) > 0 && (
                         <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
@@ -2080,7 +2115,7 @@ export default function AprobacionesPage() {
                     </div>
                   </TableCell>
                   <TableCell className="max-w-72">
-                    <p className="text-sm font-medium text-foreground truncate">{report.descripcion}</p>
+                     <p className="text-sm font-medium text-foreground truncate">{getVisualReportDescription(report)}</p>
                     {report.especificacion && (
                       <p className="text-xs text-muted-foreground truncate">Especificación: {report.especificacion}</p>
                     )}
@@ -2092,7 +2127,7 @@ export default function AprobacionesPage() {
                   </TableCell>
                   <TableCell className="max-w-64">
                     <p className="text-sm text-foreground/80 truncate">
-                      {client ? `${client.nombre} — ${client.edificio}` : group?.nombre || report.descripcion}
+                       {client ? `${client.nombre} — ${client.edificio}` : group?.nombre || getVisualReportDescription(report)}
                     </p>
                     <p className="text-xs text-muted-foreground truncate">
                       Grupo: {group?.nombre || "Sin grupo"}
@@ -2448,11 +2483,13 @@ export default function AprobacionesPage() {
                 Mant. Preventivo
                 <Badge className="ml-1.5 border-0 bg-blue-500/20 px-1.5 text-[10px] text-blue-400">{preventivos.length}</Badge>
               </TabsTrigger>
-              <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-                <ClipboardCheck className="mr-2 h-4 w-4" />
-                Visita Técnica
-                <Badge className="ml-1.5 border-0 bg-cyan-neon/20 px-1.5 text-[10px] text-cyan-neon">{visitas.length}</Badge>
-              </TabsTrigger>
+              {visitas.length > 0 && (
+                <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                  <ClipboardCheck className="mr-2 h-4 w-4" />
+                  Visita Técnica
+                  <Badge className="ml-1.5 border-0 bg-cyan-neon/20 px-1.5 text-[10px] text-cyan-neon">{visitas.length}</Badge>
+                </TabsTrigger>
+              )}
               <TabsTrigger value="recorridos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
                 <Route className="mr-2 h-4 w-4" />
                 Recorrido
@@ -2472,12 +2509,14 @@ export default function AprobacionesPage() {
               )}
             </TabsContent>
 
-            <TabsContent value="visitas">
-              {renderReportsTable(
-                "Aprobaciones de Visitas Técnicas",
-                "Visitas técnicas registradas desde operación. Aquí puedes revisar el contraste entre default y valor reportado antes de aprobar o rechazar."
-              )}
-            </TabsContent>
+            {visitas.length > 0 && (
+              <TabsContent value="visitas">
+                {renderReportsTable(
+                  "Aprobaciones de Visitas Técnicas",
+                  "Visitas técnicas registradas desde operación. Aquí puedes revisar el contraste entre default y valor reportado antes de aprobar o rechazar."
+                )}
+              </TabsContent>
+            )}
 
             <TabsContent value="recorridos">
               {renderReportsTable(
@@ -2534,7 +2573,7 @@ export default function AprobacionesPage() {
             const maintenancePricing = selectedReport.tipo === "mantenimiento_preventivo"
               ? getMaintenanceClientPricing(selectedReport, client, contracts)
               : null;
-            const tipo = getTipoConfig(String(selectedReport.tipo));
+             const tipo = getTipoConfig(isVisualRecorrido(selectedReport) ? "recorrido" : String(selectedReport.tipo));
             const normalizedModalStatus: ActivityReport["estadoAprobacionLider"] = (new Set(modalReports.map((item) => item.estadoAprobacionLider))).size > 1
               ? "pendiente"
               : modalStatus;
@@ -2711,7 +2750,7 @@ export default function AprobacionesPage() {
                 <div className="space-y-2">
                   <p className="text-xs text-muted-foreground">Descripción</p>
                   <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50">
-                    {selectedReport.descripcion}
+                     {getVisualReportDescription(selectedReport)}
                   </p>
                 </div>
 
@@ -3198,7 +3237,7 @@ export default function AprobacionesPage() {
                                     aria-label={`Porcentaje de ${participant.nombre}`}
                                   />
                                 </div>
-                                <div className="relative">
+                                <div className="relative h-9 self-start">
                                   <DollarSign className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gold" />
                                   <Input
                                     data-testid={`approval-participant-amount-${participant.reportId}`}

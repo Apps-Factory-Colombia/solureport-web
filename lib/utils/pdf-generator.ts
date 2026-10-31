@@ -153,6 +153,26 @@ type PdfTableColumnStyle = {
   overflow?: "linebreak";
 };
 
+function fitTableColumnStylesToWidth(
+  columnStyles: Record<number, PdfTableColumnStyle>,
+  availableWidth: number,
+) {
+  const entries = Object.entries(columnStyles);
+  const totalWidth = entries.reduce((total, [, style]) => total + style.cellWidth, 0);
+  if (!entries.length || totalWidth <= availableWidth || availableWidth <= 0) return columnStyles;
+
+  const scale = availableWidth / totalWidth;
+  const fittedStyles: Record<number, PdfTableColumnStyle> = {};
+  entries.forEach(([index, style]) => {
+    fittedStyles[Number(index)] = {
+      ...style,
+      cellWidth: Number((style.cellWidth * scale).toFixed(2)),
+    };
+  });
+
+  return fittedStyles;
+}
+
 function getTableColumnStyles(headers: string[], availableWidth: number) {
   const columnStyles: Record<number, PdfTableColumnStyle> = {};
   const flexibleIndexes: number[] = [];
@@ -179,7 +199,7 @@ function getTableColumnStyles(headers: string[], availableWidth: number) {
       5: { cellWidth: 24, halign: "right" },
     };
 
-    return fixedDetailLayout;
+    return fitTableColumnStylesToWidth(fixedDetailLayout, availableWidth);
   }
 
   headers.forEach((header, index) => {
@@ -237,7 +257,7 @@ function getTableColumnStyles(headers: string[], availableWidth: number) {
   });
 
   const allFlexibleIndexes = [...prioritizedFlexibleIndexes, ...flexibleIndexes];
-  const remainingWidth = Math.max(availableWidth - fixedWidth, allFlexibleIndexes.length * 20);
+  const remainingWidth = Math.max(0, availableWidth - fixedWidth);
   const weightedSlots = prioritizedFlexibleIndexes.length * 1.8 + flexibleIndexes.length;
   const baseFlexibleWidth = remainingWidth / Math.max(weightedSlots, 1);
 
@@ -249,7 +269,7 @@ function getTableColumnStyles(headers: string[], availableWidth: number) {
     columnStyles[index] = { cellWidth: Math.max(baseFlexibleWidth, 20), overflow: "linebreak" };
   });
 
-  return columnStyles;
+  return fitTableColumnStylesToWidth(columnStyles, availableWidth);
 }
 
 function buildWrappedTableRows(
@@ -274,7 +294,6 @@ function buildWrappedTableRows(
       || header.includes("resumen");
     const shouldKeepSingleLine =
       header.includes("fecha") ||
-      header.includes("estado") ||
       header.includes("costo") ||
       header.includes("valor") ||
       header.includes("total");

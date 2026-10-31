@@ -51,6 +51,7 @@ import {
   ChevronDown,
   Percent,
 } from "lucide-react";
+import * as XLSX from "xlsx-js-style";
 import { LiquidationPeriod, User, WorkGroup, ActivityReport, ArrivalRecord } from "@/lib/types";
 import { getPeriodos, closePeriodo, getCanonicalLiquidationSummary, CanonicalLiquidationSummary } from "@/lib/data/services/liquidacion";
 import { getConfiguracion } from "@/lib/data/services/configuracion";
@@ -60,7 +61,6 @@ import { deleteReporteActividadAdmin, getReportesActividad } from "@/lib/data/se
 import { getLlegadas } from "@/lib/data/services/llegadas";
 import { cn } from "@/lib/utils";
 import { formatReceiptName, generateTablePDF, generateComprobantePDF } from "@/lib/utils/pdf-generator";
-import { calculateLiquidationAmount, isLegacyAppliedValueCalculation } from "@/lib/utils/liquidation-math";
 import {
   Pagination,
   PaginationContent,
@@ -224,24 +224,7 @@ function getReportLiquidationPercentage(report: ActivityReport) {
 
 function getReportLiquidationEarnedValue(report: ActivityReport) {
   if (report.liquidacionValorGanado != null) {
-    const storedNet = Number(report.liquidacionValorGanado) || 0;
-    const storedGross = Number(report.liquidacionValorGanadoOriginal ?? 0) || 0;
-    const baseValue = getReportLiquidationBaseValue(report);
-    const appliedValue = Number(report.valorActividadAplicadoGlobal ?? 0) || 0;
-    const percentage = getReportLiquidationPercentage(report);
-
-    if (!report.liquidacionCongelada && report.tipo !== "recorrido" && isLegacyAppliedValueCalculation({
-      storedAmount: storedGross,
-      baseValue,
-      appliedValue,
-      percentage,
-    })) {
-      const correctedGross = calculateLiquidationAmount(baseValue, percentage);
-      const attendancePercentage = Number(report.liquidacionPorcentajeDescuentoTardanza ?? 0) || 0;
-      return Math.max(0, correctedGross - calculateLiquidationAmount(correctedGross, attendancePercentage));
-    }
-
-    return storedNet;
+    return Number(report.liquidacionValorGanado) || 0;
   }
 
   if (report.tipo === "visita_tecnica") {
@@ -270,45 +253,110 @@ function getReportLiquidationEarnedValue(report: ActivityReport) {
 }
 
 function getReportLiquidationGrossValue(report: ActivityReport) {
-  const storedAmount = report.liquidacionValorGanadoOriginal != null
+  return report.liquidacionValorGanadoOriginal != null
     ? Number(report.liquidacionValorGanadoOriginal) || 0
     : getReportLiquidationEarnedValue(report);
-  const baseValue = getReportLiquidationBaseValue(report);
-  const appliedValue = Number(report.valorActividadAplicadoGlobal ?? 0) || 0;
-  const percentage = getReportLiquidationPercentage(report);
-
-  if (!report.liquidacionCongelada && report.tipo !== "recorrido" && isLegacyAppliedValueCalculation({
-    storedAmount,
-    baseValue,
-    appliedValue,
-    percentage,
-  })) {
-    return calculateLiquidationAmount(baseValue, percentage);
-  }
-
-  return storedAmount;
 }
 
 function getReportLiquidationDiscount(report: ActivityReport) {
   if (report.liquidacionDescuentoTardanza == null) return null;
   if (report.liquidacionCongelada) return Number(report.liquidacionDescuentoTardanza) || 0;
 
-  const baseValue = getReportLiquidationBaseValue(report);
-  const appliedValue = Number(report.valorActividadAplicadoGlobal ?? 0) || 0;
-  const percentage = getReportLiquidationPercentage(report);
   const attendancePercentage = Number(report.liquidacionPorcentajeDescuentoTardanza ?? 0) || 0;
-  const storedGross = Number(report.liquidacionValorGanadoOriginal ?? 0) || 0;
+  return Number(report.liquidacionDescuentoTardanza) || 0;
+}
 
-  if (report.tipo !== "recorrido" && attendancePercentage > 0 && isLegacyAppliedValueCalculation({
-    storedAmount: storedGross,
-    baseValue,
-    appliedValue,
-    percentage,
-  })) {
-    return calculateLiquidationAmount(getReportLiquidationGrossValue(report), attendancePercentage);
+function styleExcelSheet(
+  sheet: any,
+  options: {
+    titleRows?: number[];
+    subtitleRows?: number[];
+    headerRow?: number;
+    firstDataRow?: number;
+    lastDataRow?: number;
+    totalRow?: number;
+    currencyColumns?: number[];
+    columnCount: number;
+  },
+) {
+  const columnLetter = (index: number) => XLSX.utils.encode_col(index);
+  const cellAt = (row: number, column: number) => sheet[XLSX.utils.encode_cell({ r: row, c: column })];
+  const border = {
+    top: { style: "thin", color: { rgb: "CBD5E1" } },
+    bottom: { style: "thin", color: { rgb: "CBD5E1" } },
+    left: { style: "thin", color: { rgb: "CBD5E1" } },
+    right: { style: "thin", color: { rgb: "CBD5E1" } },
+  };
+
+  for (const row of options.titleRows || []) {
+    const cell = cellAt(row, 0);
+    if (cell) cell.s = {
+      font: { bold: true, color: { rgb: "FFFFFF" }, sz: 15 },
+      fill: { fgColor: { rgb: "0F172A" } },
+      alignment: { horizontal: "center", vertical: "center" },
+    };
+    sheet["!rows"] = sheet["!rows"] || [];
+    sheet["!rows"][row] = { hpt: 28 };
   }
 
-  return Number(report.liquidacionDescuentoTardanza) || 0;
+  for (const row of options.subtitleRows || []) {
+    const cell = cellAt(row, 0);
+    if (cell) cell.s = {
+      font: { bold: row === (options.subtitleRows || [])[0], color: { rgb: row === (options.subtitleRows || [])[0] ? "0F172A" : "475569" }, sz: row === (options.subtitleRows || [])[0] ? 11 : 10 },
+      fill: { fgColor: { rgb: row === (options.subtitleRows || [])[0] ? "E0F2FE" : "F8FAFC" } },
+      alignment: { horizontal: "left", vertical: "center" },
+    };
+  }
+
+  if (options.headerRow != null) {
+    for (let column = 0; column < options.columnCount; column += 1) {
+      const cell = cellAt(options.headerRow, column);
+      if (cell) cell.s = {
+        font: { bold: true, color: { rgb: "FFFFFF" } },
+        fill: { fgColor: { rgb: "1E3A5F" } },
+        border,
+        alignment: { horizontal: "center", vertical: "center", wrapText: true },
+      };
+    }
+    sheet["!rows"] = sheet["!rows"] || [];
+    sheet["!rows"][options.headerRow] = { hpt: 30 };
+    const lastRow = options.lastDataRow ?? options.headerRow;
+    sheet["!autofilter"] = { ref: `A${options.headerRow + 1}:${columnLetter(options.columnCount - 1)}${lastRow + 1}` };
+    sheet["!freeze"] = { xSplit: 0, ySplit: options.headerRow + 1, topLeftCell: `A${options.headerRow + 2}`, activePane: "bottomRight", state: "frozen" };
+  }
+
+  if (options.firstDataRow != null && options.lastDataRow != null) {
+    for (let row = options.firstDataRow; row <= options.lastDataRow; row += 1) {
+      for (let column = 0; column < options.columnCount; column += 1) {
+        const cell = cellAt(row, column);
+        if (!cell) continue;
+        const style: Record<string, unknown> = {
+          border,
+          alignment: { vertical: "center", wrapText: column < 2 },
+          fill: { fgColor: { rgb: row % 2 === 0 ? "F8FAFC" : "FFFFFF" } },
+        };
+        if (options.currencyColumns?.includes(column)) {
+          cell.z = '"$"#,##0';
+          style.alignment = { horizontal: "right", vertical: "center" };
+        }
+        cell.s = style;
+      }
+    }
+  }
+
+  if (options.totalRow != null) {
+    for (let column = 0; column < options.columnCount; column += 1) {
+      const cell = cellAt(options.totalRow, column);
+      if (!cell) continue;
+      cell.s = {
+        font: { bold: true, color: { rgb: "0F172A" } },
+        fill: { fgColor: { rgb: "E2E8F0" } },
+        border,
+        alignment: { horizontal: column === 0 ? "left" : "right", vertical: "center" },
+      };
+      if (options.currencyColumns?.includes(column)) cell.z = '"$"#,##0';
+    }
+  }
 }
 
 export default function LiquidacionPage() {
@@ -351,6 +399,7 @@ export default function LiquidacionPage() {
   const techOrderRef = useRef(new Map<string, number>());
   const groupOrderRef = useRef(new Map<string, number>());
   const liquidationRequestRef = useRef(0);
+  const reportsRequestRef = useRef(0);
   const canonicalSummaryRequestRef = useRef(0);
   const nextReportOrderRef = useRef(0);
   const nextTechOrderRef = useRef(0);
@@ -453,37 +502,36 @@ export default function LiquidacionPage() {
   // Load only the reports for the selected period. Loading the complete
   // history here made the liquidation request grow until it could fail or
   // return incomplete data, which hid activities, visits and routes.
-  useEffect(() => {
-    if (!selectedPeriodId) {
+  const loadPeriodReports = useCallback(async (periodId: string) => {
+    const requestId = ++reportsRequestRef.current;
+
+    if (!periodId) {
       setActReports([]);
       setReportsLoading(false);
       setReportsLoadError(null);
       return;
     }
 
-    let cancelled = false;
     setReportsLoading(true);
     setReportsLoadError(null);
 
-    getReportesActividad({ periodoId: selectedPeriodId })
-      .then((reports) => {
-        if (cancelled) return;
-        setActReports(reports);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        console.error("Error cargando reportes del período en liquidación:", error);
-        setActReports([]);
-        setReportsLoadError("No se pudieron cargar todos los reportes de este período.");
-      })
-      .finally(() => {
-        if (!cancelled) setReportsLoading(false);
-      });
+    try {
+      const reports = await getReportesActividad({ periodoId: periodId });
+      if (requestId !== reportsRequestRef.current) return;
+      setActReports(reports);
+    } catch (error) {
+      if (requestId !== reportsRequestRef.current) return;
+      console.error("Error cargando reportes del período en liquidación:", error);
+      setActReports([]);
+      setReportsLoadError("No se pudieron cargar todos los reportes de este período.");
+    } finally {
+      if (requestId === reportsRequestRef.current) setReportsLoading(false);
+    }
+  }, []);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedPeriodId]);
+  useEffect(() => {
+    void loadPeriodReports(selectedPeriodId);
+  }, [loadPeriodReports, selectedPeriodId]);
 
   const loadCanonicalSummary = useCallback(async (periodId: string) => {
     const requestId = ++canonicalSummaryRequestRef.current;
@@ -512,11 +560,12 @@ export default function LiquidacionPage() {
 
   useEffect(() => {
     const onFocus = () => {
+      void loadPeriodReports(selectedPeriodId);
       void loadCanonicalSummary(selectedPeriodId);
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [loadCanonicalSummary, selectedPeriodId]);
+  }, [loadCanonicalSummary, loadPeriodReports, selectedPeriodId]);
 
   useEffect(() => {
     if (scrollRestorePositionRef.current === null || typeof window === "undefined") return;
@@ -1141,6 +1190,107 @@ export default function LiquidacionPage() {
     }
   };
 
+  const handleDownloadComprobantesExcel = () => {
+    if (!selectedPeriod || !canonicalSummary) return;
+
+    const summaryByTechnician = new Map(canonicalSummary.technicians.map((row) => [row.tecnicoId, row]));
+    const summaryRows = users
+      .filter((user) => user.estado === "activo" && user.rol !== "admin")
+      .map((user) => {
+        const summary = summaryByTechnician.get(user.id);
+        return {
+          Nombre: `${user.nombre || ""} ${user.apellido || ""}`.trim(),
+          Cédula: user.cedula?.trim() || summary?.cedula || "",
+          "Auxilio extralegal": Number(summary?.totalNoRecorridosAprobados || 0),
+          "Descuento por tardanza": Number(summary?.descuentoValor || 0),
+          "Bono por recorrido": Number(summary?.totalRecorridos || 0),
+          "Extra líder": Number(summary?.extraLider || 0),
+          "Total neto": Number(summary?.total || 0),
+        };
+      });
+
+    const summaryHeaders = [
+      "Nombre", "Cédula", "Auxilio extralegal", "Descuento por tardanza",
+      "Bono por recorrido", "Extra líder", "Total neto",
+    ];
+    const summaryValues = summaryRows.map((row) => summaryHeaders.map((header) => row[header as keyof typeof row]));
+    const summaryTotal = summaryRows.reduce((total, row) => ({
+      auxilio: total.auxilio + Number(row["Auxilio extralegal"] || 0),
+      descuento: total.descuento + Number(row["Descuento por tardanza"] || 0),
+      recorrido: total.recorrido + Number(row["Bono por recorrido"] || 0),
+      extra: total.extra + Number(row["Extra líder"] || 0),
+      neto: total.neto + Number(row["Total neto"] || 0),
+    }), { auxilio: 0, descuento: 0, recorrido: 0, extra: 0, neto: 0 });
+
+    const detailHeaders = ["Nombre", "Cédula", "Tipo", "Código", "Fecha", "Auxilio extralegal", "Descuento por tardanza", "Bono por recorrido", "Estado"];
+    const detailRows = Array.from(summaryByTechnician.keys()).flatMap((technicianId) => {
+      const user = users.find((candidate) => candidate.id === technicianId);
+      const technicianReports = liquidablePeriodReports.filter((report) => report.tecnicoId === technicianId);
+      const summary = summaryByTechnician.get(technicianId);
+      const discountByReport = distributeAttendanceDiscount(technicianReports, Number(summary?.descuentoValor || 0));
+      return technicianReports.map((report) => {
+        const gross = getReportLiquidationGrossValue(report);
+        const discount = discountByReport.get(report.id) || 0;
+        const route = isRouteBonusReport(report);
+        return [
+          `${user?.nombre || ""} ${user?.apellido || ""}`.trim(),
+          user?.cedula?.trim() || summary?.cedula || "",
+          getTipoLabel(report.tipo),
+          report.codigoRegistro || "",
+          report.fecha,
+          route ? 0 : gross,
+          route ? 0 : discount,
+          route ? gross : 0,
+          getEstadoLabel(report.estadoAprobacionLider),
+        ];
+      });
+    });
+
+    const workbook = XLSX.utils.book_new();
+    const title = `COMPROBANTES DE LIQUIDACIÓN · ${selectedPeriod.fechaInicio} al ${selectedPeriod.fechaFin}`;
+    const summaryWorksheet = XLSX.utils.aoa_to_sheet([
+      [title],
+      ["SOLUCIONES & AUTOMATIZACIONES S.A.S."],
+      ["Resumen por trabajador"],
+      summaryHeaders,
+      ...summaryValues,
+      ["TOTAL DEL PERÍODO", "", summaryTotal.auxilio, summaryTotal.descuento, summaryTotal.recorrido, summaryTotal.extra, summaryTotal.neto],
+    ]);
+    summaryWorksheet["!merges"] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 6 } },
+      { s: { r: 1, c: 0 }, e: { r: 1, c: 6 } },
+      { s: { r: 2, c: 0 }, e: { r: 2, c: 6 } },
+    ];
+    summaryWorksheet["!cols"] = [
+      { wch: 34 }, { wch: 18 }, { wch: 22 }, { wch: 24 },
+      { wch: 22 }, { wch: 16 }, { wch: 18 },
+    ];
+    styleExcelSheet(summaryWorksheet, {
+      titleRows: [0], subtitleRows: [1, 2], headerRow: 3,
+      firstDataRow: 4, lastDataRow: 3 + summaryValues.length,
+      totalRow: 4 + summaryValues.length, currencyColumns: [2, 3, 4, 5, 6], columnCount: 7,
+    });
+    XLSX.utils.book_append_sheet(workbook, summaryWorksheet, "Comprobantes");
+
+    const detailWorksheet = XLSX.utils.aoa_to_sheet([
+      [`DETALLE DE ACTIVIDADES · ${selectedPeriod.fechaInicio} al ${selectedPeriod.fechaFin}`],
+      detailHeaders,
+      ...detailRows,
+    ]);
+    detailWorksheet["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: detailHeaders.length - 1 } }];
+    detailWorksheet["!cols"] = [
+      { wch: 30 }, { wch: 18 }, { wch: 22 }, { wch: 20 }, { wch: 14 },
+      { wch: 20 }, { wch: 24 }, { wch: 20 }, { wch: 16 },
+    ];
+    styleExcelSheet(detailWorksheet, {
+      titleRows: [0], headerRow: 1, firstDataRow: 2,
+      lastDataRow: Math.max(1, detailRows.length + 1), currencyColumns: [5, 6, 7], columnCount: detailHeaders.length,
+    });
+    XLSX.utils.book_append_sheet(workbook, detailWorksheet, "Detalle");
+
+    XLSX.writeFile(workbook, `comprobantes_liquidacion_${selectedPeriod.fechaInicio}_${selectedPeriod.fechaFin}.xlsx`);
+  };
+
   const handleOpenComprobante = (techId: string) => {
     const tech = users.find((user) => user.id === techId);
     setSelectedTechId(techId);
@@ -1219,6 +1369,15 @@ export default function LiquidacionPage() {
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
+              className="gap-2 border-cyan-neon/40 text-cyan-neon"
+              disabled={!hasSelectedPeriod || !canonicalSummary}
+              onClick={handleDownloadComprobantesExcel}
+            >
+              <Download className="h-4 w-4" />
+              Descargar Excel de comprobantes
+            </Button>
+            <Button
+              variant="outline"
               className="gap-2 border-border/50 text-foreground/80"
               disabled={!hasSelectedPeriod}
               onClick={() => {
@@ -1265,6 +1424,7 @@ export default function LiquidacionPage() {
                   periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} \u2192 ${selectedPeriod.fechaFin}` : "",
                   headers: ["Tipo", "Código", "Descripción", "Grupo", "Fecha", "Técnico", "Estado", "Valor"],
                   rows,
+                  landscape: true,
                   summary: totalExtraLeaderPeriod > 0 ? [{ label: "Extra líder período", value: formatCurrency(totalExtraLeaderPeriod) }] : undefined,
                   totales: ["TOTAL", "", "", "", "", "", `${liquidablePeriodReports.length} actividades + ${extraLeaderRows.length} extra(s)`, formatCurrency(totalPeriod)],
                 });

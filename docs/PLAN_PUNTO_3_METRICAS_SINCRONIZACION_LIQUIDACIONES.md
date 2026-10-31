@@ -273,3 +273,298 @@ pantalla.
 - Se actualizó el cálculo de extra líder para considerar todos los grupos
   activos del líder, evitando diferencias entre la app y la web cuando un líder
   pertenece a más de un grupo.
+
+## Auditoría adicional — Aprobaciones → Liquidación
+
+Fecha de revisión: `2026-10-31`. La revisión se hizo sobre el período abierto
+`2026-10-17` a `2026-10-31` y las consultas de base fueron únicamente de lectura.
+
+### Evidencia confirmada
+
+- Hay 403 actividades no canceladas: 98 actividades, 20 mantenimientos, 234
+  recorridos y 51 visitas técnicas.
+- Hay 566 participaciones. En esas filas se encontraron 19 diferencias de
+  porcentaje entre `actividades_operativas_participantes` y `liquidacion_items`,
+  y 34 diferencias de valor ganado original. A nivel de actividad, son 9 y 21
+  actividades afectadas respectivamente.
+- 56 actividades tienen `valor_aplicado` diferente de `valor_base`. En las
+  visitas técnicas son 11 casos.
+- Existen 8 participaciones de mantenimientos pendientes sin fila persistida de
+  liquidación. El endpoint puede mostrar una fila de respaldo para algunos casos,
+  pero esa fila no corrige el dato persistido.
+- `VT-20261021-CD3ENQFX` tiene base de `$15.000`, aplicado de `$20.000` y la
+  participación guarda `$20.000`; sin embargo, `liquidacion_items.valor_base`
+  continúa en `$15.000`. La regla de compatibilidad de liquidación vuelve a
+  calcular el pago desde esa base y lo muestra como `$15.000`.
+- `VT-20261023-GIZ8X3J0` tiene participantes en 100%/0% mientras sus filas de
+  liquidación tienen 50%/50%. La interfaz puede mostrar un reparto reconstruido
+  que no coincide con lo almacenado.
+- Hay 52 visitas técnicas registradas en el período; 51 no están canceladas.
+  Las 51 no canceladas tienen fila en `actividades_operativas_visitas` y ninguna
+  tiene fila en `actividades_operativas_recorridos`. Por lo tanto, actualmente no
+  quedan en Recorridos.
+
+### Causas encontradas en el código
+
+1. El guardado actual escribe `valor_aplicado` en la actividad, `porcentaje` y
+   `valor_ganado` en el participante, y `valor_ganado_original`/`valor_ganado`
+   en la liquidación. No actualiza simultáneamente `liquidacion_items.valor_base`
+   ni `liquidacion_items.porcentaje`. La consulta de liquidación usa esas columnas
+   antiguas para decidir si debe aplicar el cálculo de compatibilidad.
+2. Al crear una actividad que no es recorrido, el valor del participante se
+   calcula con `valor_base`, aunque exista un `valor_aplicado` diferente. Esto
+   deja diferencias desde la creación y obliga a una corrección posterior.
+3. `mapReport` marca `valorModificado` de forma explícita para recorridos, pero no
+   para visitas técnicas cuando `valor_aplicado` difiere de `valor_base`. La
+   pantalla puede volver a tomar el valor predeterminado al recargar.
+4. Aprobaciones normaliza algunos repartos en memoria. Informes conserva otra
+   identidad de visita y guarda el costo compartido sin enviar los porcentajes y
+   valores de cada participante. Por eso una pantalla puede mostrar 50/50 y la
+   base seguir en 100/0.
+5. `updateApproval` ejecuta varias operaciones independientes para actividades
+   que no son mantenimiento. La aprobación de una actividad compartida dispara
+   varias peticiones en paralelo. Un error o una carrera puede dejar aprobaciones,
+   entregas, participantes, estado de actividad y liquidación en estados distintos.
+6. Si llega un identificador compuesto sin participante válido, la API puede caer
+   silenciosamente en el participante principal. Eso permite guardar el cambio en
+   la persona equivocada.
+7. El servicio de actualización devuelve `void` y Aprobaciones actualiza la
+   interfaz de forma optimista. El mensaje de éxito se muestra antes de comprobar
+   que la lectura canónica devuelva exactamente los mismos valores. Además,
+   `refreshReports` no tiene guard de secuencia; una respuesta anterior puede
+   sobrescribir la lectura posterior al cambiar de período.
+8. Informes mantiene cambios locales de costo cliente y costo técnico sin una
+   lectura posterior. En visitas compartidas puede quedar una fila actualizada y
+   otra con el valor anterior.
+9. El icono `$` del valor por técnico está centrado respecto a toda la fila del
+   grid, que es más alta por el nombre y subtítulo del técnico. Por eso sale del
+   input. El contenedor del campo debe tener altura propia y alineación al inicio.
+
+## Ampliación del plan solicitada — mostrar visitas dentro de Recorridos
+
+Las visitas técnicas seguirán guardadas como `visita_tecnica`. No se cambiará el
+tipo en `actividades_operativas`, no se moverán filas de base de datos, no se
+creará una tabla nueva y no se modificarán las liquidaciones existentes por este
+requisito.
+
+### Ajuste de presentación en el frontend
+
+1. Mantener `visita_tecnica` como tipo real para conservar la identidad,
+   aprobaciones, participantes, evidencias, códigos y liquidación actual.
+2. En Aprobaciones e Informes, incluir las visitas técnicas dentro del conjunto
+   visual de Recorridos mediante una función de clasificación compartida.
+3. Mostrar el texto con el prefijo `Recorrido vista: ` seguido de la descripción
+   original. La descripción no se debe reemplazar ni guardar nuevamente en la
+   base; se transforma únicamente al renderizar.
+4. Mantener el código de registro original (`VT-...`) y el ID real de la visita.
+   El prefijo solicitado aplica a la presentación, no a la identidad persistida.
+5. Evitar que la misma visita aparezca dos veces: debe salir en la sección visual
+   de Recorridos y dejar de mostrarse en la pestaña visual independiente de
+   Visitas Técnicas cuando el filtro sea Recorridos.
+6. Aplicar la misma regla a tablas, filtros, búsqueda, modal de detalle,
+   exportaciones y etiquetas del PDF que se generen desde el frontend.
+
+### Reglas que no se deben alterar
+
+- La API seguirá devolviendo `tipo = 'visita_tecnica'`.
+- `actividades_operativas_visitas` continuará siendo la fila de detalle de la
+  visita.
+- `liquidacion_items.tipo` y sus valores seguirán siendo de visita técnica.
+- Las visitas no comenzarán a contar como recorridos financieros, no cambiarán
+  descuentos de tardanza y no afectarán el extra líder solo por aparecer en la
+  sección visual Recorridos.
+- Las reglas de valor, aprobación, reparto, evidencias y cliente se corrigen en
+  sus fuentes actuales, sin duplicar ni convertir la actividad.
+
+### Orden del siguiente cambio
+
+1. Unificar identidad y respuesta canónica de costo/reparto entre Aprobaciones,
+   Informes y Liquidación.
+2. Guardar en una transacción el valor aplicado, base, porcentaje, valor original,
+   valor neto y estado de cada participante y su `liquidacion_item`.
+3. Validar siempre el participante compuesto y rechazar identificadores ambiguos;
+   eliminar el fallback silencioso al participante principal.
+4. Aprobar o rechazar una actividad compartida en una sola transacción y devolver
+   la fila canónica guardada.
+5. Corregir las inconsistencias del período abierto antes de congelarlo: valores
+   20.000/15.000, porcentajes de reparto y filas de liquidación faltantes.
+6. Cambiar la clasificación visual del frontend para que las visitas se presenten
+   como `Recorrido vista: <descripción>` dentro de Recorridos, sin tocar la base.
+7. Corregir el `$` del reparto técnico, limpiar estados locales después de guardar
+   y refetch con control de versión/período.
+
+### Criterios de aceptación adicionales
+
+- Cambiar una visita de `$15.000` a `$20.000`, recargar Aprobaciones, Informes y
+  Liquidación y obtener `$20.000` en las tres pantallas.
+- Guardar un reparto 50/50 y comprobar 50/50 en participantes, liquidación y
+  acumulados, después de recargar.
+- Aprobar o rechazar una visita compartida y comprobar que todas sus filas cambian
+  juntas o ninguna cambia.
+- Ver una visita técnica dentro de Recorridos con el texto `Recorrido vista: ` y
+  su descripción original, sin crear otra actividad ni modificar su registro.
+- Confirmar que la visita sigue apareciendo como visita técnica para las reglas
+  económicas, descuentos, aprobaciones y liquidación.
+
+## Plan preventivo — evitar que el desfase vuelva a ocurrir
+
+El objetivo es que Aprobaciones nunca confirme un cambio que Liquidación no pueda
+leer después. La prevención se basa en que cada guardado tenga una única operación
+canónica, sea verificable y no permita continuar cuando sus filas relacionadas no
+queden alineadas.
+
+### Reglas de integridad obligatorias
+
+1. **Una actividad, una identidad:** la agrupación se hará únicamente con el ID
+   de `actividades_operativas` y el ID de `actividades_operativas_participantes`.
+   Fecha, descripción, cliente y código solo serán datos de respaldo visual; nunca
+   decidirán que dos actividades son la misma.
+2. **Un valor canónico:** para un período abierto, el valor aprobado será
+   `actividades_operativas.valor_aplicado`. El pago de cada técnico será ese valor
+   multiplicado por su porcentaje, menos el descuento aplicable. No se permitirá
+   recalcular un valor aprobado desde una base antigua.
+3. **Reparto cerrado:** los porcentajes deben sumar 100%, los valores de los
+   participantes deben sumar el valor aplicado y cada participante debe tener una
+   fila de liquidación correspondiente.
+4. **Espejo exacto:** después de guardar, cada participante y su
+   `liquidacion_item` deben coincidir en porcentaje, base, valor original, valor
+   neto y estado.
+5. **Aprobación consistente:** una actividad compartida se aprueba o rechaza
+   completa dentro de una sola transacción. No se aceptan estados mixtos.
+6. **Período protegido:** las filas de períodos cerrados no se recalculan ni se
+   modifican. Los cambios solo se permiten en el período abierto correspondiente.
+7. **Visita visual:** una visita continuará siendo `visita_tecnica` en la base y
+   solo tendrá el alias visual `Recorrido vista: <descripción>` en el frontend.
+
+### Cambios preventivos en la API existente
+
+1. Extender `reports.cost` para que, dentro de su transacción actual, bloquee la
+   actividad y todos sus participantes, valide el conjunto completo y actualice
+   simultáneamente actividad, participantes y `liquidacion_items`.
+2. Persistir también `liquidacion_items.valor_base` y
+   `liquidacion_items.porcentaje`; no dejar campos financieros derivados con el
+   valor anterior.
+3. Devolver desde `reports.cost` la proyección canónica guardada, en lugar de
+   devolver solamente `true` o `void`.
+4. Mantener el cálculo de compatibilidad únicamente para filas históricas
+   identificadas. Una fila guardada por el flujo actual debe usar siempre el valor
+   aplicado actual.
+5. Rechazar el guardado si falta un participante, si el ID compuesto no coincide
+   con la actividad o si el reparto no cuadra. Nunca seleccionar automáticamente
+   al participante principal.
+6. Extender `reports.approval` para procesar todos los participantes de una
+   actividad compartida dentro de una sola transacción, conservando el endpoint
+   existente.
+7. Reparar la fila de liquidación del período abierto dentro de la misma
+   transacción. Solo se insertará una fila cuando falte exactamente la combinación
+   única `periodo_id + actividad_id + participante_id`; nunca se creará otra
+   actividad para solucionar un desfase.
+8. Registrar `version` de la actividad en la mutación y rechazar una actualización
+   si otra persona guardó una versión más nueva. Así se evita que el último clic
+   sobrescriba silenciosamente un cambio reciente.
+
+### Cambios preventivos en Aprobaciones, Informes y Liquidación
+
+1. Eliminar la confirmación basada solo en estado local. Después de guardar, leer
+   la respuesta canónica y comparar valor total, porcentajes y valores por técnico.
+2. Mostrar éxito únicamente cuando la lectura confirmada coincida; si no coincide,
+   mostrar el desfase y mantener el modal abierto.
+3. Usar el mismo helper de identidad y la misma normalización de visitas en
+   Aprobaciones e Informes.
+4. Al cambiar de período, limpiar las filas anteriores, bloquear acciones durante
+   la carga y descartar respuestas fuera de orden mediante un contador de solicitud.
+5. Refrescar la actividad después de guardar costo técnico, reparto, costo cliente,
+   aprobación, rechazo o reactivación. El refresco debe conservar el ID real
+   seleccionado.
+6. Mantener las visitas en la sección visual Recorridos con `Recorrido vista: `,
+   pero conservar en los DTO el tipo `visita_tecnica` para que Liquidación y
+   acumulados no cambien sus reglas.
+7. Corregir el contenedor del campo monetario del reparto con altura propia y
+   alineación al inicio para que `$` siempre quede dentro del input.
+
+### Reconciliación y bloqueo antes de cerrar el período
+
+Antes de cerrar el período abierto, el flujo debe comprobar:
+
+- ninguna actividad aprobada con valor aplicado diferente al valor liquidado;
+- ningún participante sin `liquidacion_item`;
+- porcentajes y valores que sumen correctamente;
+- estados de aprobación, participante y liquidación iguales;
+- ninguna fila con identificador compuesto ambiguo;
+- ninguna visita duplicada visualmente en Recorridos.
+
+Si una validación falla, el período no se debe cerrar y Aprobaciones debe mostrar el
+registro que necesita corrección. La reconciliación se limita al período abierto;
+no se modifican períodos anteriores.
+
+### Casos de aceptación para los errores reportados
+
+1. Cambiar `$15.000` a `$20.000`, guardar, recargar cada pantalla y comprobar
+   `$20.000` en Aprobaciones, Informes y Liquidación.
+2. Cambiar un técnico de un reparto compartido y comprobar que los demás no vuelven
+   a estado anterior después de guardar o aprobar.
+3. Guardar 50%/50% y comprobar el mismo reparto en participantes, liquidación y
+   acumulados tras cerrar y abrir el modal.
+4. Aprobar una actividad compartida y comprobar que todos sus participantes,
+   entregas, aprobaciones y liquidaciones cambian juntos.
+5. Cambiar de período mientras se carga información y comprobar que una respuesta
+   lenta no reemplaza los datos del período seleccionado.
+6. Mostrar una visita en Recorridos como `Recorrido vista: <descripción>` sin
+   cambiar su tipo, código, valor, aprobación ni liquidación en la base.
+
+## Principios de conservación y no regresión
+
+Este trabajo será una corrección puntual sobre el código actual. Se conservará lo
+que ya funciona y se evitarán cambios de modelo o de flujo que no sean necesarios
+para los errores auditados.
+
+### Lo que se mantiene
+
+- Las tablas, IDs, códigos, tipos reales y relaciones actuales.
+- Las actividades, participantes, evidencias, entregas, aprobaciones y
+  liquidaciones ya existentes.
+- Los períodos cerrados y sus fotografías congeladas.
+- Las reglas económicas actuales de visitas técnicas.
+- Los flujos actuales de creación, aprobación, rechazo, reactivación, correo y
+  exportación, excepto las validaciones puntuales de integridad.
+- La representación visual que ya funciona para actividades, mantenimientos y
+  recorridos normales.
+
+### Lo que no se hará
+
+- No se crearán actividades nuevas para representar una visita.
+- No se copiarán visitas a otra tabla ni se cambiarán a `recorrido` en la base.
+- No se regenerarán códigos ni IDs.
+- No se fusionarán actividades por coincidencia de fecha, cliente o descripción.
+- No se recalcularán ni modificarán períodos anteriores.
+- No se reemplazarán valores válidos del usuario por defaults de configuración.
+- No se cambiarán reglas de pago por el hecho de mostrar una visita dentro de
+  Recorridos.
+
+### Salvaguardas antes de cada cambio
+
+1. Leer la actividad por su ID real y bloquearla antes de actualizarla.
+2. Verificar que la cantidad e identidad de participantes no cambió desde la
+   lectura del frontend.
+3. Actualizar las filas existentes con `UPDATE`; usar `INSERT` únicamente para
+   una fila de liquidación faltante y protegida por su clave única.
+4. Confirmar que la transacción no aumentó el número de actividades ni creó un
+   código nuevo.
+5. Volver a leer la misma actividad y comparar sus valores antes de cerrar el
+   modal o mostrar el mensaje de éxito.
+6. Si alguna comparación falla, hacer rollback, conservar el formulario abierto y
+   mostrar el registro que requiere atención.
+
+### Criterio de cierre sin regresiones
+
+El cambio se considera correcto solo si corrige los casos actuales y, al mismo
+tiempo, demuestra que:
+
+- la cantidad de actividades no aumenta por un guardado;
+- una visita conserva su mismo ID, código y tipo real;
+- una actividad con varios técnicos conserva exactamente sus participantes;
+- las evidencias y aprobaciones existentes siguen asociadas a la misma actividad;
+- los recorridos que ya funcionan mantienen su presentación y cálculo;
+- un período cerrado permanece intacto;
+- las pantallas muestran el mismo valor después de guardar, recargar y cambiar de
+  módulo.
