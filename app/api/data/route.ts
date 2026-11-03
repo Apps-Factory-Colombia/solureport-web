@@ -2393,6 +2393,105 @@ async function replaceMaintenanceParticipants(client: any, maintenanceId: string
   return participants;
 }
 
+/**
+ * Cambia un técnico por otro en mantenimientos programados en lote. Solo toca
+ * mantenimientos que todavía no tienen actividad operativa; los que ya la tienen
+ * se omiten para no desalinear aprobaciones y liquidación. Reutiliza
+ * replaceMaintenanceParticipants para conservar el historial del técnico retirado
+ * y notificar al nuevo.
+ */
+async function bulkReassignMaintenanceTecnico(payload: Payload, user: UserContext) {
+  await requireAdmin(user);
+  const fromTecnicoId = String(payload.fromTecnicoId || "").trim();
+  const toTecnicoId = String(payload.toTecnicoId || "").trim();
+  if (!fromTecnicoId || !toTecnicoId) throw new Error("Debes indicar el técnico actual y el nuevo técnico.");
+  if (fromTecnicoId === toTecnicoId) throw new Error("El nuevo técnico debe ser distinto al técnico actual.");
+  const apply = payload.apply === true;
+  const ids = jsonArray(payload.ids).map((id) => String(id).trim()).filter(Boolean);
+
+  return withTransaction(async (client) => {
+    const { rows: targetRows } = await client.query(
+      "SELECT id FROM public.usuarios WHERE id = $1 AND estado = 'activo' AND rol <> 'admin'",
+      [toTecnicoId],
+    );
+    if (!targetRows[0]) throw new Error("El nuevo técnico debe estar activo y no puede ser administrador.");
+
+    const { rows: candidates } = await client.query(
+      `SELECT m.id, m.fecha_programada, m.estado,
+              EXISTS (
+                SELECT 1 FROM public.actividades_operativas_mantenimientos am
+                 WHERE am.mantenimiento_programado_id = m.id
+              ) AS tiene_actividad
+         FROM public.mantenimientos_programados m
+        WHERE m.estado IN ('programado', 'asignado')
+          AND EXISTS (
+            SELECT 1 FROM public.mantenimientos_programados_participantes p
+             WHERE p.mantenimiento_id = m.id AND p.usuario_id = $1 AND p.estado = 'activo'
+          )
+          AND ($2::uuid[] IS NULL OR m.id = ANY($2::uuid[]))
+        ORDER BY m.fecha_programada, m.id
+        FOR UPDATE OF m`,
+      [fromTecnicoId, ids.length ? ids : null],
+    );
+
+    const changes: { id: string; fecha: string; estado: string; participantes: any[] }[] = [];
+    const skipped: { id: string; fecha: string; estado: string; motivo: string }[] = [];
+
+    for (const row of candidates) {
+      const base = { id: String(row.id), fecha: dateOnly(row.fecha_programada) || "", estado: String(row.estado) };
+      if (row.tiene_actividad) {
+        skipped.push({ ...base, motivo: "Ya tiene una actividad registrada; se revisa en Aprobaciones." });
+        continue;
+      }
+
+      const { rows: participantRows } = await client.query(
+        `SELECT usuario_id, rol_participacion, porcentaje, valor_ganado
+           FROM public.mantenimientos_programados_participantes
+          WHERE mantenimiento_id = $1 AND estado = 'activo'
+          FOR UPDATE`,
+        [row.id],
+      );
+      const totalPercentage = participantRows.reduce((sum: number, item: any) => sum + number(item.porcentaje), 0);
+      if (Math.abs(totalPercentage - 100) > 0.01) {
+        skipped.push({ ...base, motivo: "Los porcentajes actuales no suman 100%; revisar el reparto antes de cambiar el técnico." });
+        continue;
+      }
+
+      // Si el nuevo técnico ya participa, se suman sus porcentajes y valores para
+      // no duplicarlo y el técnico retirado deja de figurar en el reparto.
+      const merged = new Map<string, { usuarioId: string; porcentaje: number; valorCalculado: number; rol: string }>();
+      for (const item of participantRows) {
+        const usuarioId = String(item.usuario_id) === fromTecnicoId ? toTecnicoId : String(item.usuario_id);
+        const current = merged.get(usuarioId);
+        merged.set(usuarioId, {
+          usuarioId,
+          porcentaje: number(item.porcentaje) + (current?.porcentaje || 0),
+          valorCalculado: number(item.valor_ganado) + (current?.valorCalculado || 0),
+          rol: item.rol_participacion === "principal" || current?.rol === "principal" ? "principal" : "acompanante",
+        });
+      }
+
+      const participants = Array.from(merged.values());
+      changes.push({ ...base, participantes: participants });
+    }
+
+    if (apply) {
+      for (const change of changes) {
+        await replaceMaintenanceParticipants(client, change.id, { participantes: change.participantes }, user.id);
+      }
+    }
+
+    return {
+      fromTecnicoId,
+      toTecnicoId,
+      aplicado: apply,
+      aplicados: apply ? changes.length : 0,
+      cambios: changes.map(({ id, fecha, estado }) => ({ id, fecha, estado })),
+      omitidos: skipped,
+    };
+  });
+}
+
 async function getMaintenanceParticipantRows(maintenanceId: string) {
   const { rows } = await dbQuery(
     `SELECT mp.id, mp.mantenimiento_id, mp.usuario_id, mp.rol_participacion,
@@ -3930,6 +4029,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
         WHERE m.id = $1`, [payload.id]);
       return rows[0] ? enrichMaintenance(rows[0]) : null;
     }
+    case "maintenances.bulkReassignTecnico": return bulkReassignMaintenanceTecnico(payload, user);
     case "maintenances.delete": {
       await requireAdmin(user);
       const maintenanceId = String(payload.id || "").trim();

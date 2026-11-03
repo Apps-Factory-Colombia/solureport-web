@@ -39,6 +39,25 @@ export async function getMantenimientosVencidos(): Promise<{ today: string; gene
 }
 export async function createMantenimiento(maintenance: Partial<Maintenance>): Promise<Maintenance> { return dataRequest<Maintenance>("maintenances.create", maintenance); }
 export async function updateMantenimiento(id: string, maintenance: Partial<Maintenance>): Promise<Maintenance> { return dataRequest<Maintenance>("maintenances.update", { id, ...maintenance }); }
+export interface MantenimientoCambioTecnicoResult {
+  fromTecnicoId: string;
+  toTecnicoId: string;
+  aplicado: boolean;
+  aplicados: number;
+  cambios: { id: string; fecha: string; estado: string }[];
+  omitidos: { id: string; fecha: string; estado: string; motivo: string }[];
+}
+
+// Sin `apply` solo previsualiza; con `apply: true` aplica los cambios en una transacción.
+export async function reasignarTecnicoMantenimientos(payload: {
+  fromTecnicoId: string;
+  toTecnicoId: string;
+  ids?: string[];
+  apply: boolean;
+}): Promise<MantenimientoCambioTecnicoResult> {
+  return dataRequest<MantenimientoCambioTecnicoResult>("maintenances.bulkReassignTecnico", payload);
+}
+
 export async function markMantenimientoRealizado(id: string, fechaRealizado?: string): Promise<Maintenance> {
   return dataRequest<Maintenance>("maintenances.markCompleted", { id, fechaRealizado });
 }

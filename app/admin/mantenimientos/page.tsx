@@ -61,7 +61,7 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 import { Maintenance, MaintenanceStatus, Client, User, CompanySettings } from "@/lib/types";
-import { MaintenanceAdminPage, MaintenanceAdminView, getMantenimientosAdminPage, createMantenimiento, updateMantenimiento, deleteMantenimiento, markMantenimientoRealizado } from "@/lib/data/services/mantenimientos";
+import { MaintenanceAdminPage, MaintenanceAdminView, MantenimientoCambioTecnicoResult, getMantenimientosAdminPage, createMantenimiento, updateMantenimiento, deleteMantenimiento, markMantenimientoRealizado, reasignarTecnicoMantenimientos } from "@/lib/data/services/mantenimientos";
 import { getContratos, createContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
@@ -322,6 +322,11 @@ export default function MantenimientosPage() {
   const [scheduleDate, setScheduleDate] = useState("");
   const [scheduleTime, setScheduleTime] = useState("");
   const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkFromId, setBulkFromId] = useState("");
+  const [bulkToId, setBulkToId] = useState("");
+  const [bulkPreview, setBulkPreview] = useState<MantenimientoCambioTecnicoResult | null>(null);
+  const [bulkLoading, setBulkLoading] = useState(false);
   const [maintenanceToDelete, setMaintenanceToDelete] = useState<Maintenance | null>(null);
   const [deletingMaintenanceId, setDeletingMaintenanceId] = useState<string | null>(null);
   const [completingMaintenanceId, setCompletingMaintenanceId] = useState<string | null>(null);
@@ -370,6 +375,41 @@ export default function MantenimientosPage() {
       setLoading(false);
     }
   }, []);
+
+  const runBulkReassign = async (apply: boolean) => {
+    if (!bulkFromId || !bulkToId) return;
+    setBulkLoading(true);
+    try {
+      const result = await reasignarTecnicoMantenimientos({
+        fromTecnicoId: bulkFromId,
+        toTecnicoId: bulkToId,
+        // Al aplicar se usan solo los mantenimientos revisados en la vista previa.
+        ids: apply ? bulkPreview?.cambios.map((item) => item.id) : undefined,
+        apply,
+      });
+      if (!apply) {
+        setBulkPreview(result);
+        return;
+      }
+      setBulkOpen(false);
+      setBulkPreview(null);
+      setBulkFromId("");
+      setBulkToId("");
+      setNotification({
+        type: "success",
+        message: `Se cambió el técnico en ${result.aplicados} mantenimiento(s) programado(s).${result.omitidos.length ? ` Se omitieron ${result.omitidos.length}.` : ""}`,
+      });
+      await loadMaintenancePage(activeTab);
+    } catch (err) {
+      console.error("Error cambiando técnico en lote:", err);
+      setNotification({
+        type: "error",
+        message: err instanceof Error ? err.message : "No se pudo cambiar el técnico en lote.",
+      });
+    } finally {
+      setBulkLoading(false);
+    }
+  };
 
   useEffect(() => { void loadSupportingData(); }, [loadSupportingData]);
 
@@ -1181,6 +1221,18 @@ export default function MantenimientosPage() {
                 </SelectContent>
               </Select>
           </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setBulkPreview(null);
+                setBulkOpen(true);
+              }}
+              className="gap-2 border-border/50 text-foreground/80"
+            >
+              <UserCheck className="h-4 w-4" />
+              Cambiar técnico en lote
+            </Button>
           <Button
             onClick={() => {
               setEditingMaintenance(null);
@@ -1191,6 +1243,7 @@ export default function MantenimientosPage() {
             <Plus className="h-4 w-4" />
             Nuevo Mantenimiento
           </Button>
+          </div>
         </div>
 
         <Tabs
@@ -1995,6 +2048,128 @@ export default function MantenimientosPage() {
         maintenance={editingMaintenance}
         onSave={handleSave}
       />
+
+      <Dialog
+        open={bulkOpen}
+        onOpenChange={(open) => {
+          setBulkOpen(open);
+          if (!open) setBulkPreview(null);
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-foreground">Cambiar técnico en lote</DialogTitle>
+            <DialogDescription>
+              Reemplaza un técnico por otro en los mantenimientos programados que aún no tienen actividad registrada.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-foreground/80">Técnico actual</Label>
+              <Select
+                value={bulkFromId}
+                onValueChange={(value) => {
+                  setBulkFromId(value);
+                  setBulkPreview(null);
+                }}
+              >
+                <SelectTrigger className="bg-secondary/50 border-border/50">
+                  <SelectValue placeholder="Seleccionar técnico" />
+                </SelectTrigger>
+                <SelectContent className="bg-card border-border">
+                  {assignableUsers.map((t) => (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.nombre} {t.apellido}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-foreground/80">Nuevo técnico</Label>
+              <Select
+                value={bulkToId}
+                onValueChange={(value) => {
+                  setBulkToId(value);
+                  setBulkPreview(null);
+                }}
+              >
+                <SelectTrigger className="bg-secondary/50 border-border/50">
+                  <SelectValue placeholder="Seleccionar técnico" />
+                </SelectTrigger>
+                <SelectContent className="bg-card border-border">
+                  {assignableUsers
+                    .filter((t) => t.id !== bulkFromId)
+                    .map((t) => (
+                      <SelectItem key={t.id} value={t.id}>
+                        {t.nombre} {t.apellido}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {bulkPreview && (
+              <div className="rounded-lg border border-border/50 bg-secondary/20 p-3 space-y-2 text-sm">
+                <p className="font-medium text-foreground">
+                  {bulkPreview.cambios.length > 0
+                    ? `${bulkPreview.cambios.length} mantenimiento(s) programado(s) cambiarán de técnico.`
+                    : "No hay mantenimientos programados para cambiar con este técnico."}
+                </p>
+                {bulkPreview.cambios.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Fechas: {bulkPreview.cambios.map((item) => item.fecha).join(", ")}
+                  </p>
+                )}
+                {bulkPreview.omitidos.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-xs font-semibold text-amber-400">
+                      Se omiten {bulkPreview.omitidos.length}:
+                    </p>
+                    {bulkPreview.omitidos.map((item) => (
+                      <p key={item.id} className="text-xs text-muted-foreground">
+                        {item.fecha}: {item.motivo}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="gap-2 sm:justify-between">
+            <Button
+              variant="outline"
+              onClick={() => setBulkOpen(false)}
+              disabled={bulkLoading}
+              className="border-border/50"
+            >
+              Cancelar
+            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={() => void runBulkReassign(false)}
+                disabled={bulkLoading || !bulkFromId || !bulkToId}
+                className="border-border/50"
+              >
+                {bulkLoading && !bulkPreview ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Revisar
+              </Button>
+              <Button
+                onClick={() => void runBulkReassign(true)}
+                disabled={bulkLoading || !bulkPreview || bulkPreview.cambios.length === 0}
+                className="bg-gold hover:bg-gold-dark text-background font-semibold"
+              >
+                {bulkLoading && bulkPreview ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Aplicar cambio
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={scheduleOpen} onOpenChange={setScheduleOpen}>
         <DialogContent className="bg-card border-border sm:max-w-md">
