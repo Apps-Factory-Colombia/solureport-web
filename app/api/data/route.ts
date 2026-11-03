@@ -2631,7 +2631,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
           ap_scope.tecnico_id = ${userScopeParam}
           OR d_scope.enviado_por_id = ${userScopeParam}
         )
-        AND d_scope.estado IN ('enviada', 'aprobada')
+        AND (d_scope.estado = 'aprobada' OR (d_scope.estado = 'enviada' AND d_scope.enviado_en IS NOT NULL))
         AND COALESCE(d_scope.fecha_ejecucion, ${BOGOTA_DATE_SQL}) <= ${BOGOTA_DATE_SQL}
    )` : null;
   // Admin lists represent the state of the whole maintenance. A technician
@@ -2881,7 +2881,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
          AND d_scope.participante_id = ap_scope.id
        WHERE am_scope.mantenimiento_programado_id = m.id
          AND ap_scope.tecnico_id = ${statusUserParam}
-         AND d_scope.estado IN ('enviada', 'aprobada')
+         AND (d_scope.estado = 'aprobada' OR (d_scope.estado = 'enviada' AND d_scope.enviado_en IS NOT NULL))
          AND COALESCE(d_scope.fecha_ejecucion, ${BOGOTA_DATE_SQL}) <= ${BOGOTA_DATE_SQL}
     )` : null;
      const statusGloballyCompleted = globallyCompletedMaintenance;
@@ -5286,7 +5286,7 @@ async function submitMaintenanceParticipant(payload: Payload, user: UserContext)
                AND d_check.participante_id = p_check.id
              WHERE p_check.actividad_id = $1
                AND p_check.tecnico_id = mp.usuario_id
-               AND d_check.estado IN ('enviada', 'aprobada')
+               AND (d_check.estado = 'aprobada' OR (d_check.estado = 'enviada' AND d_check.enviado_en IS NOT NULL))
           ))::int AS enviados
           FROM public.mantenimientos_programados_participantes mp
          WHERE mp.mantenimiento_id = $2
