@@ -1012,7 +1012,7 @@ function anySubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m") {
         ON d_any.actividad_id = ap_any.actividad_id
        AND d_any.participante_id = ap_any.id
      WHERE am_any.mantenimiento_programado_id = ${scheduleAlias}.id
-       AND d_any.estado IN ('enviada', 'aprobada')
+       AND (d_any.estado = 'aprobada' OR (d_any.estado = 'enviada' AND d_any.enviado_en IS NOT NULL))
        AND COALESCE(d_any.fecha_ejecucion, ${BOGOTA_DATE_SQL}) <= ${BOGOTA_DATE_SQL}
   )`;
 }
@@ -1044,7 +1044,7 @@ function allSubmittedMaintenanceDeliveryPredicate(scheduleAlias = "m", dateRange
              ON d_all.actividad_id = ap_all.actividad_id
             AND d_all.participante_id = ap_all.id
           WHERE am_all.mantenimiento_programado_id = ${scheduleAlias}.id
-            AND d_all.estado IN ('enviada', 'aprobada')
+            AND (d_all.estado = 'aprobada' OR (d_all.estado = 'enviada' AND d_all.enviado_en IS NOT NULL))
             AND COALESCE(d_all.fecha_ejecucion, ${BOGOTA_DATE_SQL}) <= ${BOGOTA_DATE_SQL}${rangeFilter}
        )
    )`;
@@ -2398,7 +2398,8 @@ async function getMaintenanceParticipantRows(maintenanceId: string) {
     `SELECT mp.id, mp.mantenimiento_id, mp.usuario_id, mp.rol_participacion,
             mp.porcentaje, mp.valor_ganado AS valor_calculado, mp.estado,
             mp.created_at AS fecha_creacion,
-            delivery.id AS entrega_id, delivery.estado AS estado_reporte,
+            delivery.id AS entrega_id,
+            CASE WHEN delivery.estado = 'enviada' AND delivery.enviado_en IS NULL THEN 'pendiente' ELSE delivery.estado END AS estado_reporte,
             delivery.observaciones AS entrega_observaciones,
             delivery.fecha_ejecucion AS fecha_entrega,
             delivery.actividades_realizadas AS entrega_actividades_realizadas,
@@ -2428,7 +2429,7 @@ async function getMaintenanceParticipantRows(maintenanceId: string) {
           LIMIT 1
        ) activity_participant ON true
        LEFT JOIN LATERAL (
-         SELECT d.id, d.estado, d.observaciones, d.fecha_ejecucion,
+         SELECT d.id, d.estado, d.enviado_en, d.observaciones, d.fecha_ejecucion,
                 d.actividades_realizadas, d.tipo_pendiente,
                 d.descripcion_pendiente, d.receptor_nombre, d.firmado,
                 d.firma_receptor_url, d.foto_bitacora_url, d.enviado_por_id,
@@ -2783,7 +2784,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
         'valor_calculado', mp.valor_ganado,
         'estado', mp.estado,
         'estado_reporte', COALESCE((
-          SELECT d.estado
+          SELECT CASE WHEN d.estado = 'enviada' AND d.enviado_en IS NULL THEN 'pendiente' ELSE d.estado END
             FROM public.actividades_operativas_mantenimientos am2
             JOIN public.actividades_operativas_participantes ap2 ON ap2.actividad_id = am2.actividad_id AND ap2.tecnico_id = mp.usuario_id
             JOIN public.actividades_operativas_entregas d ON d.actividad_id = ap2.actividad_id AND d.participante_id = ap2.id
@@ -3761,7 +3762,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
           'valor_calculado', mp.valor_ganado,
           'estado', mp.estado,
           'estado_reporte', COALESCE((
-            SELECT d.estado
+            SELECT CASE WHEN d.estado = 'enviada' AND d.enviado_en IS NULL THEN 'pendiente' ELSE d.estado END
               FROM public.actividades_operativas_mantenimientos am2
               JOIN public.actividades_operativas_participantes ap2 ON ap2.actividad_id = am2.actividad_id AND ap2.tecnico_id = mp.usuario_id
               JOIN public.actividades_operativas_entregas d ON d.actividad_id = ap2.actividad_id AND d.participante_id = ap2.id
