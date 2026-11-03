@@ -89,12 +89,39 @@ export function getPool(): Pool {
   return globalThis.solureportPool;
 }
 
+const POOL_ACQUIRE_ATTEMPTS = 3;
+
+/**
+ * Obtiene una conexión del pool. Si el pool está saturado y la espera vence, se
+ * reintenta unas veces con una pausa corta. Solo se reintenta la adquisición de
+ * la conexión: en ese punto ninguna sentencia se ha ejecutado, así que reintentar
+ * no puede duplicar una escritura.
+ */
+async function acquireClient(): Promise<PoolClient> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= POOL_ACQUIRE_ATTEMPTS; attempt += 1) {
+    try {
+      return await getPool().connect();
+    } catch (error) {
+      lastError = error;
+      if (!isDatabaseCapacityError(error) || attempt === POOL_ACQUIRE_ATTEMPTS) break;
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
+  }
+  throw lastError;
+}
+
 export async function dbQuery<T extends QueryResultRow = QueryResultRow>(text: string, values: unknown[] = []) {
-  return getPool().query<T>(text, values);
+  const client = await acquireClient();
+  try {
+    return await client.query<T>(text, values);
+  } finally {
+    client.release();
+  }
 }
 
 export async function withTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await getPool().connect();
+  const client = await acquireClient();
   try {
     await client.query("BEGIN");
     const result = await work(client);
