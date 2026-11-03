@@ -830,9 +830,9 @@ export function generateComprobantePDF(data: {
   items: { actividad: string; fecha: string; valorBase: number; porcentaje: number; valorLiquidado: number }[];
   desplazamientos?: { descripcion: string; fecha: string; valor: number; descuento?: number }[];
   totalAuxilio: number;
+  // Descuento total por tardanza (auxilio + rodamiento), en una sola línea.
   totalDescuentoTardanza?: number;
   totalRodamiento: number;
-  totalDescuentoRecorridos?: number;
   totalExtraLider?: number;
   grandTotal: number;
 }): void {
@@ -976,18 +976,13 @@ export function generateComprobantePDF(data: {
 
   const totalRows: Array<[string, string, boolean]> = [
     ["Subtotal Auxilio Extralegal por Productividad y Respaldo Digital:", formatCurrencyPDF(data.totalAuxilio), false],
+    ["Subtotal Auxilio de Rodamiento y Movilización Operativa:", formatCurrencyPDF(data.totalRodamiento), false],
   ];
   if ((data.totalDescuentoTardanza || 0) > 0) {
-    totalRows.push(["Descuento por tardanza en Auxilio Extralegal:", `-${formatCurrencyPDF(data.totalDescuentoTardanza || 0)}`, false]);
-    totalRows.push(["Auxilio Extralegal Neto:", formatCurrencyPDF(data.totalAuxilio - (data.totalDescuentoTardanza || 0)), false]);
-  }
-  totalRows.push(["Subtotal Auxilio de Rodamiento y Movilización Operativa:", formatCurrencyPDF(data.totalRodamiento), false]);
-  if ((data.totalDescuentoRecorridos || 0) > 0) {
-    totalRows.push(["Descuento por tardanza en Auxilio de Rodamiento:", `-${formatCurrencyPDF(data.totalDescuentoRecorridos || 0)}`, false]);
-    totalRows.push(["Auxilio de Rodamiento Neto:", formatCurrencyPDF(data.totalRodamiento - (data.totalDescuentoRecorridos || 0)), false]);
+    totalRows.push(["Subtotal descuento por tardanza:", `-${formatCurrencyPDF(data.totalDescuentoTardanza || 0)}`, false]);
   }
   if ((data.totalExtraLider || 0) > 0) totalRows.push(["Extra Líder:", formatCurrencyPDF(data.totalExtraLider || 0), false]);
-  totalRows.push(["TOTAL A PAGAR:", formatCurrencyPDF(data.grandTotal), true]);
+  totalRows.push(["TOTAL PARA PAGO:", formatCurrencyPDF(data.grandTotal), true]);
 
   const legalLines = doc.splitTextToSize(legalDeclaration, tableContentWidth - 10);
   const legalBlockHeight = legalLines.length * 4 + 10;

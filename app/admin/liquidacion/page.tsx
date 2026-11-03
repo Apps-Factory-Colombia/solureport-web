@@ -205,6 +205,12 @@ function buildStableOrderKey(periodId: string, entityId: string) {
 }
 
 function getReportLiquidationBaseValue(report: ActivityReport) {
+  // En un período abierto el valor aplicado es el canónico. La base guardada en
+  // liquidación puede quedar atrás (p. ej. $15.000 guardado y $90.000 aplicado).
+  if (!report.liquidacionCongelada && report.valorActividadAplicadoGlobal != null) {
+    return Number(report.valorActividadAplicadoGlobal) || 0;
+  }
+
   if (report.liquidacionValorBase != null) {
     return Number(report.liquidacionValorBase) || 0;
   }
@@ -1182,9 +1188,8 @@ export default function LiquidacionPage() {
           descuento: pdfDiscountByReport.get(report.id) || 0,
         })),
         totalAuxilio: pdfAuxilio,
-        totalDescuentoTardanza: pdfAuxilioDiscount,
+        totalDescuentoTardanza: pdfAuxilioDiscount + pdfRouteBonusDiscount,
         totalRodamiento: pdfRouteBonus,
-        totalDescuentoRecorridos: pdfRouteBonusDiscount,
         totalExtraLider: pdfExtraLider,
         grandTotal: pdfAuxilio - pdfAuxilioDiscount + pdfRouteBonus - pdfRouteBonusDiscount + pdfExtraLider,
       });
@@ -2086,10 +2091,9 @@ export default function LiquidacionPage() {
                   const auxilioDiscount = auxilioReports.reduce((sum, report) => sum + (discountByReport.get(report.id) || 0), 0);
                   const routeBonusGross = routeBonusReports.reduce((sum, report) => sum + getReportLiquidationGrossValue(report), 0);
                   const routeBonusDiscount = routeBonusReports.reduce((sum, report) => sum + (discountByReport.get(report.id) || 0), 0);
-                  const routeBonusNet = routeBonusGross - routeBonusDiscount;
-                  const auxilioNeto = auxilioBruto - auxilioDiscount;
+                  const totalDescuento = auxilioDiscount + routeBonusDiscount;
                   const extraLider = leaderExtraByTech.get(techId) || 0;
-                  const totalComprobante = auxilioNeto + routeBonusNet + extraLider;
+                  const totalComprobante = auxilioBruto + routeBonusGross - totalDescuento + extraLider;
 
                   return (
                     <Card
@@ -2118,19 +2122,15 @@ export default function LiquidacionPage() {
                             </span>
                             <span className="font-semibold text-gold">{formatCurrency(auxilioBruto)}</span>
                           </div>
-                          {auxilioDiscount > 0 && (
+                          {totalDescuento > 0 && (
                             <div className="flex items-center justify-between text-sm">
                               <span className="flex items-center gap-1.5 text-muted-foreground">
                                 <Percent className="h-3.5 w-3.5 text-red-400" />
-                                DESCUENTO TARDANZA · AUXILIO
+                                DESCUENTO POR TARDANZA
                               </span>
-                              <span className="font-semibold text-red-400">-{formatCurrency(auxilioDiscount)}</span>
+                              <span className="font-semibold text-red-400">-{formatCurrency(totalDescuento)}</span>
                             </div>
                           )}
-                          <div className="flex items-center justify-between text-sm">
-                            <span className="text-muted-foreground">AUXILIO NETO</span>
-                            <span className="font-semibold text-gold">{formatCurrency(auxilioNeto)}</span>
-                          </div>
                           {routeBonusGross > 0 && (
                             <div className="flex items-center justify-between text-sm">
                               <span className="flex items-center gap-1.5 text-muted-foreground">
@@ -2138,18 +2138,6 @@ export default function LiquidacionPage() {
                                 BONO POR RECORRIDO Y VISITAS · BRUTO
                               </span>
                               <span className="font-semibold text-emerald-400">{formatCurrency(routeBonusGross)}</span>
-                            </div>
-                          )}
-                          {routeBonusDiscount > 0 && (
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="flex items-center gap-1.5 text-muted-foreground">DESCUENTO TARDANZA · VISITAS TÉCNICAS</span>
-                              <span className="font-semibold text-red-400">-{formatCurrency(routeBonusDiscount)}</span>
-                            </div>
-                          )}
-                          {routeBonusGross > 0 && (
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="text-muted-foreground">BONO POR RECORRIDO Y VISITAS NETO</span>
-                              <span className="font-semibold text-emerald-400">{formatCurrency(routeBonusNet)}</span>
                             </div>
                           )}
                           {extraLider > 0 && (
@@ -2350,6 +2338,7 @@ export default function LiquidacionPage() {
             const routeBonusNet = routeBonusTotal - descuentoVisitas;
             const auxilioNeto = auxilioTotal - descuentoAuxilio;
             const extraLider = leaderExtraByTech.get(selectedTechId) || 0;
+            const totalDescuento = descuentoAuxilio + descuentoVisitas;
             const grandTotal = auxilioNeto + routeBonusNet + extraLider;
 
             return (
@@ -2571,23 +2560,17 @@ export default function LiquidacionPage() {
 
                   <div className="border-t border-border/50 pt-3 space-y-2">
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Auxilio Extralegal por Productividad</span>
+                      <span className="text-muted-foreground">Subtotal Auxilio Extralegal por Productividad</span>
                       <span className="font-medium text-foreground">{formatCurrency(auxilioTotal)}</span>
                     </div>
-                    {descuentoAuxilio > 0 && (
-                      <div className="flex justify-between text-sm">
-                        <span className="text-muted-foreground">Descuento por Tardanza · Auxilio</span>
-                        <span className="font-medium text-red-400">-{formatCurrency(descuentoAuxilio)}</span>
-                      </div>
-                    )}
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Auxilio Extralegal Neto</span>
-                      <span className="font-medium text-foreground">{formatCurrency(auxilioNeto)}</span>
+                      <span className="text-muted-foreground">Subtotal Auxilio de Rodamiento y Movilización Operativa</span>
+                      <span className="font-medium text-emerald-400">{formatCurrency(routeBonusTotal)}</span>
                     </div>
-                    {routeBonusReports.length > 0 && (
+                    {totalDescuento > 0 && (
                       <div className="flex justify-between text-sm">
-                        <span className="text-muted-foreground">Auxilio de Rodamiento Neto</span>
-                        <span className="font-medium text-emerald-400">{formatCurrency(routeBonusNet)}</span>
+                        <span className="text-muted-foreground">Subtotal descuento por tardanza</span>
+                        <span className="font-medium text-red-400">-{formatCurrency(totalDescuento)}</span>
                       </div>
                     )}
                     {extraLider > 0 && (
@@ -2597,7 +2580,7 @@ export default function LiquidacionPage() {
                       </div>
                     )}
                     <div className="flex justify-between text-lg font-bold border-t border-gold/20 pt-2">
-                      <span className="text-foreground">TOTAL A LIQUIDAR</span>
+                      <span className="text-foreground">TOTAL PARA PAGO</span>
                       <span className="text-gold">{formatCurrency(grandTotal)}</span>
                     </div>
                   </div>
