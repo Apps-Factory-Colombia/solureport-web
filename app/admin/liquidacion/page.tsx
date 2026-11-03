@@ -1200,16 +1200,23 @@ export default function LiquidacionPage() {
     if (!selectedPeriod || !canonicalSummary) return;
 
     const summaryByTechnician = new Map(canonicalSummary.technicians.map((row) => [row.tecnicoId, row]));
+    // El total neto no cambia: las visitas solo se mueven de auxilio a bono.
+    const visitNetByTechnician = liquidablePeriodReports.reduce<Map<string, number>>((acc, report) => {
+      if (report.tipo !== "visita_tecnica") return acc;
+      acc.set(report.tecnicoId, (acc.get(report.tecnicoId) || 0) + getReportLiquidationEarnedValue(report));
+      return acc;
+    }, new Map());
     const summaryRows = users
       .filter((user) => user.estado === "activo" && user.rol !== "admin")
       .map((user) => {
         const summary = summaryByTechnician.get(user.id);
+        const visitNet = visitNetByTechnician.get(user.id) || 0;
         return {
           Nombre: `${user.nombre || ""} ${user.apellido || ""}`.trim(),
           Cédula: user.cedula?.trim() || summary?.cedula || "",
-          "Auxilio extralegal": Number(summary?.totalNoRecorridosAprobados || 0),
+          "Auxilio extralegal": Number(summary?.totalNoRecorridosAprobados || 0) - visitNet,
           "Descuento por tardanza": Number(summary?.descuentoValor || 0),
-          "Bono por recorrido": Number(summary?.totalRecorridos || 0),
+          "Bono por recorrido y visitas": Number(summary?.totalRecorridos || 0) + visitNet,
           "Extra líder": Number(summary?.extraLider || 0),
           "Total neto": Number(summary?.total || 0),
         };
@@ -1217,18 +1224,18 @@ export default function LiquidacionPage() {
 
     const summaryHeaders = [
       "Nombre", "Cédula", "Auxilio extralegal", "Descuento por tardanza",
-      "Bono por recorrido", "Extra líder", "Total neto",
+      "Bono por recorrido y visitas", "Extra líder", "Total neto",
     ];
     const summaryValues = summaryRows.map((row) => summaryHeaders.map((header) => row[header as keyof typeof row]));
     const summaryTotal = summaryRows.reduce((total, row) => ({
       auxilio: total.auxilio + Number(row["Auxilio extralegal"] || 0),
       descuento: total.descuento + Number(row["Descuento por tardanza"] || 0),
-      recorrido: total.recorrido + Number(row["Bono por recorrido"] || 0),
+      recorrido: total.recorrido + Number(row["Bono por recorrido y visitas"] || 0),
       extra: total.extra + Number(row["Extra líder"] || 0),
       neto: total.neto + Number(row["Total neto"] || 0),
     }), { auxilio: 0, descuento: 0, recorrido: 0, extra: 0, neto: 0 });
 
-    const detailHeaders = ["Nombre", "Cédula", "Tipo", "Código", "Fecha", "Auxilio extralegal", "Descuento por tardanza", "Bono por recorrido", "Estado"];
+    const detailHeaders = ["Nombre", "Cédula", "Tipo", "Código", "Fecha", "Auxilio extralegal", "Descuento por tardanza", "Bono por recorrido y visitas", "Estado"];
     const detailRows = Array.from(summaryByTechnician.keys()).flatMap((technicianId) => {
       const user = users.find((candidate) => candidate.id === technicianId);
       const technicianReports = liquidablePeriodReports.filter((report) => report.tecnicoId === technicianId);
@@ -1245,7 +1252,7 @@ export default function LiquidacionPage() {
           report.codigoRegistro || "",
           report.fecha,
           route ? 0 : gross,
-          route ? 0 : discount,
+          report.tipo === "recorrido" ? 0 : discount,
           route ? gross : 0,
           getEstadoLabel(report.estadoAprobacionLider),
         ];
