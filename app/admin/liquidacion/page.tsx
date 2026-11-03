@@ -101,11 +101,17 @@ function getTipoLabel(tipo: ActivityReport["tipo"]) {
   return tipo;
 }
 
+// Las visitas técnicas se presentan en el bloque de rodamiento. Su tipo real
+// sigue siendo visita_tecnica para descuentos y extra líder.
 function isRouteBonusReport(report: ActivityReport) {
-  return report.tipo === "recorrido";
+  return report.tipo === "recorrido" || report.tipo === "visita_tecnica";
 }
 
 function getRouteBonusDescription(report: ActivityReport) {
+  if (report.tipo === "visita_tecnica") {
+    return `Recorrido vista técnica: ${report.descripcion || "Visita técnica"}`;
+  }
+
   const route = [report.puntoPartida, report.puntoLlegada].filter(Boolean).join(" - ");
   const label = report.tipoRecorrido === "con_herramienta" ? "Recorrido con herramienta:" : "Recorrido normal:";
   const detail = route || report.descripcion || "Recorrido";
@@ -1163,9 +1169,7 @@ export default function LiquidacionPage() {
         tecnico: `${tech.nombre} ${tech.apellido}`,
         cedula: employeeDocument,
         items: pdfAuxilioReports.map((report) => ({
-          actividad: report.tipo === "visita_tecnica"
-            ? `Recorrido vista: ${report.descripcion || "Visita técnica"}`
-            : report.descripcion || getTipoLabel(report.tipo),
+          actividad: report.descripcion || getTipoLabel(report.tipo),
           fecha: report.fecha,
           valorBase: getReportLiquidationBaseValue(report),
           porcentaje: getReportLiquidationPercentage(report),
@@ -1484,7 +1488,7 @@ export default function LiquidacionPage() {
                     <p className="text-xl font-bold text-foreground">{periodRouteCount}</p>
                     <p className="text-xs text-muted-foreground">Recorridos normales</p>
                     {periodTechnicalVisitCount > 0 && (
-                      <p className="text-[10px] text-muted-foreground">{periodTechnicalVisitCount} visitas en productividad</p>
+                      <p className="text-[10px] text-muted-foreground">{periodTechnicalVisitCount} visitas en rodamiento</p>
                     )}
                   </div>
                 </CardContent>
@@ -2124,7 +2128,7 @@ export default function LiquidacionPage() {
                             <div className="flex items-center justify-between text-sm">
                               <span className="flex items-center gap-1.5 text-muted-foreground">
                                 <Bike className="h-3.5 w-3.5 text-emerald-400" />
-                                BONO POR RECORRIDO · BRUTO
+                                BONO POR RECORRIDO Y VISITAS · BRUTO
                               </span>
                               <span className="font-semibold text-emerald-400">{formatCurrency(routeBonusGross)}</span>
                             </div>
@@ -2137,7 +2141,7 @@ export default function LiquidacionPage() {
                           )}
                           {routeBonusGross > 0 && (
                             <div className="flex items-center justify-between text-sm">
-                              <span className="text-muted-foreground">BONO POR RECORRIDO NETO</span>
+                              <span className="text-muted-foreground">BONO POR RECORRIDO Y VISITAS NETO</span>
                               <span className="font-semibold text-emerald-400">{formatCurrency(routeBonusNet)}</span>
                             </div>
                           )}
