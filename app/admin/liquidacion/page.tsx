@@ -118,23 +118,14 @@ function getRouteBonusDescription(report: ActivityReport) {
   return `${label} ${detail}`;
 }
 
-function distributeAttendanceDiscount(reports: ActivityReport[], totalDiscount: number) {
-  const applicable = reports.filter((report) => report.tipo !== "recorrido");
+// Cada reporte descuenta su propio bruto. El total del comprobante sale de sumar
+// estos valores; nunca se reparte un total guardado entre reportes.
+function getAttendanceDiscountByReport(reports: ActivityReport[]) {
   const result = new Map<string, number>();
-  const totalBase = applicable.reduce((sum, report) => sum + getReportLiquidationGrossValue(report), 0);
-  const cappedDiscount = Math.min(Math.max(0, totalDiscount), totalBase);
-  let allocated = 0;
-
-  applicable.forEach((report, index) => {
-    const amount = index === applicable.length - 1
-      ? cappedDiscount - allocated
-      : totalBase > 0
-        ? Math.round(cappedDiscount * getReportLiquidationGrossValue(report) / totalBase)
-        : 0;
-    result.set(report.id, amount);
-    allocated += amount;
+  reports.forEach((report) => {
+    if (report.tipo === "recorrido") return;
+    result.set(report.id, getReportLiquidationDiscount(report) ?? 0);
   });
-
   return result;
 }
 
@@ -274,8 +265,10 @@ function getReportLiquidationDiscount(report: ActivityReport) {
   if (report.liquidacionDescuentoTardanza == null) return null;
   if (report.liquidacionCongelada) return Number(report.liquidacionDescuentoTardanza) || 0;
 
+  // En un período abierto el descuento sale del mismo valor aplicado que el bruto,
+  // no de la copia guardada, para que ambos cuadren.
   const attendancePercentage = Number(report.liquidacionPorcentajeDescuentoTardanza ?? 0) || 0;
-  return Number(report.liquidacionDescuentoTardanza) || 0;
+  return Math.round(getReportLiquidationGrossValue(report) * attendancePercentage) / 100;
 }
 
 function styleExcelSheet(
@@ -1162,7 +1155,7 @@ export default function LiquidacionPage() {
       );
       const pdfAuxilioReports = pdfReports.filter((r) => !isRouteBonusReport(r));
       const pdfRouteBonusReports = pdfReports.filter(isRouteBonusReport);
-      const pdfDiscountByReport = distributeAttendanceDiscount(pdfReports, techData.descuentoValor);
+      const pdfDiscountByReport = getAttendanceDiscountByReport(pdfReports);
       const pdfAuxilio = pdfAuxilioReports.reduce((sum, report) => sum + getReportLiquidationGrossValue(report), 0);
       const pdfAuxilioDiscount = pdfAuxilioReports.reduce((sum, report) => sum + (pdfDiscountByReport.get(report.id) || 0), 0);
       const pdfRouteBonus = pdfRouteBonusReports.reduce((sum, report) => sum + getReportLiquidationGrossValue(report), 0);
@@ -1245,7 +1238,7 @@ export default function LiquidacionPage() {
       const user = users.find((candidate) => candidate.id === technicianId);
       const technicianReports = liquidablePeriodReports.filter((report) => report.tecnicoId === technicianId);
       const summary = summaryByTechnician.get(technicianId);
-      const discountByReport = distributeAttendanceDiscount(technicianReports, Number(summary?.descuentoValor || 0));
+      const discountByReport = getAttendanceDiscountByReport(technicianReports);
       return technicianReports.map((report) => {
         const gross = getReportLiquidationGrossValue(report);
         const discount = discountByReport.get(report.id) || 0;
@@ -2086,7 +2079,7 @@ export default function LiquidacionPage() {
                   const techReports = filteredComprobanteReports.filter((r) => r.tecnicoId === techId);
                   const auxilioReports = techReports.filter((r) => !isRouteBonusReport(r));
                   const routeBonusReports = techReports.filter(isRouteBonusReport);
-                  const discountByReport = distributeAttendanceDiscount(techReports, data.descuentoValor);
+                  const discountByReport = getAttendanceDiscountByReport(techReports);
                   const auxilioBruto = auxilioReports.reduce((sum, report) => sum + getReportLiquidationGrossValue(report), 0);
                   const auxilioDiscount = auxilioReports.reduce((sum, report) => sum + (discountByReport.get(report.id) || 0), 0);
                   const routeBonusGross = routeBonusReports.reduce((sum, report) => sum + getReportLiquidationGrossValue(report), 0);
@@ -2329,7 +2322,7 @@ export default function LiquidacionPage() {
             );
             const auxilioReports = techReportsForComprobante.filter((r) => !isRouteBonusReport(r));
             const routeBonusReports = techReportsForComprobante.filter(isRouteBonusReport);
-            const discountByReport = distributeAttendanceDiscount(techReportsForComprobante, techData.descuentoValor);
+            const discountByReport = getAttendanceDiscountByReport(techReportsForComprobante);
 
             const auxilioTotal = auxilioReports.reduce((sum, report) => sum + getReportLiquidationGrossValue(report), 0);
             const descuentoAuxilio = auxilioReports.reduce((sum, report) => sum + (discountByReport.get(report.id) || 0), 0);

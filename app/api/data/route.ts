@@ -1262,6 +1262,49 @@ async function overdueMaintenanceRows(payload: Payload = {}) {
   };
 }
 
+// Para periodos abiertos el valor aplicado es el canónico y la copia de liquidación
+// se deriva de él. Nunca se reconstruye desde valor_base: esa reconstrucción revertía
+// valores ya corregidos y dejaba el descuento calculado sobre un bruto viejo.
+async function syncOpenLiquidationCopy(
+  query: (sql: string, params: unknown[]) => Promise<unknown>,
+  scope: { technicianId?: string; periodId?: string } = {},
+) {
+  const params: unknown[] = [];
+  const filters: string[] = [];
+  if (scope.technicianId) {
+    params.push(scope.technicianId);
+    filters.push(`AND li.tecnico_id = $${params.length}`);
+  }
+  if (scope.periodId) {
+    params.push(scope.periodId);
+    filters.push(`AND li.periodo_id = $${params.length}`);
+  }
+  await query(
+    `WITH objetivo AS (
+        SELECT li.id,
+               COALESCE(p.porcentaje, li.porcentaje, 0) AS porcentaje,
+               ROUND(COALESCE(a.valor_aplicado, 0) * COALESCE(p.porcentaje, li.porcentaje, 0) / 100, 2) AS bruto,
+               COALESCE(li.porcentaje_descuento_tardanza, 0) AS porcentaje_descuento
+          FROM public.liquidacion_items li
+          JOIN public.actividades_operativas a ON a.id = li.actividad_id
+          JOIN public.periodos_liquidacion pl ON pl.id = li.periodo_id AND pl.estado = 'abierto'
+          LEFT JOIN public.actividades_operativas_participantes p ON p.id = li.participante_id
+         WHERE li.tipo <> 'recorrido' AND li.estado <> 'anulado'
+           ${filters.join(" ")}
+     )
+     UPDATE public.liquidacion_items li
+        SET porcentaje = objetivo.porcentaje,
+            valor_ganado_original = objetivo.bruto,
+            valor_ganado = ROUND(objetivo.bruto * (1 - objetivo.porcentaje_descuento / 100), 2),
+            descuento_tardanza = ROUND(objetivo.bruto * objetivo.porcentaje_descuento / 100, 2),
+            updated_at = clock_timestamp()
+       FROM objetivo
+      WHERE li.id = objetivo.id
+        AND ABS(COALESCE(li.valor_ganado_original, -1) - objetivo.bruto) > 0.01`,
+    params,
+  );
+}
+
 async function getLiveLiquidationRows(periodId: string, technicianIds?: string[] | null) {
   const freezeSchemaReady = await hasLiquidationFreezeSchema();
   const carryExpression = freezeSchemaReady ? "COALESCE(li.es_arrastre, false)" : "false";
@@ -4383,23 +4426,7 @@ async function recalculateOpenAttendanceRules(client: any) {
            LEAST(100, COALESCE(SUM(porcentaje) FILTER (WHERE descuento_aplicado), 0)) AS porcentaje_aplicado
       FROM attendance_rules_recalc GROUP BY tecnico_id, periodo_id
   `);
-  await client.query(`
-    UPDATE public.liquidacion_items li
-       SET valor_ganado_original = ROUND(COALESCE(li.valor_base, ap.valor_base, a.valor_base) * COALESCE(li.porcentaje, ap.porcentaje, 0) / 100, 2),
-           valor_ganado = ROUND(COALESCE(li.valor_base, ap.valor_base, a.valor_base) * COALESCE(li.porcentaje, ap.porcentaje, 0) / 100, 2),
-           descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp()
-      FROM public.actividades_operativas a
-      JOIN public.actividades_operativas_participantes ap ON ap.actividad_id = a.id
-      JOIN attendance_rules_people people ON people.tecnico_id = ap.tecnico_id
-      JOIN public.periodos_liquidacion pl ON pl.id = people.periodo_id AND pl.estado = 'abierto'
-     WHERE li.actividad_id = a.id AND li.participante_id = ap.id
-       AND li.tecnico_id = people.tecnico_id AND li.periodo_id = people.periodo_id
-       AND li.tipo <> 'recorrido' AND li.estado <> 'anulado'
-       AND COALESCE(li.valor_base, ap.valor_base, a.valor_base) > 0
-       AND ABS(COALESCE(li.valor_base, ap.valor_base, a.valor_base) - COALESCE(a.valor_aplicado, 0)) > 0.01
-       AND ABS(COALESCE(li.valor_ganado_original, ap.valor_ganado, li.valor_ganado)
-         - (COALESCE(a.valor_aplicado, 0) * COALESCE(li.porcentaje, ap.porcentaje, 0) / 100)) <= 0.01
-  `);
+  await syncOpenLiquidationCopy((sql, params) => client.query(sql, params));
   await client.query(`
     UPDATE public.liquidacion_items li
        SET descuento_tardanza = ROUND(COALESCE(li.valor_ganado_original, li.valor_ganado) * p.porcentaje_aplicado / 100, 2),
@@ -5879,7 +5906,7 @@ async function createOperationalActivity(payload: Payload, user: UserContext) {
       const valueBase = Math.max(0, number(item.valorBase ?? valorBase));
       const valueEarned = type === "recorrido"
         ? Math.max(0, number(item.valorGanado ?? (valorAplicado * percentage / 100)))
-        : calculateLiquidationAmount(valueBase, percentage);
+        : calculateLiquidationAmount(valorAplicado, percentage);
       const { rows: participantRowsResult } = await client.query(
         `INSERT INTO public.actividades_operativas_participantes (actividad_id, tecnico_id, rol_participacion, porcentaje, valor_base, valor_ganado)
          VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
@@ -5964,7 +5991,7 @@ async function addOperationalParticipant(payload: Payload, user: UserContext) {
     const participantBase = Math.max(0, number(payload.valorBase ?? activity.valor_base));
     const participantEarned = activity.tipo === "recorrido"
       ? Math.max(0, number(payload.valorGanado ?? (number(activity.valor_aplicado) * participantPercentage / 100)))
-      : calculateLiquidationAmount(participantBase, participantPercentage);
+      : calculateLiquidationAmount(number(activity.valor_aplicado), participantPercentage);
     const { rows: participantRows } = await client.query("INSERT INTO public.actividades_operativas_participantes (actividad_id, tecnico_id, rol_participacion, porcentaje, valor_base, valor_ganado) VALUES ($1,$2,'acompanante',$3,$4,$5) RETURNING id", [activityId, payload.tecnicoId, participantPercentage, participantBase, participantEarned]);
     await client.query("INSERT INTO public.actividades_operativas_aprobaciones (actividad_id, participante_id, revisor_id, estado) VALUES ($1,$2,$3,'pendiente')", [activityId, participantRows[0].id, leaderRows[0]?.lider_id || user.id]);
     if (payload.periodoId) await client.query("INSERT INTO public.liquidacion_items (periodo_id, actividad_id, participante_id, tecnico_id, fecha_operacion, tipo, porcentaje, valor_base, valor_ganado, valor_ganado_original, estado, descripcion_snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,'pendiente',$10) ON CONFLICT DO NOTHING", [payload.periodoId, activityId, participantRows[0].id, payload.tecnicoId, activity.fecha_operacion, activity.tipo, participantPercentage, participantBase, participantEarned, activity.descripcion]);
@@ -6112,23 +6139,7 @@ async function syncAttendanceDiscount(attendanceId: string, technicianId: string
     (max, row) => Math.max(max, percentage(row.porcentaje_descuento)),
     0,
   )));
-  await dbQuery(
-    `UPDATE public.liquidacion_items li
-        SET valor_ganado_original = ROUND(COALESCE(li.valor_base, p.valor_base, a.valor_base) * COALESCE(li.porcentaje, p.porcentaje, 0) / 100, 2),
-            valor_ganado = ROUND(COALESCE(li.valor_base, p.valor_base, a.valor_base) * COALESCE(li.porcentaje, p.porcentaje, 0) / 100, 2),
-            descuento_tardanza = 0, porcentaje_descuento_tardanza = 0, updated_at = clock_timestamp()
-       FROM public.actividades_operativas a
-       JOIN public.actividades_operativas_participantes p ON p.actividad_id = a.id
-       JOIN public.periodos_liquidacion pl ON pl.estado = 'abierto'
-      WHERE li.actividad_id = a.id AND li.participante_id = p.id
-        AND li.periodo_id = pl.id AND li.tecnico_id = $1 AND li.periodo_id = $2
-        AND li.tipo <> 'recorrido' AND li.estado <> 'anulado'
-        AND COALESCE(li.valor_base, p.valor_base, a.valor_base) > 0
-        AND ABS(COALESCE(li.valor_base, p.valor_base, a.valor_base) - COALESCE(a.valor_aplicado, 0)) > 0.01
-        AND ABS(COALESCE(li.valor_ganado_original, p.valor_ganado, li.valor_ganado)
-          - (COALESCE(a.valor_aplicado, 0) * COALESCE(li.porcentaje, p.porcentaje, 0) / 100)) <= 0.01`,
-    [technicianId, periodId],
-  );
+  await syncOpenLiquidationCopy((sql, params) => dbQuery(sql, params), { technicianId, periodId });
   if (normalizedPercentage <= 0) {
     await dbQuery("DELETE FROM public.asistencia_descuentos WHERE periodo_id = $1 AND tecnico_id = $2", [periodId, technicianId]);
     await dbQuery(
