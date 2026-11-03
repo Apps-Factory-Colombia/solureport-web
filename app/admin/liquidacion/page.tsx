@@ -1163,7 +1163,9 @@ export default function LiquidacionPage() {
         tecnico: `${tech.nombre} ${tech.apellido}`,
         cedula: employeeDocument,
         items: pdfAuxilioReports.map((report) => ({
-          actividad: report.descripcion || getTipoLabel(report.tipo),
+          actividad: report.tipo === "visita_tecnica"
+            ? `Recorrido vista: ${report.descripcion || "Visita técnica"}`
+            : report.descripcion || getTipoLabel(report.tipo),
           fecha: report.fecha,
           valorBase: getReportLiquidationBaseValue(report),
           porcentaje: getReportLiquidationPercentage(report),
@@ -1381,7 +1383,7 @@ export default function LiquidacionPage() {
               className="gap-2 border-border/50 text-foreground/80"
               disabled={!hasSelectedPeriod}
               onClick={() => {
-                const tipoLabels: Record<string, string> = { mantenimiento_preventivo: "Mant. Preventivo", visita_tecnica: "Visita Técnica", recorrido: "Recorrido", actividad_grupal: "Act. Grupal" };
+                const tipoLabels: Record<string, string> = { mantenimiento_preventivo: "Mant. Preventivo", visita_tecnica: "Recorrido vista", recorrido: "Recorrido", actividad_grupal: "Act. Grupal" };
                 const activityRows = liquidablePeriodReports.map((r) => {
                   const tech = users.find((u) => u.id === r.tecnicoId);
                   const group = groups.find((g) => g.id === r.grupoId);

@@ -219,16 +219,6 @@ function isSharedVisit(report: ActivityReport) {
     && participationPercentage < 100;
 }
 
-function isVisualRecorrido(report: ActivityReport) {
-  return report.tipo === "recorrido" || report.tipo === "visita_tecnica";
-}
-
-function getVisualReportDescription(report: ActivityReport) {
-  return report.tipo === "visita_tecnica"
-    ? `Recorrido vista: ${report.descripcion}`
-    : report.descripcion;
-}
-
 function getSharedVisitUiIdentity(report: ActivityReport) {
   // Participant rows from the same technical visit share this identifier.
   // Keep it in the grouping key so two different visits with similar text on
@@ -894,6 +884,17 @@ export default function AprobacionesPage() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Los técnicos reportan desde el aplicativo mientras esta pantalla está abierta.
+  // Al volver a la ventana se recargan los reportes del período para no mostrar
+  // una lista vacía o desactualizada.
+  useEffect(() => {
+    const onFocus = () => {
+      if (selectedPeriodId) void loadReportsForPeriod(selectedPeriodId);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [loadReportsForPeriod, selectedPeriodId]);
+
   useEffect(() => {
     setDefaultVisitCost(companySettings ? String(companySettings.costoVisitaTecnicaDefault) : "");
   }, [companySettings]);
@@ -1254,7 +1255,7 @@ export default function AprobacionesPage() {
         report.tipo === "mantenimiento_preventivo"
           ? "REPORTE DE MANTENIMIENTO PREVENTIVO"
           : report.tipo === "visita_tecnica"
-            ? "REPORTE DE VISITA TÉCNICA"
+            ? "REPORTE DE RECORRIDO VISTA"
             : report.tipo === "recorrido"
               ? "REPORTE DE RECORRIDO"
               : "REPORTE DE ACTIVIDAD GRUPAL",
@@ -1936,11 +1937,11 @@ export default function AprobacionesPage() {
     [groupedReports]
   );
   const visitas = useMemo(
-    () => groupedReports.filter((row) => row.tipo === "visita_tecnica" && !isVisualRecorrido(row.report)),
+    () => groupedReports.filter((row) => row.tipo === "visita_tecnica"),
     [groupedReports]
   );
   const recorridos = useMemo(
-    () => groupedReports.filter((row) => isVisualRecorrido(row.report)),
+    () => groupedReports.filter((row) => row.tipo === "recorrido"),
     [groupedReports]
   );
   const grupales = useMemo(
@@ -1991,11 +1992,11 @@ export default function AprobacionesPage() {
     [filteredRows]
   );
   const filteredVisitas = useMemo(
-    () => filteredRows.filter((row) => row.tipo === "visita_tecnica" && !isVisualRecorrido(row.report)),
+    () => filteredRows.filter((row) => row.tipo === "visita_tecnica"),
     [filteredRows]
   );
   const filteredRecorridos = useMemo(
-    () => filteredRows.filter((row) => isVisualRecorrido(row.report)),
+    () => filteredRows.filter((row) => row.tipo === "recorrido"),
     [filteredRows]
   );
   const filteredGrupales = useMemo(
@@ -2067,7 +2068,7 @@ export default function AprobacionesPage() {
               const client = report.clienteId ? clientsById.get(report.clienteId) : null;
               const group = groupsById.get(report.grupoId);
               const leader = group ? usersById.get(group.liderId) : null;
-               const tipo = getTipoConfig(isVisualRecorrido(report) ? "recorrido" : String(row.tipo));
+              const tipo = getTipoConfig(String(row.tipo));
               const estado = estadoAprobacionConfig[row.estadoAprobacionLider];
               const TipoIcon = tipo.icon;
               const isDeleting = deletingReportId === report.id;
@@ -2098,14 +2099,9 @@ export default function AprobacionesPage() {
                         {tipo.label}
                       </Badge>
                       {report.tipo === "visita_tecnica" && (
-                        <div className="flex flex-wrap items-center gap-1">
-                          <Badge variant="outline" className="text-[10px] border-cyan-400/40 bg-cyan-400/10 text-cyan-300">
-                            Recorrido vista
-                          </Badge>
-                          <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
-                            {getVisitCategoryLabel(report.tipoVisita)}
-                          </Badge>
-                        </div>
+                        <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
+                          {getVisitCategoryLabel(report.tipoVisita)}
+                        </Badge>
                       )}
                       {getEvidenceCountForReport(report) > 0 && (
                         <Badge variant="outline" className="text-[10px] bg-secondary text-muted-foreground border-border/50">
@@ -2115,7 +2111,7 @@ export default function AprobacionesPage() {
                     </div>
                   </TableCell>
                   <TableCell className="max-w-72">
-                     <p className="text-sm font-medium text-foreground truncate">{getVisualReportDescription(report)}</p>
+                    <p className="text-sm font-medium text-foreground truncate">{report.descripcion}</p>
                     {report.especificacion && (
                       <p className="text-xs text-muted-foreground truncate">Especificación: {report.especificacion}</p>
                     )}
@@ -2127,7 +2123,7 @@ export default function AprobacionesPage() {
                   </TableCell>
                   <TableCell className="max-w-64">
                     <p className="text-sm text-foreground/80 truncate">
-                       {client ? `${client.nombre} — ${client.edificio}` : group?.nombre || getVisualReportDescription(report)}
+                      {client ? `${client.nombre} — ${client.edificio}` : group?.nombre || report.descripcion}
                     </p>
                     <p className="text-xs text-muted-foreground truncate">
                       Grupo: {group?.nombre || "Sin grupo"}
@@ -2483,13 +2479,11 @@ export default function AprobacionesPage() {
                 Mant. Preventivo
                 <Badge className="ml-1.5 border-0 bg-blue-500/20 px-1.5 text-[10px] text-blue-400">{preventivos.length}</Badge>
               </TabsTrigger>
-              {visitas.length > 0 && (
-                <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
-                  <ClipboardCheck className="mr-2 h-4 w-4" />
-                  Visita Técnica
-                  <Badge className="ml-1.5 border-0 bg-cyan-neon/20 px-1.5 text-[10px] text-cyan-neon">{visitas.length}</Badge>
-                </TabsTrigger>
-              )}
+              <TabsTrigger value="visitas" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
+                <ClipboardCheck className="mr-2 h-4 w-4" />
+                Visita Técnica
+                <Badge className="ml-1.5 border-0 bg-cyan-neon/20 px-1.5 text-[10px] text-cyan-neon">{visitas.length}</Badge>
+              </TabsTrigger>
               <TabsTrigger value="recorridos" className="data-[state=active]:bg-gold/10 data-[state=active]:text-gold">
                 <Route className="mr-2 h-4 w-4" />
                 Recorrido
@@ -2509,14 +2503,12 @@ export default function AprobacionesPage() {
               )}
             </TabsContent>
 
-            {visitas.length > 0 && (
-              <TabsContent value="visitas">
-                {renderReportsTable(
-                  "Aprobaciones de Visitas Técnicas",
-                  "Visitas técnicas registradas desde operación. Aquí puedes revisar el contraste entre default y valor reportado antes de aprobar o rechazar."
-                )}
-              </TabsContent>
-            )}
+            <TabsContent value="visitas">
+              {renderReportsTable(
+                "Aprobaciones de Visitas Técnicas",
+                "Visitas técnicas registradas desde operación. Aquí puedes revisar el contraste entre default y valor reportado antes de aprobar o rechazar."
+              )}
+            </TabsContent>
 
             <TabsContent value="recorridos">
               {renderReportsTable(
@@ -2573,7 +2565,7 @@ export default function AprobacionesPage() {
             const maintenancePricing = selectedReport.tipo === "mantenimiento_preventivo"
               ? getMaintenanceClientPricing(selectedReport, client, contracts)
               : null;
-             const tipo = getTipoConfig(isVisualRecorrido(selectedReport) ? "recorrido" : String(selectedReport.tipo));
+            const tipo = getTipoConfig(String(selectedReport.tipo));
             const normalizedModalStatus: ActivityReport["estadoAprobacionLider"] = (new Set(modalReports.map((item) => item.estadoAprobacionLider))).size > 1
               ? "pendiente"
               : modalStatus;
@@ -2750,7 +2742,7 @@ export default function AprobacionesPage() {
                 <div className="space-y-2">
                   <p className="text-xs text-muted-foreground">Descripción</p>
                   <p className="text-sm text-foreground/80 bg-secondary/30 rounded-lg p-3 border border-border/50">
-                     {getVisualReportDescription(selectedReport)}
+                     {selectedReport.descripcion}
                   </p>
                 </div>
 
