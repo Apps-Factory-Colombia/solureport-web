@@ -3546,7 +3546,7 @@ export default function InformesPage() {
                                 <p>{getReportRegistrationCode(r)}</p>
                                 {r.esHistoricoContrato && (
                                   <Badge variant="outline" className="border-purple-400/30 bg-purple-400/10 text-purple-300 text-[10px]">
-                                    Histórico de contrato
+                                    Histórico de contrato · sin reporte técnico
                                   </Badge>
                                 )}
                               </div>
