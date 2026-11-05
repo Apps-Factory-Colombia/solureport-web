@@ -75,7 +75,7 @@ import { getContratos } from "@/lib/data/services/contratos";
 import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
-import { filterPreventiveMirrorReports, pickGroupLeadReport } from "@/lib/utils/report-filters";
+import { filterPreventiveMirrorReports, keepSentMaintenanceParticipantReports, pickGroupLeadReport } from "@/lib/utils/report-filters";
 import { buildReportMultilineText, formatClientDoorBreakdown, getDisplayReportObservations, getReportServiceDetail } from "@/lib/utils/report-content";
 
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
@@ -1209,7 +1209,7 @@ export default function InformesPage() {
   );
 
   const preventivos = useMemo(
-    () => filterPreventiveMirrorReports(viewScopedReports).filter((r) => r.tipo === "mantenimiento_preventivo"),
+    () => keepSentMaintenanceParticipantReports(filterPreventiveMirrorReports(viewScopedReports)).filter((r) => r.tipo === "mantenimiento_preventivo"),
     [viewScopedReports]
   );
   const visitas = useMemo(

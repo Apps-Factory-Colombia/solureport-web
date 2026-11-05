@@ -29,6 +29,22 @@ export function pickGroupLeadReport<T extends ActivityReport>(items: T[]): T {
   })[0];
 }
 
+// En Informes cada técnico tiene su fila. Si algunos técnicos de un mantenimiento ya
+// enviaron, solo se muestran sus filas; las de quienes no han enviado no se muestran.
+export function keepSentMaintenanceParticipantReports<T extends ActivityReport>(reports: T[]): T[] {
+  const maintenancesWithSentReport = new Set(
+    reports
+      .filter((report) => report.tipo === "mantenimiento_preventivo" && report.mantenimientoId && hasSubmittedMaintenanceDelivery(report))
+      .map((report) => report.mantenimientoId as string)
+  );
+
+  return reports.filter((report) => {
+    if (report.tipo !== "mantenimiento_preventivo" || !report.mantenimientoId) return true;
+    if (!maintenancesWithSentReport.has(report.mantenimientoId)) return true;
+    return hasSubmittedMaintenanceDelivery(report);
+  });
+}
+
 export function extractMaintenanceIdFromMediaUrl(url?: string) {
   if (!url) return undefined;
 

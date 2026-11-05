@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasSubmittedMaintenanceDelivery, pickGroupLeadReport } from "../../lib/utils/report-filters.ts";
+import { hasSubmittedMaintenanceDelivery, keepSentMaintenanceParticipantReports, pickGroupLeadReport } from "../../lib/utils/report-filters.ts";
 
 // Solo los campos que usa la regla; el resto del reporte no afecta la decisión.
 const report = (overrides: Record<string, unknown>) => ({
@@ -31,4 +31,12 @@ test("si nadie envió, se mantiene el criterio anterior (fecha y id)", () => {
   const a = report({ id: "a", tecnicoId: "a", fechaCreacion: "2026-11-01" });
   const b = report({ id: "b", tecnicoId: "b", fechaCreacion: "2026-11-02" });
   assert.equal(pickGroupLeadReport([a, b]).tecnicoId, "b");
+});
+
+test("en informes, si un técnico envió se muestra solo su fila; un mantenimiento sin envíos no se filtra", () => {
+  const laura = report({ id: "l", mantenimientoId: "m1", tecnicoId: "laura", estadoEntrega: "enviada" });
+  const santiago = report({ id: "s", mantenimientoId: "m1", tecnicoId: "santiago", estadoEntrega: "pendiente" });
+  const otro = report({ id: "o", mantenimientoId: "m2", tecnicoId: "otro", estadoEntrega: "pendiente" });
+  const kept = keepSentMaintenanceParticipantReports([laura, santiago, otro]).map((r: any) => r.id);
+  assert.deepEqual(kept, ["l", "o"]);
 });

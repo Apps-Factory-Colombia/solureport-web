@@ -896,7 +896,10 @@ function mapReport(row: any, participant: any, index: number): any {
     liderGrupoId: row.grupo_lider_id,
     grupoId: row.grupo_id,
     porcentajeParticipacion: number(participant?.porcentaje, 100),
-    fecha: dateOnly(row.fecha_operacion) || "",
+    // Un mantenimiento se informa en la fecha en que el técnico lo ejecutó, no en la
+    // fecha programada: así cae en el corte correcto y aparece en Informes.
+    fecha: (isMaintenance && participantDelivery?.fechaEjecucion ? dateOnly(participantDelivery.fechaEjecucion) : null)
+      || dateOnly(row.fecha_operacion) || "",
     clienteId: row.cliente_id,
     descripcion: reportDescription,
     actividadesRealizadas: isMaintenance
