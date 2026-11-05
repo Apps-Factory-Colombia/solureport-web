@@ -75,7 +75,7 @@ import { getContratos } from "@/lib/data/services/contratos";
 import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF, generateTablePDF } from "@/lib/utils/pdf-generator";
-import { filterPreventiveMirrorReports } from "@/lib/utils/report-filters";
+import { filterPreventiveMirrorReports, pickGroupLeadReport } from "@/lib/utils/report-filters";
 import { buildReportMultilineText, formatClientDoorBreakdown, getDisplayReportObservations, getReportServiceDetail } from "@/lib/utils/report-content";
 
 const DEFAULT_NOTIFICATION_BCC = "solucionesyautomatizaciones@hotmail.com";
@@ -2122,19 +2122,7 @@ export default function InformesPage() {
           return map;
         }, new Map<string, ActivityReport>()).values()
       );
-      const leadReport = [...items].sort((a, b) => {
-        if (a.id.startsWith("reg-") !== b.id.startsWith("reg-")) {
-          return a.id.startsWith("reg-") ? 1 : -1;
-        }
-
-        if (!!a.registroActividadId !== !!b.registroActividadId) {
-          return a.registroActividadId ? -1 : 1;
-        }
-
-        const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
-        if (creationCompare !== 0) return creationCompare;
-        return b.id.localeCompare(a.id);
-      })[0];
+      const leadReport = pickGroupLeadReport(items);
       const participantNames = Array.from(new Set(uniqueTechnicianItems.map((item) => getParticipantName(item.tecnicoId))));
       const approvalDate = items
         .map((item) => item.fechaAprobacionLider)

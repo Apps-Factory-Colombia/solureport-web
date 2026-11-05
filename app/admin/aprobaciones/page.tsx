@@ -71,7 +71,7 @@ import { createNotificacion } from "@/lib/data/services/notificaciones";
 import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { cn } from "@/lib/utils";
 import { generateReportePDF } from "@/lib/utils/pdf-generator";
-import { filterPreventiveMirrorReports } from "@/lib/utils/report-filters";
+import { filterPreventiveMirrorReports, pickGroupLeadReport } from "@/lib/utils/report-filters";
 import { buildReportMultilineText, formatClientDoorBreakdown, getDisplayReportObservations, getReportServiceDetail } from "@/lib/utils/report-content";
 import { CompanySettings, LiquidationPeriod, MaintenanceContract } from "@/lib/types";
 import {
@@ -1889,19 +1889,7 @@ export default function AprobacionesPage() {
           return map;
         }, new Map<string, ActivityReport>()).values()
       );
-      const leadReport = [...items].sort((a, b) => {
-        if (a.id.startsWith("reg-") !== b.id.startsWith("reg-")) {
-          return a.id.startsWith("reg-") ? 1 : -1;
-        }
-
-        if (!!a.registroActividadId !== !!b.registroActividadId) {
-          return a.registroActividadId ? -1 : 1;
-        }
-
-        const creationCompare = (b.fechaCreacion || "").localeCompare(a.fechaCreacion || "");
-        if (creationCompare !== 0) return creationCompare;
-        return b.id.localeCompare(a.id);
-      })[0];
+      const leadReport = pickGroupLeadReport(items);
       const participantNames = Array.from(new Set(uniqueTechnicianItems.map((item) => getParticipantName(item.tecnicoId))));
       const isShared = usesSharedBasePricing(leadReport) && uniqueTechnicianItems.length > 1;
       const approvalDate = items

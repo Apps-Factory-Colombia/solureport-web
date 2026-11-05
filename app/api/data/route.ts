@@ -720,7 +720,7 @@ async function activityRows(payload: Payload = {}) {
                ORDER BY (mp.estado = 'activo') DESC, mp.created_at DESC
                LIMIT 1),
               'porcentaje', p.porcentaje, 'valorBase', p.valor_base, 'valorGanado', p.valor_ganado,
-              'estadoReporte', COALESCE((SELECT d.estado FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1), 'pendiente'),
+              'estadoReporte', COALESCE((SELECT CASE WHEN d.estado = 'enviada' AND d.enviado_en IS NULL THEN 'pendiente' ELSE d.estado END FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1), 'pendiente'),
               'entregaId', (SELECT d.id FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id LIMIT 1),
               'entregaObservaciones', (SELECT d.observaciones FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
               'entregaActividadesRealizadas', (SELECT d.actividades_realizadas FROM public.actividades_operativas_entregas d WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id ORDER BY d.updated_at DESC LIMIT 1),
@@ -1070,6 +1070,15 @@ function globallyCompletedMaintenancePredicate(scheduleAlias = "m", scheduledDat
   // Historial before its scheduled day.
   const scheduleHasStarted = `${scheduledDateExpression || `${scheduleAlias}.fecha_programada`} <= ${BOGOTA_DATE_SQL}`;
   return `(${scheduleHasStarted} AND (((${scheduleAlias}.admin_completado_at IS NOT NULL) OR (${scheduleAlias}.estado IN ('ejecutado', 'completado', 'realizado') AND NOT (${partialDelivery})) OR (${allDeliveries}))))`;
+}
+
+// Completado que cuenta para el técnico participante. Una marca de "realizado" del
+// administrador (admin_completado_at) no lo cierra mientras falten reportes enviados.
+function technicianCompletedMaintenancePredicate(scheduleAlias = "m", scheduledDateExpression?: string) {
+  const partialDelivery = partiallySubmittedMaintenanceDeliveryPredicate(scheduleAlias);
+  const allDeliveries = allSubmittedMaintenanceDeliveryPredicate(scheduleAlias);
+  const scheduleHasStarted = `${scheduledDateExpression || `${scheduleAlias}.fecha_programada`} <= ${BOGOTA_DATE_SQL}`;
+  return `(${scheduleHasStarted} AND (((${scheduleAlias}.estado IN ('ejecutado', 'completado', 'realizado') AND ${scheduleAlias}.admin_completado_at IS NULL AND NOT (${partialDelivery})) OR (${allDeliveries}))))`;
 }
 
 async function dashboardMetrics(payload: Payload = {}) {
@@ -2626,6 +2635,18 @@ function maintenanceVisibleToUserPredicate(userParam: string, maintenanceAlias =
   )`;
 }
 
+// Participante activo del mantenimiento (no solo alguien que lo ve por grupo).
+function maintenanceParticipantPredicate(userParam: string, maintenanceAlias = "m") {
+  return `EXISTS (
+    SELECT 1
+      FROM public.mantenimientos_programados_participantes mp_self
+     WHERE mp_self.mantenimiento_id = ${maintenanceAlias}.id
+       AND mp_self.usuario_id = ${userParam}
+       AND COALESCE(mp_self.estado, 'activo') = 'activo'
+       AND mp_self.fecha_retiro IS NULL
+  )`;
+}
+
 function monthRange(value: unknown, fallbackDate: string) {
   const candidate = String(value || "");
   const month = /^\d{4}-\d{2}$/.test(candidate) ? candidate : fallbackDate.slice(0, 7);
@@ -2652,6 +2673,7 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
   const filters: string[] = ["m.estado <> 'cancelado'"];
   const scheduledDateExpression = maintenanceScheduledDateSql();
   const globallyCompletedMaintenance = globallyCompletedMaintenancePredicate("m", scheduledDateExpression);
+  const technicianCompletedMaintenance = technicianCompletedMaintenancePredicate("m", scheduledDateExpression);
   const partiallySubmittedMaintenanceDelivery = partiallySubmittedMaintenanceDeliveryPredicate();
   const maintenanceDueAt = maintenanceDueAtSql("m", scheduledDateExpression);
   let userScopeParam: string | null = null;
@@ -2679,12 +2701,20 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
    )` : null;
   // Admin lists represent the state of the whole maintenance. A technician
   // can complete only their own delivery, but the global row remains pending
-  // until every active participant has delivered.
-  const displayDelivery = adminView ? globallyCompletedMaintenance : ownSubmittedDelivery;
+  // until every active participant has delivered. An administrator's "marcar
+  // realizado" does not close the maintenance for a participant who has not
+  // delivered yet.
   const displayStateExpression = adminView
     ? `(CASE WHEN ${globallyCompletedMaintenance} THEN 'ejecutado' ELSE m.estado END)`
-    : displayDelivery
-      ? `(CASE WHEN ${globallyCompletedMaintenance} OR ${displayDelivery} THEN 'ejecutado' ELSE m.estado END)`
+    : userScopeParam
+      ? `(CASE
+          WHEN ${ownSubmittedDelivery} THEN 'ejecutado'
+          WHEN ${maintenanceParticipantPredicate(userScopeParam)} THEN (CASE
+            WHEN ${technicianCompletedMaintenance} THEN 'ejecutado'
+            WHEN m.estado IN ('ejecutado', 'completado', 'realizado') THEN 'asignado'
+            ELSE m.estado END)
+          WHEN ${globallyCompletedMaintenance} THEN 'ejecutado'
+          ELSE m.estado END)`
       : "m.estado";
 
   if (adminView) {
@@ -2739,11 +2769,19 @@ async function maintenancePageRows(payload: Payload, user: UserContext) {
       }
     }
   } else if (category === "historial") {
-    filters.push(ownSubmittedDelivery
-      ? `(${globallyCompletedMaintenance} OR ${ownSubmittedDelivery})`
+    filters.push(userScopeParam
+      ? `(CASE WHEN ${maintenanceParticipantPredicate(userScopeParam)}
+          THEN (${technicianCompletedMaintenance} OR ${ownSubmittedDelivery})
+          ELSE (${globallyCompletedMaintenance} OR ${ownSubmittedDelivery}) END)`
       : `${globallyCompletedMaintenance}`);
   } else {
-    filters.push(`NOT (${globallyCompletedMaintenance})`);
+    // Un participante sigue viendo el mantenimiento hasta enviar su propio reporte,
+    // aunque el administrador lo haya marcado como realizado.
+    filters.push(userScopeParam
+      ? `(CASE WHEN ${maintenanceParticipantPredicate(userScopeParam)}
+          THEN NOT (${technicianCompletedMaintenance})
+          ELSE NOT (${globallyCompletedMaintenance}) END)`
+      : `NOT (${globallyCompletedMaintenance})`);
     if (ownSubmittedDelivery) filters.push(`NOT (${ownSubmittedDelivery})`);
     if (category === "esta_semana") {
       values.push(week.start, week.end);
