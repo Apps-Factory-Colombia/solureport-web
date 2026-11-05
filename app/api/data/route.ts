@@ -602,10 +602,16 @@ async function activityRows(payload: Payload = {}) {
     // actividades_operativas so the old screens could still find them. They
     // are planning records, not technical reports, and must never appear in
     // approvals, reports or financial exports as completed work.
+    // Solo se ocultan planes sin ninguna entrega enviada. Si un técnico ya envió
+    // su reporte, la actividad migrada es un reporte real y debe aparecer.
     `NOT (
       a.tipo = 'mantenimiento'
       AND COALESCE(a.metadata->>'migrated_from', '') = 'mantenimientos'
       AND COALESCE(a.metadata->>'legacy_estado', '') IN ('programado', 'pendiente')
+      AND NOT EXISTS (
+        SELECT 1 FROM public.actividades_operativas_entregas de
+         WHERE de.actividad_id = a.id AND de.enviado_en IS NOT NULL
+      )
     )`,
   ];
   if (payload.startDate) { values.push(payload.startDate); filters.push(`a.fecha_operacion >= $${values.length}`); }
