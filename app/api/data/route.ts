@@ -861,6 +861,8 @@ function mapReport(row: any, participant: any, index: number): any {
         valorGanadoOriginal: row.liquidacion_congelada ? number(liquidation.valorGanadoOriginal) : normalizedParticipantAmount,
       }
     : (!row.liquidacion_congelada && approval?.estado === "aprobada"
+      // En un mantenimiento, la aprobación solo hace pagable a quien envió su entrega.
+      && (!isMaintenance || !participant || ["enviada", "aprobada"].includes(String(participant.estadoReporte)))
     ? {
         id: `fallback:${row.id}:${participant?.id || "activity"}:${row.periodo_id || "period"}`,
         estado: "aprobado",
@@ -5706,30 +5708,61 @@ async function updateMaintenanceApproval(activityId: string, state: "aprobada" |
       await client.query("DELETE FROM public.actividades_operativas_aprobaciones WHERE id = ANY($1::uuid[])", [legacyApprovalIds]);
     }
 
+    // Aprobar, rechazar o reabrir afecta solo a los técnicos que enviaron su entrega.
+    // Quien no ha enviado no queda aprobado ni pagado por la decisión sobre los demás.
+    // Si ninguna entrega tiene fecha de envío (registros heredados) se mantiene el
+    // comportamiento anterior sobre toda la actividad.
+    const sentDeliveryExists = `EXISTS (
+      SELECT 1 FROM public.actividades_operativas_entregas x
+       WHERE x.actividad_id = $1 AND x.enviado_en IS NOT NULL
+    )`;
     await client.query(
       `UPDATE public.actividades_operativas_entregas
           SET estado = $2, updated_at = clock_timestamp()
-        WHERE actividad_id = $1`,
+        WHERE actividad_id = $1
+          AND (enviado_en IS NOT NULL OR NOT ${sentDeliveryExists})`,
       [activityId, state === "aprobada" ? "aprobada" : state === "rechazada" ? "rechazada" : "enviada"],
     );
     await client.query(
-      `UPDATE public.actividades_operativas_participantes
+      `UPDATE public.actividades_operativas_participantes p
           SET estado_reporte = $2, updated_at = clock_timestamp()
-        WHERE actividad_id = $1`,
+        WHERE p.actividad_id = $1
+          AND (
+            EXISTS (SELECT 1 FROM public.actividades_operativas_entregas d
+                     WHERE d.actividad_id = p.actividad_id AND d.participante_id = p.id AND d.enviado_en IS NOT NULL)
+            OR NOT ${sentDeliveryExists}
+          )`,
       [activityId, state === "aprobada" ? "aprobada" : state === "rechazada" ? "rechazada" : "enviada"],
     );
     await client.query(
-      `UPDATE public.liquidacion_items
+      `UPDATE public.liquidacion_items li
           SET estado = CASE WHEN $2 = 'aprobada' THEN 'aprobado' WHEN $2 = 'rechazada' THEN 'anulado' ELSE 'pendiente' END,
               updated_at = clock_timestamp()
-        WHERE actividad_id = $1
-          AND periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')`,
+        WHERE li.actividad_id = $1
+          AND li.periodo_id IN (SELECT id FROM public.periodos_liquidacion WHERE estado = 'abierto')
+          AND (
+            EXISTS (SELECT 1 FROM public.actividades_operativas_entregas d
+                     WHERE d.actividad_id = li.actividad_id AND d.participante_id = li.participante_id AND d.enviado_en IS NOT NULL)
+            OR NOT ${sentDeliveryExists}
+          )`,
       [activityId, state],
     );
+    // Con técnicos sin enviar, aprobar deja la actividad en curso hasta que todos entreguen.
     await client.query(
-      `UPDATE public.actividades_operativas
-          SET estado = $2, updated_at = clock_timestamp(), version = version + 1
-        WHERE id = $1`,
+      `UPDATE public.actividades_operativas a
+          SET estado = CASE
+                WHEN $2 = 'aprobada' THEN
+                  CASE WHEN ${sentDeliveryExists.replace(/\$1/g, "a.id")}
+                        AND EXISTS (
+                          SELECT 1 FROM public.actividades_operativas_participantes p
+                           WHERE p.actividad_id = a.id
+                             AND NOT EXISTS (SELECT 1 FROM public.actividades_operativas_entregas d
+                                              WHERE d.actividad_id = a.id AND d.participante_id = p.id AND d.enviado_en IS NOT NULL))
+                       THEN a.estado ELSE 'aprobada' END
+                WHEN $2 = 'rechazada' THEN 'rechazada'
+                ELSE 'pendiente_aprobacion' END,
+              updated_at = clock_timestamp(), version = version + 1
+        WHERE a.id = $1`,
       [activityId, state === "aprobada" ? "aprobada" : state === "rechazada" ? "rechazada" : "pendiente_aprobacion"],
     );
 
