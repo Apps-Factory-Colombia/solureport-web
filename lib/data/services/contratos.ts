@@ -12,5 +12,9 @@ export async function getContratos(): Promise<MaintenanceContract[]> { return da
 export async function createContrato(contract: ContractPayload): Promise<MaintenanceContract> { return dataRequest<MaintenanceContract>("contracts.create", contract); }
 export async function updateContrato(id: string, contract: ContractPayload & { regenerarMantenimientos?: boolean }): Promise<MaintenanceContract> { return dataRequest<MaintenanceContract>("contracts.update", { id, ...contract }); }
 export async function updateMantenimientoContrato(id: string, maintenance: Partial<Pick<MantenimientoContrato, "estado" | "fechaProgramada" | "fechaRealizado" | "valorRecaudado" | "tecnicoId">>): Promise<MantenimientoContrato> { return dataRequest<MantenimientoContrato>("contracts.updateMaintenance", { id, ...maintenance }); }
+export type ContractMaintenanceDeleteResult = { id: string; deleted: boolean; message: string };
+export async function deleteMantenimientoContrato(id: string): Promise<ContractMaintenanceDeleteResult> {
+  return dataRequest<ContractMaintenanceDeleteResult>("contracts.deleteMaintenance", { id });
+}
 export type ContractDeleteResult = { id: string; deleted: boolean; archived: boolean; message: string };
 export async function deleteContrato(id: string): Promise<ContractDeleteResult> { return dataRequest<ContractDeleteResult>("contracts.delete", { id }); }

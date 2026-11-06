@@ -36,7 +36,7 @@ import {
 } from "@/components/ui/select";
 import { Search, Download, FileText, DollarSign, CalendarDays, Building2, Plus, CheckCircle2, TrendingUp, DoorOpen, Car, Pencil, Trash2, AlertTriangle, ArrowRight, ChevronDown, ArrowLeft, X, Loader2 } from "lucide-react";
 import { MaintenanceContract, MantenimientoContrato, Client, User, WorkGroup } from "@/lib/types";
-import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato } from "@/lib/data/services/contratos";
+import { getContratos, createContrato, updateContrato, deleteContrato, updateMantenimientoContrato, deleteMantenimientoContrato } from "@/lib/data/services/contratos";
 import { getClientes } from "@/lib/data/services/clientes";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getGrupos } from "@/lib/data/services/grupos";
@@ -252,6 +252,9 @@ export default function ContratosPage() {
   const [mantEditFechaReal, setMantEditFechaReal] = useState("");
   const [mantEditValor, setMantEditValor] = useState("");
   const [savingMant, setSavingMant] = useState(false);
+  const [deleteMantOpen, setDeleteMantOpen] = useState(false);
+  const [deleteMant, setDeleteMant] = useState<MantenimientoContrato | null>(null);
+  const [deletingMant, setDeletingMant] = useState(false);
 
   const loadData = async () => {
     try {
@@ -773,6 +776,30 @@ export default function ContratosPage() {
       setFeedback({ type: "error", message: err instanceof Error ? err.message : "No se pudo actualizar el mantenimiento." });
     } finally {
       setSavingMant(false);
+    }
+  };
+
+  const handleDeleteMant = async () => {
+    if (!deleteMant || !selectedContract) return;
+    setDeletingMant(true);
+    setFeedback({ type: "info", message: "Eliminando el mantenimiento seleccionado…" });
+    try {
+      const result = await deleteMantenimientoContrato(deleteMant.id);
+      setSelectedContract((prev) => prev
+        ? { ...prev, mantenimientosRealizados: prev.mantenimientosRealizados.filter((m) => m.id !== deleteMant.id) }
+        : prev);
+      setContracts((prev) => prev.map((contract) => contract.id === selectedContract.id
+        ? { ...contract, mantenimientosRealizados: contract.mantenimientosRealizados.filter((m) => m.id !== deleteMant.id) }
+        : contract));
+      setDeleteMantOpen(false);
+      setDeleteMant(null);
+      setFeedback({ type: "success", message: result.message });
+      await loadData();
+    } catch (err) {
+      console.error("Error eliminando mantenimiento del contrato:", err);
+      setFeedback({ type: "error", message: err instanceof Error ? err.message : "No se pudo eliminar el mantenimiento." });
+    } finally {
+      setDeletingMant(false);
     }
   };
 
@@ -1690,6 +1717,16 @@ export default function ContratosPage() {
                                   >
                                     <Pencil className="h-4 w-4" />
                                   </Button>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-8 w-8 text-muted-foreground hover:bg-red-500/10 hover:text-red-400"
+                                    aria-label="Eliminar mantenimiento"
+                                    title="Eliminar mantenimiento"
+                                    onClick={() => { setDeleteMant(m); setDeleteMantOpen(true); }}
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
                                 </div>
                               </div>
                             )}
@@ -2510,6 +2547,71 @@ export default function ContratosPage() {
             >
               <Download className="h-4 w-4" />
               Exportar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={deleteMantOpen}
+        onOpenChange={(open) => {
+          if (!deletingMant) {
+            setDeleteMantOpen(open);
+            if (!open) setDeleteMant(null);
+          }
+        }}
+      >
+        <DialogContent className="bg-card border-border sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-foreground flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-red-400" />
+              Eliminar mantenimiento
+            </DialogTitle>
+          </DialogHeader>
+          {deleteMant && selectedContract && (() => {
+            const client = clients.find((c) => c.id === selectedContract.clienteId);
+            return (
+              <div className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  ¿Deseas eliminar solo este mantenimiento de <span className="font-semibold text-foreground">{client?.edificio || client?.nombre}</span>?
+                  La acción es permanente y no elimina el contrato ni los demás meses.
+                </p>
+                <div className="rounded-lg border border-border/50 bg-secondary/30 p-3 text-sm space-y-1">
+                  <div className="flex justify-between gap-3">
+                    <span className="text-muted-foreground">Mes / fecha:</span>
+                    <span className="text-foreground font-medium">{monthNames[getMaintenanceCalendarMonth(deleteMant) - 1]} · {deleteMant.fechaProgramada}</span>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <span className="text-muted-foreground">Estado:</span>
+                    <span className="text-foreground font-medium">{deleteMant.estado}</span>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <span className="text-muted-foreground">Valor recaudado:</span>
+                    <span className="text-gold font-medium">{formatCurrency(deleteMant.valorRecaudado)}</span>
+                  </div>
+                </div>
+                <p className="text-xs text-amber-300">
+                  Si tiene reporte operativo asociado, también se eliminarán sus entregas, evidencias y aprobaciones. Los mantenimientos ejecutados o con recaudo quedan protegidos.
+                </p>
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setDeleteMantOpen(false)}
+              disabled={deletingMant}
+              className="text-muted-foreground"
+            >
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleDeleteMant}
+              disabled={deletingMant}
+              className="gap-2 bg-red-500 hover:bg-red-600 text-white font-semibold"
+            >
+              {deletingMant ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              {deletingMant ? "Eliminando…" : "Sí, eliminar"}
             </Button>
           </DialogFooter>
         </DialogContent>

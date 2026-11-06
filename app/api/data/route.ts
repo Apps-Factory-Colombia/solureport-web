@@ -3822,6 +3822,7 @@ async function execute(action: string, payload: Payload, user: UserContext): Pro
         valorRecaudado: number(rows[0].valor_recaudado),
       };
     }
+    case "contracts.deleteMaintenance": { await requireAdmin(user); return deleteContractMaintenance(payload); }
     case "contracts.delete": { await requireAdmin(user); return deleteContract(payload); }
 
     case "maintenances.page": return maintenancePageRows(payload, user);
@@ -4603,7 +4604,13 @@ function contractMaintenanceScheduledDate(contract: Payload, numero: unknown) {
 }
 
 async function upsertContractMaintenance(client: any, contractId: string, contract: Payload, item: Payload, index: number) {
-  const numero = integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12);
+  const cantidadMantenimientos = integerField(
+    contract.cantidadMantenimientos ?? 1,
+    "La cantidad de mantenimientos",
+    1,
+    12,
+  );
+  const numero = integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, cantidadMantenimientos);
   const fechaProgramada = dateOnly(item.fechaProgramada);
   if (!fechaProgramada) throw new Error(`El mantenimiento ${index + 1} requiere una fecha programada válida.`);
   const desiredState = item.estado === "realizado" ? "ejecutado" : item.estado || "pendiente";
@@ -4728,7 +4735,8 @@ async function createContract(payload: Payload, user: UserContext) {
 
 async function reconcileContractSchedule(client: any, contractId: string, contract: Payload, payload: Payload) {
   const desired = buildContractSchedule({ ...contract, ...payload });
-  const desiredNumbers = new Set(desired.map((item, index) => integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12)));
+  const cantidadMantenimientos = integerField(contract.cantidadMantenimientos ?? payload.cantidadMantenimientos ?? 1, "La cantidad de mantenimientos", 1, 12);
+  const desiredNumbers = new Set(desired.map((item, index) => integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, cantidadMantenimientos)));
   if (desiredNumbers.size !== desired.length) throw new Error("El cronograma contiene números de mantenimiento repetidos.");
 
   const currentResult = await client.query("SELECT * FROM public.mantenimientos_programados WHERE contrato_id = $1 FOR UPDATE", [contractId]);
@@ -4747,7 +4755,7 @@ async function reconcileContractSchedule(client: any, contractId: string, contra
 
   for (let index = 0; index < desired.length; index += 1) {
     const item = desired[index];
-    const numero = integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, 12);
+    const numero = integerField(item.numero ?? index + 1, "El número del mantenimiento", 1, cantidadMantenimientos);
     const existing = currentByNumber.get(numero);
     const protectedHistory = existing && (
       linkedIds.has(String(existing.id))
@@ -4971,6 +4979,49 @@ async function deleteContract(payload: Payload) {
     await client.query("DELETE FROM public.mantenimientos_programados WHERE contrato_id = $1", [payload.id]);
     await client.query("DELETE FROM public.contratos_mantenimiento WHERE id = $1", [payload.id]);
     return { deleted: true, archived: false, id: payload.id, message: "Contrato eliminado definitivamente con sus mantenimientos, reportes, aprobaciones y liquidaciones. Ya puedes crear otro contrato para el mismo cliente y año." };
+  });
+}
+
+async function deleteContractMaintenance(payload: Payload) {
+  const maintenanceId = String(payload.id || "").trim();
+  if (!maintenanceId) throw new Error("Debes indicar el mantenimiento que deseas eliminar.");
+
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `SELECT m.id, m.contrato_id, m.numero, m.estado, m.fecha_realizado, m.valor_recaudado,
+              c.nombre AS cliente_nombre
+         FROM public.mantenimientos_programados m
+         JOIN public.contratos_mantenimiento cm ON cm.id = m.contrato_id
+         JOIN public.clientes c ON c.id = m.cliente_id
+        WHERE m.id = $1
+        FOR UPDATE OF m`,
+      [maintenanceId],
+    );
+    const target = rows[0];
+    if (!target) throw new Error("No se encontró el mantenimiento del contrato que intentas eliminar.");
+
+    const hasExecution = target.estado === "ejecutado"
+      || number(target.valor_recaudado) > 0;
+    if (hasExecution) {
+      throw new Error("Este mantenimiento ya tiene ejecución o recaudo. Para proteger el historial, no se puede eliminar desde el contrato.");
+    }
+
+    const { rows: activityRows } = await client.query(
+      `SELECT am.actividad_id
+         FROM public.actividades_operativas_mantenimientos am
+        WHERE am.mantenimiento_programado_id = $1
+        FOR UPDATE`,
+      [maintenanceId],
+    );
+    // La confirmación en la interfaz deja claro que, si existe un reporte
+    // asociado, también se eliminarán sus entregas, evidencias y aprobaciones.
+    await deleteOperationalActivities(client, activityRows.map((row: any) => row.actividad_id));
+    await deleteScheduledMaintenances(client, [maintenanceId]);
+    return {
+      deleted: true,
+      id: maintenanceId,
+      message: `Mantenimiento ${target.numero} de ${target.cliente_nombre} eliminado correctamente.`,
+    };
   });
 }
 
