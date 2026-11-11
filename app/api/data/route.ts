@@ -3313,7 +3313,8 @@ async function attendanceMemos(payload: Payload, user: UserContext) {
   const values: unknown[] = [];
   const conditions: string[] = [];
   if (payload.usuarioId) { values.push(payload.usuarioId); conditions.push(`m.usuario_id = $${values.length}`); }
-  if (payload.periodoId) { values.push(payload.periodoId); conditions.push(`m.periodo_id = $${values.length}`); }
+  if (payload.periodoId === "sin_periodo") conditions.push("m.periodo_id IS NULL");
+  else if (payload.periodoId) { values.push(payload.periodoId); conditions.push(`m.periodo_id = $${values.length}`); }
   if (payload.estado === "eliminados") conditions.push("m.eliminado_en IS NOT NULL");
   else {
     conditions.push("m.eliminado_en IS NULL");
@@ -3341,7 +3342,7 @@ async function attendanceMemos(payload: Payload, user: UserContext) {
        LEFT JOIN public.usuarios u ON u.id = m.usuario_id
        LEFT JOIN public.periodos_liquidacion p ON p.id = m.periodo_id
        ${where}
-      ORDER BY m.generado_en DESC LIMIT $${pageValues.length - 1} OFFSET $${pageValues.length}`,
+      ORDER BY p.fecha_inicio DESC NULLS LAST, m.generado_en DESC LIMIT $${pageValues.length - 1} OFFSET $${pageValues.length}`,
     pageValues,
   );
   const ids = rows.map((row) => row.id);

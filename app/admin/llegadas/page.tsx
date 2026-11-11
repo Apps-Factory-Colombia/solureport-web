@@ -19,9 +19,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { AlertTriangle, CalendarDays, Camera, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Download, Eye, FileDown, FileText, MapPin, Pencil, RefreshCw, RotateCcw, Search, Settings2, ShieldAlert, Timer, Trash2, UserRound, XCircle } from "lucide-react";
-import { AttendanceDaySummary, AttendanceFortnightlyReport, AttendanceMemo, CompanySettings, User } from "@/lib/types";
+import { AttendanceDaySummary, AttendanceFortnightlyReport, AttendanceMemo, CompanySettings, LiquidationPeriod, User } from "@/lib/types";
 import { getUsuarios } from "@/lib/data/services/usuarios";
 import { getConfiguracion, updateConfiguracion } from "@/lib/data/services/configuracion";
+import { getPeriodos } from "@/lib/data/services/liquidacion";
 import { updateLlegada } from "@/lib/data/services/llegadas";
 import { AttendanceDayResponse, AttendanceHistoryResponse, AttendanceMemosResponse, createAttendanceMemo, getAttendanceDay, getAttendanceFortnightly, getAttendanceHistory, getAttendanceMemos, updateAttendanceMemo } from "@/lib/data/services/asistencia";
 import { cn } from "@/lib/utils";
@@ -41,6 +42,8 @@ type RuleForm = {
 
 const PAGE_SIZE = 20;
 const ALL_USERS = "todos";
+const ALL_PERIODS = "todos";
+const NO_PERIOD = "sin_periodo";
 const NO_USER = "seleccione";
 const DEFAULT_MEMO_TITLE = "Llamado de atención formal por incidencias de asistencia";
 const DEFAULT_MEMO_NARRATIVE = "Se deja constancia de las incidencias de asistencia registradas para {trabajador} durante la quincena del {desde} al {hasta}. El detalle cronológico y la evidencia disponible se adjuntan en este documento.";
@@ -80,6 +83,11 @@ function formatLongDate(value: string) {
 function formatMonth(value: string) {
   const [year, month] = value.split("-").map(Number);
   return new Intl.DateTimeFormat("es-CO", { month: "long", year: "numeric", timeZone: "America/Bogota" }).format(new Date(Date.UTC(year, month - 1, 15, 12)));
+}
+
+function periodLabel(period?: Pick<LiquidationPeriod, "fechaInicio" | "fechaFin" | "estado"> | null) {
+  if (!period) return "Todos los cortes";
+  return `${formatDate(period.fechaInicio)} – ${formatDate(period.fechaFin)}${period.estado === "cerrado" ? " · cerrado" : " · abierto"}`;
 }
 
 function parseDate(value: string) {
@@ -148,6 +156,7 @@ export default function LlegadasPage() {
   const [selectedDate, setSelectedDate] = useState(getBogotaDate());
   const [day, setDay] = useState<AttendanceDayResponse | null>(null);
   const [users, setUsers] = useState<User[]>([]);
+  const [periods, setPeriods] = useState<LiquidationPeriod[]>([]);
   const [settings, setSettings] = useState<CompanySettings | null>(null);
   const [memos, setMemos] = useState<AttendanceMemo[]>([]);
   const [memoTotal, setMemoTotal] = useState(0);
@@ -165,6 +174,7 @@ export default function LlegadasPage() {
   const [historyWorkerPage, setHistoryWorkerPage] = useState(1);
   const [memoSearch, setMemoSearch] = useState("");
   const [memoUserId, setMemoUserId] = useState(ALL_USERS);
+  const [memoPeriodId, setMemoPeriodId] = useState(ALL_PERIODS);
   const [memoStatus, setMemoStatus] = useState("todos");
   const [memoPage, setMemoPage] = useState(1);
   const [memoRefresh, setMemoRefresh] = useState(0);
@@ -256,6 +266,19 @@ export default function LlegadasPage() {
 
   useEffect(() => {
     let active = true;
+    getPeriodos()
+      .then((loadedPeriods) => {
+        if (!active) return;
+        const orderedPeriods = [...loadedPeriods].sort((a, b) => b.fechaInicio.localeCompare(a.fechaInicio));
+        setPeriods(orderedPeriods);
+        setMemoPeriodId((current) => current === ALL_PERIODS && orderedPeriods[0] ? orderedPeriods[0].id : current);
+      })
+      .catch((err) => { if (active) setError(err instanceof Error ? err.message : "No se pudieron cargar los cortes de liquidación."); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
     const timeout = window.setTimeout(() => { if (active) void loadDay(selectedDate); }, 0);
     return () => { active = false; window.clearTimeout(timeout); };
   }, [loadDay, selectedDate]);
@@ -300,6 +323,7 @@ export default function LlegadasPage() {
     try {
       const result: AttendanceMemosResponse = await getAttendanceMemos({
         usuarioId: memoUserId === ALL_USERS ? undefined : memoUserId,
+        periodoId: memoPeriodId === ALL_PERIODS || memoPeriodId === NO_PERIOD ? (memoPeriodId === NO_PERIOD ? NO_PERIOD : undefined) : memoPeriodId,
         search: memoSearchDebounced.trim() || undefined,
         estado: memoStatus,
         page: memoPage,
@@ -312,7 +336,7 @@ export default function LlegadasPage() {
     } finally {
       setMemosLoading(false);
     }
-  }, [memoPage, memoSearchDebounced, memoStatus, memoUserId]);
+  }, [memoPage, memoPeriodId, memoSearchDebounced, memoStatus, memoUserId]);
 
   useEffect(() => {
     if (activeTab !== "memorandos") return;
@@ -336,6 +360,7 @@ export default function LlegadasPage() {
 
   const defaultCompany = settings || EMPTY_COMPANY_SETTINGS;
   const summary: AttendanceDaySummary = day?.summary || { fecha: selectedDate, total: 0, reportados: 0, aTiempo: 0, tardanzas: 0, reposiciones: 0, noReportados: 0, minutosAdeudados: 0, descuentoTotal: 0 };
+  const selectedMemoPeriod = periods.find((period) => period.id === memoPeriodId);
 
   const openEdit = (row: AttendanceRow) => {
     setSelectedRecord(null);
@@ -627,14 +652,16 @@ export default function LlegadasPage() {
 
           <TabsContent value="memorandos" className="space-y-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-              <div><h3 className="font-semibold">Memorandos</h3><p className="text-sm text-muted-foreground">Consulta, descarga y controla la firma de cada documento.</p></div>
+              <div><h3 className="font-semibold">Memorandos por corte</h3><p className="text-sm text-muted-foreground">Navega cada corte de liquidación sin mezclar documentos de periodos distintos.</p></div>
               <Badge variant="outline">{memoTotal} documentos</Badge>
             </div>
-            <div className="grid gap-3 rounded-xl border border-border/50 bg-card/60 p-3 sm:grid-cols-3">
+            <div className="grid gap-3 rounded-xl border border-border/50 bg-card/60 p-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div><Label>Corte de liquidación</Label><Select value={memoPeriodId} onValueChange={(value) => { setMemoPeriodId(value); setMemoPage(1); }}><SelectTrigger className="mt-1 w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value={ALL_PERIODS}>Todos los cortes</SelectItem>{periods.map((period) => <SelectItem key={period.id} value={period.id}>{periodLabel(period)}</SelectItem>)}<SelectItem value={NO_PERIOD}>Sin corte asociado</SelectItem></SelectContent></Select></div>
               <WorkerPicker label="Filtrar trabajador" users={eligibleUsers} value={memoUserId} onChange={(value) => { setMemoUserId(value); setMemoPage(1); }} clearValue={ALL_USERS} />
               <SearchField label="Buscar memorando" value={memoSearch} onChange={(value) => { setMemoSearch(value); setMemoPage(1); }} placeholder="Nombre, número o motivo..." />
               <div><Label>Estado</Label><Select value={memoStatus} onValueChange={(value) => { setMemoStatus(value); setMemoPage(1); }}><SelectTrigger className="mt-1 w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="todos">Todos excepto eliminados</SelectItem><SelectItem value="generado">Generado</SelectItem><SelectItem value="firmado">Firmado</SelectItem><SelectItem value="anulado">Anulado</SelectItem><SelectItem value="eliminados">Eliminados</SelectItem></SelectContent></Select></div>
             </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gold/20 bg-gold/5 px-3 py-2 text-sm"><div><span className="font-medium text-gold">Vista activa:</span> {memoPeriodId === NO_PERIOD ? "Memorandos sin corte asociado" : periodLabel(selectedMemoPeriod)}</div><span className="text-xs text-muted-foreground">Los resultados y la paginación corresponden únicamente a esta vista.</span></div>
             <MemoList memos={memos} loading={memosLoading} total={memoTotal} page={memoPage} onPageChange={setMemoPage} onDownload={downloadMemo} onEdit={openMemoEdit} onUpdate={runMemoAction} />
           </TabsContent>
 
