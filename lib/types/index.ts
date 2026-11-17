@@ -396,6 +396,8 @@ export interface ActivityReport {
   porcentajeParticipacion?: number;
   fecha: string;
   clienteId?: string;
+  clienteNombre?: string;
+  sedeNombre?: string;
   descripcion: string;
   actividadesRealizadas?: string;
   especificacion?: string;

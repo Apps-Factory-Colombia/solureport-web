@@ -827,7 +827,7 @@ export function generateComprobantePDF(data: {
   periodo: string;
   tecnico: string;
   cedula: string;
-  items: { actividad: string; fecha: string; valorBase: number; porcentaje: number; valorLiquidado: number }[];
+  items: { actividad: string; detalle?: string; fecha: string; valorBase: number; porcentaje: number; valorLiquidado: number }[];
   desplazamientos?: { descripcion: string; fecha: string; valor: number; descuento?: number }[];
   totalAuxilio: number;
   // Descuento total por tardanza (auxilio + rodamiento), en una sola línea.
@@ -914,9 +914,9 @@ export function generateComprobantePDF(data: {
   addSectionTitle("1. CONCEPTO: AUXILIO EXTRALEGAL POR PRODUCTIVIDAD Y RESPALDO DIGITAL (CLÁUSULA TERCERA - ART. 128 C.S.T.)");
   autoTable(doc, {
     startY: y,
-    head: [["Actividad (Registro de Respaldo Digital en App)", "Fecha", "Valor Base", "%", "Valor Liquidado"]],
+    head: [["Actividad / detalle reportado", "Fecha", "Valor Base", "%", "Valor Liquidado"]],
     body: data.items.map((item) => [
-      item.actividad,
+      item.detalle ? `${item.actividad}\n${item.detalle}` : item.actividad,
       item.fecha,
       formatCurrencyPDF(item.valorBase),
       `${item.porcentaje}%`,

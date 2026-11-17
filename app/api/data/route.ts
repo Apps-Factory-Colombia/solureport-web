@@ -837,6 +837,13 @@ function mapReport(row: any, participant: any, index: number): any {
   const approvals = jsonArray(row.aprobaciones);
   const approval = approvals.find((item) => item.participanteId === participant?.id)
     || (participant?.id ? approvals.find((item) => !item.participanteId) : approvals[0]);
+  const hasSubmittedMaintenanceDelivery = Boolean(
+    isMaintenance
+      && participant?.id
+      && participantDelivery
+      && (participantDelivery.estado === "aprobada"
+        || (participantDelivery.estado === "enviada" && participantDelivery.enviadoEn)),
+  );
   const participantBase = number(participant?.valorBase, number(row.valor_base));
   const participantPercentage = number(participant?.porcentaje, 100);
   const canonicalAppliedAmount = roundCurrency(number(row.valor_aplicado) * participantPercentage / 100);
@@ -852,17 +859,24 @@ function mapReport(row: any, participant: any, index: number): any {
     0,
     normalizedParticipantAmount - calculateLiquidationAmount(normalizedParticipantAmount, liquidationDiscountPercentage),
   );
+  const eligibleMaintenanceApproval = !isMaintenance || hasSubmittedMaintenanceDelivery;
+  const promotePendingMaintenance = Boolean(
+    !row.liquidacion_congelada
+      && liquidation?.estado === "pendiente"
+      && approval?.estado === "aprobada"
+      && eligibleMaintenanceApproval,
+  );
   const effectiveLiquidation = liquidation
     ? {
         ...liquidation,
+        ...(promotePendingMaintenance ? { estado: "aprobado" } : {}),
         porcentaje: participantPercentage,
         valorBase: participantBase,
         valorGanado: row.liquidacion_congelada ? number(liquidation.valorGanado) : normalizedLiquidationNet,
         valorGanadoOriginal: row.liquidacion_congelada ? number(liquidation.valorGanadoOriginal) : normalizedParticipantAmount,
       }
-    : (!row.liquidacion_congelada && approval?.estado === "aprobada"
+    : (!row.liquidacion_congelada && approval?.estado === "aprobada" && eligibleMaintenanceApproval
       // En un mantenimiento, la aprobación solo hace pagable a quien envió su entrega.
-      && (!isMaintenance || !participant || ["enviada", "aprobada"].includes(String(participant.estadoReporte)))
     ? {
         id: `fallback:${row.id}:${participant?.id || "activity"}:${row.periodo_id || "period"}`,
         estado: "aprobado",
@@ -1403,10 +1417,20 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
             OR EXISTS (
               SELECT 1 FROM public.actividades_operativas_aprobaciones ap
                WHERE ap.actividad_id = a.id AND ap.participante_id = p.id AND ap.estado = 'aprobada'
+                 AND (a.tipo <> 'mantenimiento' OR EXISTS (
+                   SELECT 1 FROM public.actividades_operativas_entregas d
+                    WHERE d.actividad_id = a.id AND d.participante_id = p.id
+                      AND (d.estado = 'aprobada' OR (d.estado = 'enviada' AND d.enviado_en IS NOT NULL))
+                 ))
             )
             OR (a.tipo = 'mantenimiento' AND EXISTS (
               SELECT 1 FROM public.actividades_operativas_aprobaciones ap
                WHERE ap.actividad_id = a.id AND ap.participante_id IS NULL AND ap.estado = 'aprobada'
+                 AND EXISTS (
+                   SELECT 1 FROM public.actividades_operativas_entregas d
+                    WHERE d.actividad_id = a.id AND d.participante_id = p.id
+                      AND (d.estado = 'aprobada' OR (d.estado = 'enviada' AND d.enviado_en IS NOT NULL))
+                 )
             )) THEN 'aprobado'
           ELSE 'pendiente'
         END AS estado_liquidacion,
@@ -1687,10 +1711,20 @@ async function freezeLiquidationPeriod(periodId: string) {
               OR EXISTS (
                 SELECT 1 FROM public.actividades_operativas_aprobaciones ap
                  WHERE ap.actividad_id = a.id AND ap.participante_id = p.id AND ap.estado = 'aprobada'
+                   AND (a.tipo <> 'mantenimiento' OR EXISTS (
+                     SELECT 1 FROM public.actividades_operativas_entregas d
+                      WHERE d.actividad_id = a.id AND d.participante_id = p.id
+                        AND (d.estado = 'aprobada' OR (d.estado = 'enviada' AND d.enviado_en IS NOT NULL))
+                   ))
               )
               OR (a.tipo = 'mantenimiento' AND EXISTS (
                 SELECT 1 FROM public.actividades_operativas_aprobaciones ap
                  WHERE ap.actividad_id = a.id AND ap.participante_id IS NULL AND ap.estado = 'aprobada'
+                   AND EXISTS (
+                     SELECT 1 FROM public.actividades_operativas_entregas d
+                      WHERE d.actividad_id = a.id AND d.participante_id = p.id
+                        AND (d.estado = 'aprobada' OR (d.estado = 'enviada' AND d.enviado_en IS NOT NULL))
+                   )
               )) THEN 'aprobado'
             ELSE 'pendiente'
           END,

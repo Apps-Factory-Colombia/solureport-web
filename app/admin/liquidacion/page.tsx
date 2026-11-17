@@ -1167,13 +1167,27 @@ export default function LiquidacionPage() {
         periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} al ${selectedPeriod.fechaFin}` : "",
         tecnico: `${tech.nombre} ${tech.apellido}`,
         cedula: employeeDocument,
-        items: pdfAuxilioReports.map((report) => ({
-          actividad: report.descripcion || getTipoLabel(report.tipo),
-          fecha: report.fecha,
-          valorBase: getReportLiquidationBaseValue(report),
-          porcentaje: getReportLiquidationPercentage(report),
-          valorLiquidado: getReportLiquidationGrossValue(report),
-        })),
+        items: pdfAuxilioReports.map((report) => {
+          const maintenance = report.tipo === "mantenimiento_preventivo";
+          const site = report.sedeNombre || report.clienteNombre;
+          const detail = maintenance
+            ? [
+                report.actividadesRealizadas?.trim() ? `Trabajo realizado: ${report.actividadesRealizadas.trim()}` : "",
+                report.observaciones?.trim() ? `Observaciones: ${report.observaciones.trim()}` : "",
+              ].filter(Boolean).join("\n")
+            : undefined;
+
+          return {
+            actividad: maintenance
+              ? [report.descripcion || getTipoLabel(report.tipo), site].filter(Boolean).join(" · ")
+              : report.descripcion || getTipoLabel(report.tipo),
+            detalle: detail,
+            fecha: report.fecha,
+            valorBase: getReportLiquidationBaseValue(report),
+            porcentaje: getReportLiquidationPercentage(report),
+            valorLiquidado: getReportLiquidationGrossValue(report),
+          };
+        }),
         desplazamientos: pdfRouteBonusReports.map((report) => ({
           descripcion: getRouteBonusDescription(report),
           fecha: report.fecha,
