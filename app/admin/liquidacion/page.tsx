@@ -59,6 +59,7 @@ import { getUsuarios, updateUsuario } from "@/lib/data/services/usuarios";
 import { getGrupos } from "@/lib/data/services/grupos";
 import { deleteReporteActividadAdmin, getReportesActividad } from "@/lib/data/services/reportes-actividad";
 import { getLlegadas } from "@/lib/data/services/llegadas";
+import { clearDataRequestCache } from "@/lib/data/client";
 import { cn } from "@/lib/utils";
 import { formatReceiptName, generateTablePDF, generateComprobantePDF } from "@/lib/utils/pdf-generator";
 import {
@@ -422,6 +423,7 @@ export default function LiquidacionPage() {
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
   const [exportingComprobante, setExportingComprobante] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
   const [comprobanteCedulaDraft, setComprobanteCedulaDraft] = useState("");
   const [savingComprobanteCedula, setSavingComprobanteCedula] = useState(false);
   const [comprobanteCedulaError, setComprobanteCedulaError] = useState<string | null>(null);
@@ -594,6 +596,10 @@ export default function LiquidacionPage() {
 
   useEffect(() => {
     const onFocus = () => {
+      clearDataRequestCache();
+      void getUsuarios().then(setUsers).catch((error) => {
+        console.error("Error actualizando usuarios al volver a liquidación:", error);
+      });
       void loadPeriodReports(selectedPeriodId);
       void loadCanonicalSummary(selectedPeriodId);
     };
@@ -1225,24 +1231,43 @@ export default function LiquidacionPage() {
     }
   };
 
-  const handleDownloadComprobantesExcel = () => {
-    if (!selectedPeriod || !canonicalSummary) return;
+  const handleDownloadComprobantesExcel = async () => {
+    const period = periods.find((candidate) => candidate.id === selectedPeriodId);
+    if (!period || exportingExcel) return;
 
-    const summaryByTechnician = new Map(canonicalSummary.technicians.map((row) => [row.tecnicoId, row]));
-    // El total neto no cambia: las visitas solo se mueven de auxilio a bono.
-    const visitNetByTechnician = liquidablePeriodReports.reduce<Map<string, number>>((acc, report) => {
-      if (report.tipo !== "visita_tecnica") return acc;
-      acc.set(report.tecnicoId, (acc.get(report.tecnicoId) || 0) + getReportLiquidationEarnedValue(report));
-      return acc;
-    }, new Map());
-    const summaryRows = users
-      .filter((user) => user.estado === "activo" && user.rol !== "admin")
-      .map((user) => {
-        const summary = summaryByTechnician.get(user.id);
-        const visitNet = visitNetByTechnician.get(user.id) || 0;
+    setExportingExcel(true);
+    try {
+      // Refresh the sources together at export time. This page may stay open
+      // while reports or employee records are changed elsewhere in the app.
+      clearDataRequestCache();
+      const [freshUsers, freshReports, freshSummary] = await Promise.all([
+        getUsuarios(),
+        getReportesActividad({ periodoId: period.id }),
+        getCanonicalLiquidationSummary(period.id),
+      ]);
+      const periodReports = freshReports.filter((report) => report.periodoId === period.id);
+      const payableReports = periodReports.filter(isApprovedLiquidationReport);
+      const summaryByTechnician = new Map(freshSummary.technicians.map((row) => [row.tecnicoId, row]));
+      const usersById = new Map(freshUsers.map((user) => [user.id, user]));
+      const visitNetByTechnician = payableReports.reduce<Map<string, number>>((acc, report) => {
+        if (report.tipo !== "visita_tecnica") return acc;
+        acc.set(report.tecnicoId, (acc.get(report.tecnicoId) || 0) + getReportLiquidationEarnedValue(report));
+        return acc;
+      }, new Map());
+
+      // Include active staff and anyone with a canonical payable row. The
+      // latter keeps payments visible if their account was deactivated later.
+      const technicianIds = new Set([
+        ...freshUsers.filter((user) => user.estado === "activo" && user.rol !== "admin").map((user) => user.id),
+        ...freshSummary.technicians.filter((row) => row.rol !== "admin").map((row) => row.tecnicoId),
+      ]);
+      const summaryRows = [...technicianIds].map((technicianId) => {
+        const summary = summaryByTechnician.get(technicianId);
+        const user = usersById.get(technicianId);
+        const visitNet = visitNetByTechnician.get(technicianId) || 0;
         return {
-          Nombre: `${user.nombre || ""} ${user.apellido || ""}`.trim(),
-          Cédula: user.cedula?.trim() || summary?.cedula || "",
+          Nombre: summary?.nombre || `${user?.nombre || ""} ${user?.apellido || ""}`.trim(),
+          Cédula: summary?.cedula?.trim() || user?.cedula?.trim() || "",
           "Auxilio extralegal": Number(summary?.totalNoRecorridosAprobados || 0) - visitNet,
           "Descuento por tardanza": Number(summary?.descuentoValor || 0),
           "Bono por recorrido y visitas": Number(summary?.totalRecorridos || 0) + visitNet,
@@ -1264,32 +1289,32 @@ export default function LiquidacionPage() {
       neto: total.neto + Number(row["Total neto"] || 0),
     }), { auxilio: 0, descuento: 0, recorrido: 0, extra: 0, neto: 0 });
 
-    const detailHeaders = ["Nombre", "Cédula", "Tipo", "Código", "Fecha", "Auxilio extralegal", "Descuento por tardanza", "Bono por recorrido y visitas", "Estado"];
-    const detailRows = Array.from(summaryByTechnician.keys()).flatMap((technicianId) => {
-      const user = users.find((candidate) => candidate.id === technicianId);
-      const technicianReports = liquidablePeriodReports.filter((report) => report.tecnicoId === technicianId);
-      const summary = summaryByTechnician.get(technicianId);
-      const discountByReport = getAttendanceDiscountByReport(technicianReports);
-      return technicianReports.map((report) => {
-        const gross = getReportLiquidationGrossValue(report);
-        const discount = discountByReport.get(report.id) || 0;
-        const route = isRouteBonusReport(report);
-        return [
-          `${user?.nombre || ""} ${user?.apellido || ""}`.trim(),
-          user?.cedula?.trim() || summary?.cedula || "",
-          getTipoLabel(report.tipo),
-          report.codigoRegistro || "",
-          report.fecha,
-          route ? 0 : gross,
-          report.tipo === "recorrido" ? 0 : discount,
-          route ? gross : 0,
-          getEstadoLabel(report.estadoAprobacionLider),
-        ];
+      const detailHeaders = ["Nombre", "Cédula", "Tipo", "Código", "Fecha", "Auxilio extralegal", "Descuento por tardanza", "Bono por recorrido y visitas", "Estado"];
+      const detailRows = [...summaryByTechnician.keys()].flatMap((technicianId) => {
+        const user = usersById.get(technicianId);
+        const summary = summaryByTechnician.get(technicianId);
+        const technicianReports = payableReports.filter((report) => report.tecnicoId === technicianId);
+        const discountByReport = getAttendanceDiscountByReport(technicianReports);
+        return technicianReports.map((report) => {
+          const gross = getReportLiquidationGrossValue(report);
+          const discount = discountByReport.get(report.id) || 0;
+          const route = isRouteBonusReport(report);
+          return [
+            summary?.nombre || `${user?.nombre || ""} ${user?.apellido || ""}`.trim(),
+            summary?.cedula?.trim() || user?.cedula?.trim() || "",
+            getTipoLabel(report.tipo),
+            report.codigoRegistro || "",
+            report.fecha,
+            route ? 0 : gross,
+            report.tipo === "recorrido" ? 0 : discount,
+            route ? gross : 0,
+            getEstadoLabel(report.estadoAprobacionLider),
+          ];
+        });
       });
-    });
 
     const workbook = XLSX.utils.book_new();
-    const title = `COMPROBANTES DE LIQUIDACIÓN · ${selectedPeriod.fechaInicio} al ${selectedPeriod.fechaFin}`;
+    const title = `COMPROBANTES DE LIQUIDACIÓN · ${period.fechaInicio} al ${period.fechaFin}`;
     const summaryWorksheet = XLSX.utils.aoa_to_sheet([
       [title],
       ["SOLUCIONES & AUTOMATIZACIONES S.A.S."],
@@ -1315,7 +1340,7 @@ export default function LiquidacionPage() {
     XLSX.utils.book_append_sheet(workbook, summaryWorksheet, "Comprobantes");
 
     const detailWorksheet = XLSX.utils.aoa_to_sheet([
-      [`DETALLE DE ACTIVIDADES · ${selectedPeriod.fechaInicio} al ${selectedPeriod.fechaFin}`],
+      [`DETALLE DE ACTIVIDADES · ${period.fechaInicio} al ${period.fechaFin}`],
       detailHeaders,
       ...detailRows,
     ]);
@@ -1330,7 +1355,22 @@ export default function LiquidacionPage() {
     });
     XLSX.utils.book_append_sheet(workbook, detailWorksheet, "Detalle");
 
-    XLSX.writeFile(workbook, `comprobantes_liquidacion_${selectedPeriod.fechaInicio}_${selectedPeriod.fechaFin}.xlsx`);
+    const exportedTotal = summaryTotal.neto;
+    const canonicalTotal = Number(freshSummary.totals.total || 0);
+    if (Math.abs(exportedTotal - canonicalTotal) > 1) {
+      throw new Error(`La suma exportada (${exportedTotal}) no coincide con el total canónico (${canonicalTotal}).`);
+    }
+
+    setUsers(freshUsers);
+    setActReports(freshReports);
+    setCanonicalSummary(freshSummary);
+    XLSX.writeFile(workbook, `comprobantes_liquidacion_${period.fechaInicio}_${period.fechaFin}.xlsx`);
+    } catch (error) {
+      console.error("Error generando comprobantes con datos actualizados:", error);
+      alert("No se pudo generar el Excel porque los datos del corte no están actualizados o no concilian. Vuelve a intentarlo.");
+    } finally {
+      setExportingExcel(false);
+    }
   };
 
   const handleOpenComprobante = (techId: string) => {
@@ -1412,11 +1452,11 @@ export default function LiquidacionPage() {
             <Button
               variant="outline"
               className="gap-2 border-cyan-neon/40 text-cyan-neon"
-              disabled={!hasSelectedPeriod || !canonicalSummary}
+              disabled={!hasSelectedPeriod || !canonicalSummary || exportingExcel}
               onClick={handleDownloadComprobantesExcel}
             >
-              <Download className="h-4 w-4" />
-              Descargar Excel de comprobantes
+              {exportingExcel ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              {exportingExcel ? "Actualizando liquidación..." : "Descargar Excel de comprobantes"}
             </Button>
             <Button
               variant="outline"
