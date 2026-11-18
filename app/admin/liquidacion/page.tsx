@@ -1102,9 +1102,13 @@ export default function LiquidacionPage() {
     const tech = usersById.get(report.tecnicoId);
     const techFullName = normalizeSearchValue(tech ? `${tech.nombre} ${tech.apellido}` : "");
     const matchTechnician = !normalizedComprobanteSearch || techFullName.includes(normalizedComprobanteSearch);
-    const matchGroup = comprobanteGroupId === "todos" || report.grupoId === comprobanteGroupId;
-    return matchTechnician && matchGroup;
+    return matchTechnician;
   });
+
+  // El grupo del selector limita qué técnicos se muestran, no qué actividades
+  // se pagan. Un técnico puede participar en actividades registradas por otro grupo.
+  const getComprobanteReportsForTechnician = (technicianId: string) =>
+    liquidablePeriodReports.filter((report) => report.tecnicoId === technicianId);
 
   const filteredComprobanteUsers = liquidationUsers.filter((user) => {
     const techFullName = normalizeSearchValue(`${user.nombre} ${user.apellido}`);
@@ -1179,9 +1183,7 @@ export default function LiquidacionPage() {
 
     try {
       // Keep generation synchronous with the click so jsPDF.save retains browser user activation.
-      const pdfReports = liquidablePeriodReports.filter(
-        (r) => r.tecnicoId === selectedTechId && (comprobanteGroupId === "todos" || r.grupoId === comprobanteGroupId)
-      );
+      const pdfReports = getComprobanteReportsForTechnician(selectedTechId);
       const pdfAuxilioReports = pdfReports.filter((r) => !isRouteBonusReport(r));
       const pdfRouteBonusReports = pdfReports.filter(isRouteBonusReport);
       const pdfDiscountByReport = getAttendanceDiscountByReport(pdfReports);
@@ -2101,6 +2103,9 @@ export default function LiquidacionPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                  <p className="w-full text-xs text-muted-foreground">
+                    El grupo solo filtra los técnicos mostrados; cada comprobante conserva todas las actividades del período.
+                  </p>
                 </CardContent>
               </Card>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -2346,9 +2351,7 @@ export default function LiquidacionPage() {
             const techData = filteredComprobanteSummary.get(selectedTechId) || techSummary.get(selectedTechId);
             if (!tech || !techData) return null;
 
-            const techReportsForComprobante = liquidablePeriodReports.filter(
-              (r) => r.tecnicoId === selectedTechId && (comprobanteGroupId === "todos" || r.grupoId === comprobanteGroupId)
-            );
+            const techReportsForComprobante = getComprobanteReportsForTechnician(selectedTechId);
             const auxilioReports = techReportsForComprobante.filter((r) => !isRouteBonusReport(r));
             const routeBonusReports = techReportsForComprobante.filter(isRouteBonusReport);
             const discountByReport = getAttendanceDiscountByReport(techReportsForComprobante);
