@@ -107,15 +107,44 @@ function isRouteBonusReport(report: ActivityReport) {
   return report.tipo === "recorrido" || report.tipo === "visita_tecnica";
 }
 
+function receiptSiteName(report: ActivityReport) {
+  return (report.sedeNombre || "")
+    .trim()
+    .replace(/^edificio\s+/i, "")
+    .trim();
+}
+
+function receiptConcept(report: ActivityReport) {
+  if (report.tipo === "visita_tecnica") return "Visita técnica";
+  if (report.tipo === "recorrido") {
+    return report.tipoRecorrido === "con_herramienta" ? "Recorrido con herramienta" : "Recorrido";
+  }
+
+  const description = (report.descripcion || getTipoLabel(report.tipo)).split(/\r?\n/, 1)[0].trim();
+  const site = receiptSiteName(report);
+  if (!site || !description) return description || getTipoLabel(report.tipo);
+
+  const escapedSite = site.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sitePrefix = new RegExp(`^\\s*(?:EDIFICIO\\s+)?${escapedSite}\\s*[-–:]\\s*`, "i");
+  return description.replace(sitePrefix, "").trim() || getTipoLabel(report.tipo);
+}
+
+function getReceiptActivityDescription(report: ActivityReport) {
+  const site = receiptSiteName(report);
+  const concept = receiptConcept(report);
+  return site ? `EDIFICIO ${site.toLocaleUpperCase("es-CO")} - ${concept}` : concept;
+}
+
 function getRouteBonusDescription(report: ActivityReport) {
   if (report.tipo === "visita_tecnica") {
-    return `Recorrido vista técnica: ${report.descripcion || "Visita técnica"}`;
+    return getReceiptActivityDescription(report);
   }
 
   const route = [report.puntoPartida, report.puntoLlegada].filter(Boolean).join(" - ");
-  const label = report.tipoRecorrido === "con_herramienta" ? "Recorrido con herramienta:" : "Recorrido normal:";
-  const detail = route || report.descripcion || "Recorrido";
-  return `${label} ${detail}`;
+  const label = report.tipoRecorrido === "con_herramienta" ? "Recorrido con herramienta" : "Recorrido";
+  const site = receiptSiteName(report);
+  const description = route ? `${label}: ${route}` : label;
+  return site ? `EDIFICIO ${site.toLocaleUpperCase("es-CO")} - ${description}` : description;
 }
 
 // Cada reporte descuenta su propio bruto. El total del comprobante sale de sumar
@@ -1167,27 +1196,13 @@ export default function LiquidacionPage() {
         periodo: selectedPeriod ? `${selectedPeriod.fechaInicio} al ${selectedPeriod.fechaFin}` : "",
         tecnico: `${tech.nombre} ${tech.apellido}`,
         cedula: employeeDocument,
-        items: pdfAuxilioReports.map((report) => {
-          const maintenance = report.tipo === "mantenimiento_preventivo";
-          const site = report.sedeNombre || report.clienteNombre;
-          const detail = maintenance
-            ? [
-                report.actividadesRealizadas?.trim() ? `Trabajo realizado: ${report.actividadesRealizadas.trim()}` : "",
-                report.observaciones?.trim() ? `Observaciones: ${report.observaciones.trim()}` : "",
-              ].filter(Boolean).join("\n")
-            : undefined;
-
-          return {
-            actividad: maintenance
-              ? [report.descripcion || getTipoLabel(report.tipo), site].filter(Boolean).join(" · ")
-              : report.descripcion || getTipoLabel(report.tipo),
-            detalle: detail,
-            fecha: report.fecha,
-            valorBase: getReportLiquidationBaseValue(report),
-            porcentaje: getReportLiquidationPercentage(report),
-            valorLiquidado: getReportLiquidationGrossValue(report),
-          };
-        }),
+        items: pdfAuxilioReports.map((report) => ({
+          actividad: getReceiptActivityDescription(report),
+          fecha: report.fecha,
+          valorBase: getReportLiquidationBaseValue(report),
+          porcentaje: getReportLiquidationPercentage(report),
+          valorLiquidado: getReportLiquidationGrossValue(report),
+        })),
         desplazamientos: pdfRouteBonusReports.map((report) => ({
           descripcion: getRouteBonusDescription(report),
           fecha: report.fecha,

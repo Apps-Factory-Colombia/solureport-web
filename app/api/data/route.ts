@@ -599,18 +599,16 @@ async function activityRows(payload: Payload = {}) {
   let selectedPeriodParam: number | null = null;
   const filters: string[] = [
     // During the legacy migration, scheduled maintenance rows were copied to
-    // actividades_operativas so the old screens could still find them. They
-    // are planning records, not technical reports, and must never appear in
-    // approvals, reports or financial exports as completed work.
-    // Solo se ocultan planes sin ninguna entrega enviada. Si un técnico ya envió
-    // su reporte, la actividad migrada es un reporte real y debe aparecer.
+    // actividades_operativas. Keep unassigned plans hidden; once participants
+    // are recorded, include them even without an individual delivery. Payment
+    // still depends on an approval for the activity or participant.
     `NOT (
       a.tipo = 'mantenimiento'
       AND COALESCE(a.metadata->>'migrated_from', '') = 'mantenimientos'
       AND COALESCE(a.metadata->>'legacy_estado', '') IN ('programado', 'pendiente')
       AND NOT EXISTS (
-        SELECT 1 FROM public.actividades_operativas_entregas de
-         WHERE de.actividad_id = a.id AND de.enviado_en IS NOT NULL
+        SELECT 1 FROM public.actividades_operativas_participantes mp
+         WHERE mp.actividad_id = a.id
       )
     )`,
   ];
@@ -837,13 +835,6 @@ function mapReport(row: any, participant: any, index: number): any {
   const approvals = jsonArray(row.aprobaciones);
   const approval = approvals.find((item) => item.participanteId === participant?.id)
     || (participant?.id ? approvals.find((item) => !item.participanteId) : approvals[0]);
-  const hasSubmittedMaintenanceDelivery = Boolean(
-    isMaintenance
-      && participant?.id
-      && participantDelivery
-      && (participantDelivery.estado === "aprobada"
-        || (participantDelivery.estado === "enviada" && participantDelivery.enviadoEn)),
-  );
   const participantBase = number(participant?.valorBase, number(row.valor_base));
   const participantPercentage = number(participant?.porcentaje, 100);
   const canonicalAppliedAmount = roundCurrency(number(row.valor_aplicado) * participantPercentage / 100);
@@ -859,24 +850,23 @@ function mapReport(row: any, participant: any, index: number): any {
     0,
     normalizedParticipantAmount - calculateLiquidationAmount(normalizedParticipantAmount, liquidationDiscountPercentage),
   );
-  const eligibleMaintenanceApproval = !isMaintenance || hasSubmittedMaintenanceDelivery;
-  const promotePendingMaintenance = Boolean(
+  const promotePendingParticipant = Boolean(
     !row.liquidacion_congelada
+      && participant?.id
       && liquidation?.estado === "pendiente"
       && approval?.estado === "aprobada"
-      && eligibleMaintenanceApproval,
   );
   const effectiveLiquidation = liquidation
     ? {
         ...liquidation,
-        ...(promotePendingMaintenance ? { estado: "aprobado" } : {}),
+        ...(promotePendingParticipant ? { estado: "aprobado" } : {}),
         porcentaje: participantPercentage,
         valorBase: participantBase,
         valorGanado: row.liquidacion_congelada ? number(liquidation.valorGanado) : normalizedLiquidationNet,
         valorGanadoOriginal: row.liquidacion_congelada ? number(liquidation.valorGanadoOriginal) : normalizedParticipantAmount,
       }
-    : (!row.liquidacion_congelada && approval?.estado === "aprobada" && eligibleMaintenanceApproval
-      // En un mantenimiento, la aprobación solo hace pagable a quien envió su entrega.
+    : (!row.liquidacion_congelada && participant?.id && approval?.estado === "aprobada"
+      // Cada participante comparte la aprobación del reporte grupal, aunque no envíe otra entrega.
     ? {
         id: `fallback:${row.id}:${participant?.id || "activity"}:${row.periodo_id || "period"}`,
         estado: "aprobado",
@@ -1417,21 +1407,11 @@ async function getLiveLiquidationRows(periodId: string, technicianIds?: string[]
             OR EXISTS (
               SELECT 1 FROM public.actividades_operativas_aprobaciones ap
                WHERE ap.actividad_id = a.id AND ap.participante_id = p.id AND ap.estado = 'aprobada'
-                 AND (a.tipo <> 'mantenimiento' OR EXISTS (
-                   SELECT 1 FROM public.actividades_operativas_entregas d
-                    WHERE d.actividad_id = a.id AND d.participante_id = p.id
-                      AND (d.estado = 'aprobada' OR (d.estado = 'enviada' AND d.enviado_en IS NOT NULL))
-                 ))
             )
-            OR (a.tipo = 'mantenimiento' AND EXISTS (
+            OR EXISTS (
               SELECT 1 FROM public.actividades_operativas_aprobaciones ap
                WHERE ap.actividad_id = a.id AND ap.participante_id IS NULL AND ap.estado = 'aprobada'
-                 AND EXISTS (
-                   SELECT 1 FROM public.actividades_operativas_entregas d
-                    WHERE d.actividad_id = a.id AND d.participante_id = p.id
-                      AND (d.estado = 'aprobada' OR (d.estado = 'enviada' AND d.enviado_en IS NOT NULL))
-                 )
-            )) THEN 'aprobado'
+            ) THEN 'aprobado'
           ELSE 'pendiente'
         END AS estado_liquidacion,
         ${carryExpression} AS es_arrastre,
@@ -1711,21 +1691,11 @@ async function freezeLiquidationPeriod(periodId: string) {
               OR EXISTS (
                 SELECT 1 FROM public.actividades_operativas_aprobaciones ap
                  WHERE ap.actividad_id = a.id AND ap.participante_id = p.id AND ap.estado = 'aprobada'
-                   AND (a.tipo <> 'mantenimiento' OR EXISTS (
-                     SELECT 1 FROM public.actividades_operativas_entregas d
-                      WHERE d.actividad_id = a.id AND d.participante_id = p.id
-                        AND (d.estado = 'aprobada' OR (d.estado = 'enviada' AND d.enviado_en IS NOT NULL))
-                   ))
               )
-              OR (a.tipo = 'mantenimiento' AND EXISTS (
+              OR EXISTS (
                 SELECT 1 FROM public.actividades_operativas_aprobaciones ap
                  WHERE ap.actividad_id = a.id AND ap.participante_id IS NULL AND ap.estado = 'aprobada'
-                   AND EXISTS (
-                     SELECT 1 FROM public.actividades_operativas_entregas d
-                      WHERE d.actividad_id = a.id AND d.participante_id = p.id
-                        AND (d.estado = 'aprobada' OR (d.estado = 'enviada' AND d.enviado_en IS NOT NULL))
-                   )
-              )) THEN 'aprobado'
+              ) THEN 'aprobado'
             ELSE 'pendiente'
           END,
           $2, $3, COALESCE(li.es_arrastre, false), clock_timestamp()

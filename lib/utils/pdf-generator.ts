@@ -827,7 +827,7 @@ export function generateComprobantePDF(data: {
   periodo: string;
   tecnico: string;
   cedula: string;
-  items: { actividad: string; detalle?: string; fecha: string; valorBase: number; porcentaje: number; valorLiquidado: number }[];
+  items: { actividad: string; fecha: string; valorBase: number; porcentaje: number; valorLiquidado: number }[];
   desplazamientos?: { descripcion: string; fecha: string; valor: number; descuento?: number }[];
   totalAuxilio: number;
   // Descuento total por tardanza (auxilio + rodamiento), en una sola línea.
@@ -914,9 +914,9 @@ export function generateComprobantePDF(data: {
   addSectionTitle("1. CONCEPTO: AUXILIO EXTRALEGAL POR PRODUCTIVIDAD Y RESPALDO DIGITAL (CLÁUSULA TERCERA - ART. 128 C.S.T.)");
   autoTable(doc, {
     startY: y,
-    head: [["Actividad / detalle reportado", "Fecha", "Valor Base", "%", "Valor Liquidado"]],
+    head: [["Edificio / concepto", "Fecha", "Valor Base", "%", "Valor Liquidado"]],
     body: data.items.map((item) => [
-      item.detalle ? `${item.actividad}\n${item.detalle}` : item.actividad,
+      item.actividad,
       item.fecha,
       formatCurrencyPDF(item.valorBase),
       `${item.porcentaje}%`,
@@ -943,7 +943,7 @@ export function generateComprobantePDF(data: {
   addSectionTitle("2. CONCEPTO: AUXILIO DE RODAMIENTO Y MOVILIZACIÓN OPERATIVA (HERRAMIENTA DE TRABAJO - ART. 128 C.S.T.)");
   autoTable(doc, {
     startY: y,
-    head: [["Subtipo / Descripción", "Fecha", "Valor base", "Descuento", "Valor liquidado"]],
+    head: [["Edificio / concepto", "Fecha", "Valor base", "Descuento", "Valor liquidado"]],
     body: movements.length > 0
       ? movements.map((item) => [
           formatReceiptRouteDescription(item.descripcion),
